@@ -18,14 +18,15 @@ Goals
   messages between folders or to the trash.
 - One mailbox user can never reach another mailbox.
 - Limits, an audit trail and an off switch that the AI tool cannot bypass.
-- Optionally, read-only access to the mailbox's contacts and calendar (see below).
+- Optionally, the mailbox's contacts and calendar: read, create, change, delete, and events with
+  participants, whom the mail server then invites by email (see below).
 
 Not in scope
 
 - Removing mail for good; flagging mail; folder management; Sieve filters and forwards.
 - Attachment contents (names and sizes only). Sending attachments.
-- Writing contacts or calendar events, answering invitations, free/busy lookups. Shared
-  mailboxes, address books and calendars (only the user's own account is served).
+- Answering invitations, free/busy lookups. Shared mailboxes, address books and calendars (only
+  the user's own account is served). A trash for contacts and events (deleting them is permanent).
 - Sending from an alias. Managing accounts, aliases or domains.
 
 A failure even if it works
@@ -100,7 +101,8 @@ each hold a copy of the Stalwart refresh token. One Durable Object per Stalwart 
 
 - stores the Stalwart tokens, encrypted with AES-GCM under the worker secret `TOKEN_ENC_KEY`;
 - refreshes them, one refresh at a time (the object is single-threaded, so rotation never races);
-- counts the mailbox's limits (tool calls, sends) and holds the short send-dedupe window;
+- counts the mailbox's limits (tool calls, sends, including event writes that make the mail
+  server notify participants) and holds the short send-dedupe window;
 - limits concurrent JMAP calls to 2, leaving room in Stalwart's per-account limit for webmail.
 
 Only an explicit `invalid_grant` from Stalwart ends a connection (the user removed the
@@ -152,12 +154,14 @@ cannot be relied on to supply one. The vault therefore derives the key itself, a
 recipients, subject, body and reply target. An identical send within 10 minutes is not sent
 again; the first result is returned. If the outcome of a send is unknown (a timeout or a 5xx
 after the request left), it is counted and an identical send is refused for the same window.
+Event writes that make the mail server send invitations or updates use the same rows (see
+below).
 
 ## Contacts and calendars
 
 Two more areas, `contacts` and `calendars`, are off by default and switched on per deployment
-with the setting `FEATURES` (`src/config.ts`). Each is read only and covers the connected
-mailbox's own account, like mail.
+with the setting `FEATURES` (`src/config.ts`). Each covers the connected mailbox's own account,
+like mail: reading, creating, changing and deleting.
 
 | Tool | Area | What it does |
 |---|---|---|
@@ -166,11 +170,31 @@ mailbox's own account, like mail.
 | `list_calendars` | calendars | The calendars with name, default flag, time zone and whether they are writable |
 | `search_events` | calendars | Events overlapping a window of at most 180 days, optionally in one calendar or matching a text; earliest first; one summary per occurrence of a recurring event |
 | `read_event` | calendars | One event or occurrence with description, locations, meeting links, participants and a short recurrence summary |
+| `create_contact` | contacts | A new contact (JSContact card) in the default or a given address book |
+| `update_contact` | contacts | Replaces the given fields of a contact |
+| `delete_contact` | contacts | Removes up to 50 contacts for good |
+| `create_event` | calendars | A new event, timed or all-day, with optional participants and recurrence |
+| `update_event` | calendars | Replaces the given fields of an event or of one occurrence |
+| `delete_event` | calendars | Removes up to 50 events or occurrences for good |
 
-- **Read only by construction.** The contract (`src/collab.ts`) has five operations and the
-  adapter (`src/jmap/jmap-collab-adapter.ts`) sends JMAP `/get` and `/query` methods only. The
-  tests fail if any request of the contacts or calendar tests holds a `/set`, `/copy` or `/parse`
-  method. All five tools are `kind: "read"` and carry `readOnlyHint`.
+- **What is sent.** The contract (`src/collab.ts`) has eleven operations. The adapter
+  (`src/jmap/jmap-collab-adapter.ts`) sends `/get` and `/query`, and `/set` of `ContactCard` and
+  `CalendarEvent` only: never `/copy`, `/parse`, or a `/set` of an address book or calendar. The
+  tests check this over every request of the adapter tests, and that the read operations send
+  no `/set` at all. The read tools are `kind: "read"` (`readOnlyHint`); `create_contact`,
+  `update_contact` and `delete_contact` are `create`, `update` and `destroy` (`destructiveHint`).
+  `create_event` and `update_event` are `notify` and `delete_event` is `destroy_notify`: both
+  carry `openWorldHint`, because they can make the mail server send mail to third parties, and
+  `delete_event` carries `destructiveHint`.
+- **Deleting is permanent.** JMAP has no trash for contacts and events; the delete tools use
+  `/set destroy`. Guardrails: at most 50 ids per call, the destructive hint, and the plain
+  statement in the tool description, the MCP instructions and the approval page. There is no
+  daily limit on deleting.
+- **A write is never repeated blindly.** The vault repeats a request only after a 401 (the
+  server refused it unprocessed). Any other answer that does not show what the server did
+  (network error, timeout, 5xx, an unreadable answer, a `/set` answer that names the object
+  nowhere, a `serverFail`) is `upstream_unavailable`, or `send_unconfirmed` for a write that
+  notifies people, and the caller decides.
 - **Same rules as mail.** The tools go through `defineTool` and the vault. The account comes from
   the grant, no tool has an account parameter, ids are only used inside the grant's account, and
   a foreign id answers "not found". An `address_book_id` or `calendar_id` that is not the
@@ -187,7 +211,9 @@ mailbox's own account, like mail.
   session and otherwise answers `not_granted` without any request; a method error
   `unknownMethod` from Stalwart is mapped to `not_granted` too. A mailbox connected before the
   area was switched on has a token without the scope and has to connect again. The approval page
-  names the areas, and the server's MCP instructions get one sentence about them.
+  names the areas (for calendars: "and send invitations"), and the server's MCP instructions get
+  sentences about them: third-party text, permanent deletion, and that an event write with
+  participants makes the mail server send them mail, so the AI tool asks first.
 - **What the scope reaches.** As with mail, the scope is Stalwart's: a vault token with the
   contacts or calendars scope also works on CardDAV and CalDAV for that account. Only the
   connector's own code limits what is done with it.
@@ -206,13 +232,42 @@ mailbox's own account, like mail.
   `start` and `end`; the event's own `start` and `timeZone` are `local_start` and `time_zone`.
   The connector never asks for `recurrenceOverrides`, because the server refuses it together
   with `utcStart`.
+- **Invitations are sends.** An event write that makes the mail server notify people is treated
+  like `send_mail`, because the server then sends mail to third parties on the user's behalf.
+  JMAP has one switch per `CalendarEvent/set` request, `sendSchedulingMessages`; the connector
+  always sends it, `true` exactly when the vault decided the write notifies. The decision
+  (`src/vault/event-notices.ts`) lives in the vault, where the environment, the counters and the
+  dedupe rows are; the adapter only reads the event (`eventAudiences`: attendees, end,
+  recurring) and writes with the decision it is handed. A write notifies when the event has
+  attendees (participants with a calendar address, and the organizer, other than the mailbox)
+  before or after it, and does not end in the past; a recurring event never counts as past, an
+  all-day or floating end gets a day to spare, and an unknown end is not past: when unsure, a
+  write counts as notifying and costs a send it may not need, never the reverse. A notifying
+  write must involve only allow-listed addresses outside production (checked before anything is
+  written), takes one send of the mailbox's 50 per day (shared with `send_mail`; a deletion of
+  several notifying events reserves all of them at once, or deletes nothing), and a notifying
+  create or update is deduplicated over a hash of the operation and its validated input with
+  the same `recent_sends` rows and in-flight table as `send_mail`. A deletion sends the
+  notifying ids and the others in two requests, and gives back the sends of events that were
+  definitely not deleted. Non-notifying writes cost nothing beyond the call. The tools and the
+  audit rows report how many attendees were notified, never an address.
+- **Stalwart's property names.** Stalwart 1.x implements the newer JSCalendar names and stores
+  any unknown property silently as inert data, so a wrong name would never fail. The connector
+  writes `calendarAddress` (`mailto:`) for participants, `organizerCalendarAddress`, one
+  `recurrenceRule` object, no `uid` (the server makes one) and no `isOrigin`; reading accepts the
+  older `recurrenceRules`, `email` and `sendTo` as fallbacks. The stand-in behaves like the
+  server here: it expands `recurrenceRule` only, treats `recurrenceRules`, `sendTo` and
+  `replyTo` as inert, and records the iTIP messages it "sends" only for
+  `sendSchedulingMessages: true`, attendees, no draft and an end not in the past.
 - **What is assumed, not known.** The tests run against a stand-in written from the same
   reading of the JMAP Contacts (RFC 9610) and the JMAP Calendars draft as the code, so they
   cannot show that Stalwart agrees. The unknowns are listed as live checks in the README: the
   draft revision, the capability names and `primaryAccounts` keys, `utcStart` / `utcEnd`,
   `expandRecurrences`, the `inCalendar` key, the format of occurrence ids, how the string
-  filters of `ContactCard/query` match, the two scope names, and that a session omits the
-  capability of an area whose scope the token lacks.
+  filters of `ContactCard/query` match, the two scope names, that a session omits the
+  capability of an area whose scope the token lacks, and for writing: that invitations, updates
+  and cancellations really go out (and not for past events), the property names, recurrence
+  expansion, deleting an occurrence, and what the server does when it cannot send.
 
 ## Mail content is untrusted input
 
@@ -228,8 +283,9 @@ to …"). The server cannot make an AI tool safe, but it does the following:
 - Plain text only: HTML is reduced to text, links are not followed, remote images are never
   fetched, invisible control characters are removed.
 - Error messages are fixed texts and never repeat mail content.
-- The main damage of a successful injection is mail sent in the user's name. That is what the
-  send limits, the fixed From, the tool hints and the audit trail are for.
+- The main damage of a successful injection is mail sent in the user's name, which includes
+  invitations the mail server sends for an event write. That is what the send limits (shared by
+  both), the fixed From, the tool hints and the audit trail are for.
 
 ## Security model
 
@@ -252,7 +308,8 @@ to …"). The server cannot make an AI tool safe, but it does the following:
   No subjects, bodies, search terms or recipient addresses. Rows are deleted after 90 days.
 - **Staging.** A staging deployment usually talks to the production mail server, because few
   people run a second Stalwart. Outside production, code (not convention) lets only
-  allow-listed mailboxes connect and delivers only to allow-listed recipients; empty lists mean
+  allow-listed mailboxes connect and delivers only to allow-listed recipients, which includes
+  the attendees of every event write that makes the mail server notify; empty lists mean
   nobody connects and nothing is sent.
 
 Known limit: Stalwart's `mail` scope also covers IMAP, SMTP submission and ManageSieve and

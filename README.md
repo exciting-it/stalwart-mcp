@@ -5,7 +5,8 @@ A remote MCP server for [Stalwart](https://stalw.art) mailboxes, running on Clou
 A mailbox user adds the connector's address in an AI tool (Claude and others), signs in with the
 mailbox login on the mail server's own page, and the tool can then list folders, search, read
 conversations, write drafts and send mail in that one mailbox. If the deployment switches it on,
-the tool can also read that mailbox's contacts and calendar. The worker sits between the AI
+the tool can also read and write that mailbox's contacts and calendar, including events with
+participants, whom the mail server then invites by email. The worker sits between the AI
 tool and Stalwart's JMAP API: it is an OAuth server toward the tool and an OAuth client toward
 Stalwart. The tool never receives a Stalwart token.
 
@@ -35,11 +36,18 @@ Why it is built this way, and what its security rests on: [docs/design.md](docs/
 | `list_calendars` | The mailbox's calendars with id, name and whether they are writable (needs `calendars`) |
 | `search_events` | Events that overlap a time window of at most 180 days, one entry per occurrence of a recurring event (needs `calendars`) |
 | `read_event` | One event: time, locations, description, participants, meeting links, recurrence (needs `calendars`) |
+| `create_contact` | Create a contact: names, up to 10 emails and 10 phones, organization, job title, notes, birthday (needs `contacts`) |
+| `update_contact` | Change a contact; a given field replaces the stored one (needs `contacts`) |
+| `delete_contact` | Delete up to 50 contacts **for good** (needs `contacts`) |
+| `create_event` | Create an event: timed or all-day, location, description, up to 10 participants, a recurrence rule; participants get an invitation by email (needs `calendars`) |
+| `update_event` | Change an event or one occurrence; participants get an update by email (needs `calendars`) |
+| `delete_event` | Delete up to 50 events or occurrences **for good**; participants get a cancellation by email (needs `calendars`) |
 
-The last five tools exist only when the deployment names their area in `FEATURES`
-(see [Contacts and calendars](#contacts-and-calendars)). They only read: the connector has no
-call that creates, changes or deletes a contact or an event, answers an invitation, or sends
-anything.
+The contacts and calendar tools exist only when the deployment names their area in `FEATURES`
+(see [Contacts and calendars](#contacts-and-calendars)). Deleting a contact or an event is
+permanent: JMAP has no trash for them. An event write that involves participants makes the mail
+server send them mail (invitations, updates, cancellations), and each such write counts as one
+of the mailbox's 50 sends per day. The connector never answers an invitation.
 
 It cannot remove mail for good, flag mail, manage folders, touch filters, or send from another
 address. Deleting always means moving to Trash, and `move_mail` brings a message back. The
@@ -67,10 +75,10 @@ Constants live in `MAIL_LIMITS` in `src/mail.ts` and, for contacts and calendars
 | What | Value |
 |---|---|
 | Tool calls per mailbox (mail, contacts and calendar calls together) | 60 per minute |
-| Messages sent per mailbox | 50 per day |
+| Messages sent per mailbox (`send_mail` and every event write that notifies participants, together) | 50 per day |
 | Recipients per message (To, Cc, Bcc together) | 10 |
 | Messages per `move_mail` or `delete_mail` call | 50 |
-| Identical send is not repeated within | 10 minutes (600 s) |
+| Identical send (or identical notifying `create_event` / `update_event`) is not repeated within | 10 minutes (600 s) |
 | Parallel calls to Stalwart per mailbox | 2 |
 | Search results per page | at most 25 (default 10) |
 | Messages returned per thread | at most 25 |
@@ -78,6 +86,11 @@ Constants live in `MAIL_LIMITS` in `src/mail.ts` and, for contacts and calendars
 | Events per `search_events` page | at most 50 (default 25) |
 | Window of `search_events` (`after` to `before`) | at most 180 days |
 | `offset` of `search_contacts` and `search_events` | 0 to 10,000 |
+| Ids per `delete_contact` or `delete_event` call | 50 (no daily limit on deleting; deleting is permanent) |
+| Emails and phones one contact input may carry | 10 each, a phone number 50 characters |
+| Participants of `create_event` / `update_event` (besides the mailbox itself) | 10 |
+| Longest timed event (`start` to `end`) / all-day event (`days`) | 31 days / 366 days |
+| Recurrence rule | `interval` 1 to 99, `count` 1 to 730 or `until` a date, `by_day` only for weekly |
 | Text of a name, title, label, location, participant or other single line | 200 characters |
 | Postal address of a contact | 500 characters |
 | Contact notes | 2,000 characters, then `notes_truncated` |
@@ -163,8 +176,45 @@ or unset means mail only). Any other name closes the worker with 503 and
   Mail keeps working.
 - **Reach of the token.** As with mail, which also opens IMAP and SMTP, the scopes are Stalwart's,
   not the connector's: according to Stalwart's documentation a vault token with the contacts or
-  calendars scope also reaches CardDAV and CalDAV for that account. The connector only ever sends JMAP `/get` and `/query`
-  requests; the tests assert that no request contains a `/set`, `/copy` or `/parse` method.
+  calendars scope also reaches CardDAV and CalDAV for that account. The connector sends JMAP
+  `/get` and `/query`, and `/set` of `ContactCard` and `CalendarEvent` only; the tests assert that
+  no request contains another `/set`, a `/copy` or a `/parse` method, and that the read tools
+  send no `/set` at all.
+- **Writing.** `create_*`, `update_*` and `delete_*` write into the mailbox's own address books
+  and calendars (the default one unless an id of the account is given). An update replaces each
+  given field as a whole and leaves the others. Deleting is permanent: there is no trash for
+  contacts and events, and the tool descriptions and the approval page say so. Up to 50 ids per
+  delete call, no daily limit on deleting. A create whose outcome is unknown (timeout, network
+  error, 5xx) is never retried: it answers a temporary error (or, when it would notify people,
+  `send_unconfirmed`), and the tool description says to look before creating again.
+- **Invitations are mail.** An event with participants is created with the mailbox as organizer,
+  and the request asks the mail server to schedule (`sendSchedulingMessages: true`): Stalwart
+  itself then sends invitations, updates and cancellations (iTIP) by email from the mailbox. The
+  connector decides per write whether it notifies: a create with participants, an update of an
+  event that has attendees before or after it, a deletion of an event with attendees, each only
+  when the event does not end in the past (a recurring event never counts as past; when unsure,
+  it counts as notifying). Every other write asks the server not to schedule. A notifying write
+  counts as one send against the mailbox's 50 per day, shared with `send_mail` (a deletion of
+  several such events needs that many, or nothing is deleted); a notifying create or update is
+  deduplicated like a send (the same request within 10 minutes returns the first result and
+  sends nothing; an unknown outcome is `send_unconfirmed` and blocks the same request for the
+  window). **Outside production only addresses on `SEND_ALLOWLIST` may be notified**, checked for
+  every address involved before anything is written, also for an existing event's attendees
+  when it is changed or deleted. Audit rows of the event writes carry how many addresses were
+  notified (`recipient_count`), never an address.
+- **Property names.** Stalwart 1.x implements the newer JSCalendar names and silently stores
+  any unknown property as inert data, so a wrong name never fails, it just does nothing. The
+  connector writes `calendarAddress` (`mailto:` URI) for participants, `organizerCalendarAddress`,
+  one `recurrenceRule` object (with `byDay` entries `{ "@type": "NDay", "day": "mo" }` and `until`
+  as the end of that day in the event's zone), and never `uid` (the server makes one),
+  `isOrigin`, `sendTo`, `replyTo` or `recurrenceRules`. When reading it still accepts
+  `recurrenceRules`, a participant's `email` and `sendTo.imip` as fallbacks.
+- **Event time.** A timed event is stored as the wall-clock `start` of the input instant in its
+  `time_zone` (default `Etc/UTC`) and a `duration` whose days are wall-clock days in that zone and
+  whose rest is exact time (so an event across a daylight-saving change ends at the given
+  instant). An all-day event is a floating `start` at midnight with `P<days>D` and
+  `showWithoutTime: true`. An occurrence id (as `search_events` lists it) changes or deletes
+  that occurrence only.
 - **What the tools return.** Every result leads with a fixed `content_notice` saying that names,
   titles, descriptions, notes, locations and addresses may come from third parties (for example
   the sender of an invitation) and are data, not instructions. Text is stripped of control and
@@ -261,6 +311,24 @@ same assumptions as the code):
   a foreign `address_book_id` or `calendar_id` gives an empty page.
 - [ ] The Stalwart access token of a contacts or calendars grant: how long it keeps working after
   the application is removed (as for mail above), and that CardDAV and CalDAV accept it.
+- [ ] Contact writes: `ContactCard/set` accepts a client-supplied `uid`; an update replacing a
+  whole property (a PatchObject with a top-level key) works as assumed; how the default address
+  book and calendar are marked (`isDefault`).
+- [ ] An invitation actually arrives at an allow-listed address and names the mailbox as
+  organizer; an update and a cancellation arrive too.
+- [ ] An attendee on the same Stalwart server is notified (delivered internally, not only by SMTP).
+- [ ] The server does not notify for an event that ended in the past, nor for a write sent with
+  `sendSchedulingMessages: false` on an event with participants.
+- [ ] `recurrenceRule` (with `byDay`, `count`, `until`) is stored and expanded by
+  `CalendarEvent/query`; `until` written as `<date>T23:59:59` includes that day.
+- [ ] The nominal-day `duration` the connector writes (for example `P2DT1H`) ends where intended
+  across a daylight-saving change.
+- [ ] Deleting an occurrence id adds an excluded override and leaves the series; changing one
+  changes only that occurrence.
+- [ ] What the server does when it cannot send an invitation: `noSupportedScheduleMethods`
+  (the tool answers a fixed refusal), or saving the event silently without sending.
+- [ ] An update or a deletion of an event the mailbox was invited to (organized by someone
+  else): what the server sends to the organizer.
 
 Repeat them after a Stalwart upgrade.
 
@@ -313,8 +381,11 @@ request under a host other than `PUBLIC_ORIGIN` answers 404.
   narrowed to JMAP. Anyone who took over this worker and its secrets could act as every
   connected mailbox. Mitigations: two secrets per environment, the off switch, and deleting the
   OAuth client.
-- Contacts and calendars are read only and cover the mailbox's own account: no shared address
-  books or calendars of other accounts, no free/busy lookups, no changes. A recurring event is
+- Contacts and calendars cover the mailbox's own account: no shared address books or calendars
+  of other accounts, no free/busy lookups, no answering invitations. Deleting a contact or an
+  event cannot be undone. An event update with `participants` makes the mailbox the organizer
+  and replaces the whole list; a contact update rebuilds the name from the parts given. A
+  recurring event is
   expanded by the server for the requested window only; `search_events` pages by `offset`, so a
   change between two pages can shift the entries.
 - A send whose outcome is unknown (a timeout, a network failure or a 5xx on the submit request)
