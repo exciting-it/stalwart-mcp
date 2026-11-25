@@ -8,6 +8,7 @@
 import {
   CreateDraftInput,
   MAIL_LIMITS,
+  MoveMailRequest,
   MailError,
   type MailErrorCode,
   ReadThreadInput,
@@ -110,6 +111,12 @@ export class MailboxOperations {
   createDraft(caller: Caller, input: unknown) {
     return this.#operation("createDraft", caller, () => parse(CreateDraftInput, input), (draft) =>
       this.#upstream(caller.accountId, (a) => a.createDraft(draft)),
+    );
+  }
+
+  moveMail(caller: Caller, input: unknown) {
+    return this.#operation("moveMail", caller, () => parse(MoveMailRequest, input), (move) =>
+      this.#upstream(caller.accountId, (a) => a.moveMail(move)),
     );
   }
 

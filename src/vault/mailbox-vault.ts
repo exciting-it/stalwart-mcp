@@ -17,6 +17,8 @@ import {
   MailError,
   type MailFolder,
   type MailSummary,
+  type MoveMailOutcome,
+  type MoveMailRequestT,
   type OutgoingMessage,
   type ReadThreadInputT,
   type SearchMailInputT,
@@ -209,6 +211,10 @@ export class MailboxVault extends DurableObject<Env> {
     input: OutgoingMessage,
   ): Promise<VaultResult<{ draft_id: string; folder_id: string }>> {
     return this.#operations.createDraft({ accountId, email }, input);
+  }
+
+  moveMail(accountId: string, email: string, input: MoveMailRequestT): Promise<VaultResult<MoveMailOutcome>> {
+    return this.#operations.moveMail({ accountId, email }, input);
   }
 
   sendMail(accountId: string, email: string, input: OutgoingMessage): Promise<VaultResult<SendResult>> {

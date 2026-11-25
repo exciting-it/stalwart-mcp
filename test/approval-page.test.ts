@@ -51,7 +51,7 @@ describe("approval page", () => {
     expect(en).toContain("Claude (claude.ai) wants to access this mailbox:");
     expect(en).toContain('<p class="mailbox">a@test.example</p>');
     expect(en).toContain(
-      "It will be able to read and search your mail, save drafts and send mail in your name (at most 50 messages per day). It cannot delete mail.",
+      "It will be able to read and search your mail, save drafts, send mail in your name (at most 50 messages per day) and move messages to other folders or to the trash. It cannot remove anything for good.",
     );
     expect(en).toContain("Not a@test.example? Choose Deny, sign out of your mailbox and try again.");
     expect(en).toContain("Only allow this if you started the connection yourself just now.");
@@ -64,7 +64,7 @@ describe("approval page", () => {
     expect(de).toContain("Claude (claude.ai) möchte auf dieses Postfach zugreifen:");
     expect(de).toContain('<p class="mailbox">a@test.example</p>');
     expect(de).toContain(
-      "Die Anwendung kann deine E-Mails lesen und durchsuchen, Entwürfe speichern und in deinem Namen senden (höchstens 50 Nachrichten pro Tag). Löschen kann sie nichts.",
+      "Die Anwendung kann deine E-Mails lesen und durchsuchen, Entwürfe speichern, in deinem Namen senden (höchstens 50 Nachrichten pro Tag) und Nachrichten in andere Ordner oder in den Papierkorb verschieben. Endgültig löschen kann sie nichts.",
     );
     expect(de).toContain("Nicht a@test.example? Wähle „Ablehnen“, melde dich im Postfach ab und versuche es erneut.");
     expect(de).toContain("Erlaube das nur, wenn du die Verbindung gerade selbst gestartet hast.");

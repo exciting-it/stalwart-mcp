@@ -480,6 +480,7 @@ describe("token door", () => {
     "confirmGrant",
     "createDraft",
     "listMailboxes",
+    "moveMail",
     "readThread",
     "searchMail",
     "sendMail",

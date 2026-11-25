@@ -2,7 +2,8 @@
  * `MailboxAdapter` over JMAP for one mailbox. Built per call with that mailbox's own access
  * token and the account id from the OAuth grant; every method call carries that account id,
  * so the adapter cannot act on another account. It never destroys anything and never calls a
- * `/set` method other than `Email/set` create/update and `EmailSubmission/set` create.
+ * `/set` method other than `Email/set` create/update and `EmailSubmission/set` create. Deleting
+ * a message means moving it to the Trash folder.
  */
 import {
   MAIL_LIMITS,
@@ -10,6 +11,8 @@ import {
   type MailboxAdapter,
   type MailFolder,
   type MailSummary,
+  type MoveMailOutcome,
+  type MoveMailRequestT,
   type OutgoingMessage,
   type ReadThreadInputT,
   type SearchMailInputT,
@@ -37,6 +40,7 @@ import {
   toFolder,
   toSummary,
   toThreadMessage,
+  updateResult,
 } from "./map";
 
 const MAX_BODY_VALUE_BYTES = 262_144;
@@ -212,6 +216,35 @@ export class JmapMailboxAdapter implements MailboxAdapter {
     const draftId = createdId(methodResult(responses, "d", "Email/set"), "draft");
     if (draftId === null) throw new MailError("upstream_rejected");
     return { draft_id: draftId, folder_id: draftsId };
+  }
+
+  /**
+   * Moves messages into one folder of this account, named by id or by the Trash role. A moved
+   * message is in that folder only. The patch is an `Email/set` update of `mailboxIds`: nothing
+   * is destroyed, and an id that is not a message of this account is reported, not acted on.
+   */
+  async moveMail(input: MoveMailRequestT): Promise<MoveMailOutcome> {
+    const { target } = input;
+    const lookup = await this.#call([["Mailbox/get", { ids: null, properties: ["id", "role"] }, "m"]]);
+    const folders = getResult(JmapMailboxRole, methodResult(lookup, "m", "Mailbox/get")).list;
+    const folder =
+      "role" in target ? folders.find((f) => f.role === target.role) : folders.find((f) => f.id === target.folder_id);
+    if (!folder) throw new MailError("role" in target ? "mailbox_unsupported" : "not_found");
+
+    const ids = [...new Set(input.message_ids)];
+    const update = Object.fromEntries(ids.map((id) => [id, { mailboxIds: { [folder.id]: true } }]));
+    const responses = await this.#call([["Email/set", { update }, "u"]]);
+    const { updated, refused } = updateResult(methodResult(responses, "u", "Email/set"));
+
+    const notFound: string[] = [];
+    for (const id of ids) {
+      if (updated.has(id)) continue;
+      // Anything but "no such message here" is a refusal we cannot explain to the caller.
+      if (refused.get(id) !== "notFound") throw new MailError("upstream_rejected");
+      notFound.push(id);
+    }
+    if (notFound.length === ids.length) throw new MailError("not_found");
+    return { folder_id: folder.id, moved: ids.length - notFound.length, not_found: notFound };
   }
 
   /**

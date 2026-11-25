@@ -83,9 +83,33 @@ const listTools = async (): Promise<Record<string, ListedTool>> => {
 };
 
 describe("MCP endpoint", () => {
-  it("lists five tools with the pinned annotations", async () => {
+  it("lists seven tools with the pinned annotations", async () => {
     const byName = await listTools();
-    expect(Object.keys(byName)).toEqual(["list_mailboxes", "search_mail", "read_thread", "create_draft", "send_mail"]);
+    expect(Object.keys(byName)).toEqual([
+      "list_mailboxes",
+      "search_mail",
+      "read_thread",
+      "create_draft",
+      "send_mail",
+      "move_mail",
+      "delete_mail",
+    ]);
+    // Moving is reversible and repeatable; deleting (to Trash) is marked destructive so AI tools ask.
+    expect(byName.move_mail!.annotations).toEqual({
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    });
+    expect(byName.delete_mail!.annotations).toEqual({
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: true,
+      openWorldHint: false,
+    });
+    expect(byName.delete_mail!.description).toContain("Nothing is removed for good");
+    // delete_mail takes message ids and nothing else: no folder, no "permanent" switch.
+    expect(Object.keys(byName.delete_mail!.inputSchema.properties ?? {})).toEqual(["message_ids"]);
     const read = { readOnlyHint: true, openWorldHint: false };
     expect(byName.list_mailboxes!.annotations).toEqual(read);
     expect(byName.search_mail!.annotations).toEqual(read);

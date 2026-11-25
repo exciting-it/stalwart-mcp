@@ -14,13 +14,14 @@ Goals
 
 - One connector URL for every mailbox on the server. Sign-in with the mailbox login on
   Stalwart's own page; the AI tool never sees a password.
-- The AI tool can list folders, search, read a conversation, write a draft and send.
+- The AI tool can list folders, search, read a conversation, write a draft, send, and move
+  messages between folders or to the trash.
 - One mailbox user can never reach another mailbox.
 - Limits, an audit trail and an off switch that the AI tool cannot bypass.
 
 Not in scope
 
-- Deleting, moving or flagging mail; folder management; Sieve filters and forwards.
+- Removing mail for good; flagging mail; folder management; Sieve filters and forwards.
 - Attachment contents (names and sizes only). Sending attachments.
 - Calendar and contacts. Shared mailboxes (only the user's own account is served).
 - Sending from an alias. Managing accounts, aliases or domains.
@@ -113,6 +114,8 @@ call.
 | `read_thread` | read | All messages of a conversation as plain text with headers, attachment names and sizes; long bodies are cut with a marker |
 | `create_draft` | write | New mail or reply, saved in Drafts |
 | `send_mail` | write, external effect | Sends a new mail or reply, plain text, copy in Sent |
+| `move_mail` | write | Moves messages into one folder of the mailbox |
+| `delete_mail` | write | Moves messages to the Trash folder; nothing is destroyed |
 
 Rules that hold for every tool:
 
@@ -123,8 +126,12 @@ Rules that hold for every tool:
 - The server tells the AI tool which mailbox it is connected to (in its instructions and in
   `list_mailboxes`), taken from the grant. An address the user mentions is only ever a search
   filter, so a mistyped address shows up as "no results in mailbox X" instead of silence.
-- Read tools carry `readOnlyHint`; `create_draft` and `send_mail` do not, and `send_mail`
-  carries `openWorldHint`, so AI tools ask the user before sending.
+- Read tools carry `readOnlyHint`; the write tools do not. `send_mail` carries `openWorldHint`
+  and `delete_mail` carries `destructiveHint`, so AI tools ask the user before sending or
+  deleting. Whether a tool runs without asking is the AI tool's own setting; the server can
+  only describe each tool truthfully.
+- Deleting is a move to the Trash folder. The adapter has no call that destroys a message, and
+  `delete_mail` takes message ids and nothing else, so no input can turn it into one.
 - Every tool runs through one wrapper, `defineTool`: **validate → authorize (grant, off switch,
   block list, limits) → act → audit**.
 

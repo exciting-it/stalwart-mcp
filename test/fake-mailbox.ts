@@ -153,6 +153,25 @@ export function createFakeMailStore() {
         counter += 1;
         return { draft_id: `${account.accountId}-draft-${counter}`, folder_id: account.folders[1]!.id };
       },
+      async moveMail(input) {
+        record("moveMail");
+        const toTrash = "role" in input.target;
+        const folderId = "role" in input.target ? `${account.accountId}-trash` : input.target.folder_id;
+        if (!toTrash && !account.folders.some((f) => f.id === folderId)) throw new MailError("not_found");
+        const notFound: string[] = [];
+        let moved = 0;
+        for (const id of new Set(input.message_ids)) {
+          const message = account.messages.find((m) => m.id === id);
+          if (message === undefined) {
+            notFound.push(id);
+            continue;
+          }
+          message.folderId = folderId;
+          moved += 1;
+        }
+        if (moved === 0) throw new MailError("not_found");
+        return { folder_id: folderId, moved, not_found: notFound };
+      },
       async sendMail(input: OutgoingMessage) {
         record("sendMail");
         assertOwnMessage(input.in_reply_to);

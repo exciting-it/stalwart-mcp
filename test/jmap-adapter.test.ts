@@ -489,6 +489,75 @@ describe("JmapMailboxAdapter", () => {
     expect(JSON.stringify(replied)).not.toContain("Bcc");
   });
 
+  it("moves messages into a folder of the account and takes them out of every other folder", async () => {
+    const one = fake.addMessage(A, { subject: "one" });
+    const two = fake.addMessage(A, { subject: "two", folder: "sent" });
+    const a = await adapterFor(A);
+    const drafts = fake.folderId(A, "drafts")!;
+    expect(await a.moveMail({ message_ids: [one.id, two.id, one.id], target: { folder_id: drafts } })).toEqual({
+      folder_id: drafts,
+      moved: 2,
+      not_found: [],
+    });
+    expect(fake.email(A, one.id)!.mailboxIds).toEqual({ [drafts]: true });
+    expect(fake.email(A, two.id)!.mailboxIds).toEqual({ [drafts]: true });
+    // Moving again changes nothing and still succeeds.
+    expect((await a.moveMail({ message_ids: [one.id], target: { folder_id: drafts } })).moved).toBe(1);
+    expect(fake.email(A, one.id)!.mailboxIds).toEqual({ [drafts]: true });
+  });
+
+  it("deleting moves to Trash: the message still exists and nothing is ever destroyed", async () => {
+    const m = fake.addMessage(A, { subject: "keep me" });
+    const a = await adapterFor(A);
+    const trash = fake.folderId(A, "trash")!;
+    expect(await a.moveMail({ message_ids: [m.id], target: { role: "trash" } })).toEqual({
+      folder_id: trash,
+      moved: 1,
+      not_found: [],
+    });
+    expect(fake.email(A, m.id)).toMatchObject({ subject: "keep me", mailboxIds: { [trash]: true } });
+    // It can be brought back.
+    await a.moveMail({ message_ids: [m.id], target: { folder_id: m.folderId } });
+    expect(fake.email(A, m.id)!.mailboxIds).toEqual({ [m.folderId]: true });
+    for (const r of jmapRequests()) {
+      for (const [name, args] of r.body.methodCalls as [string, Record<string, unknown>][]) {
+        expect(args.destroy).toBeUndefined();
+        expect(args.onSuccessDestroyEmail).toBeUndefined();
+        if (name.endsWith("/set")) expect(name).toBe("Email/set");
+      }
+    }
+  });
+
+  it("moves nothing of another mailbox: foreign message ids are reported, a foreign folder is not found", async () => {
+    const own = fake.addMessage(A, { subject: "mine" });
+    const foreign = fake.addMessage(B, { subject: "secret" });
+    const a = await adapterFor(A);
+    const before = { ...fake.email(B, foreign.id)!.mailboxIds };
+
+    await expectMailError(a.moveMail({ message_ids: [foreign.id], target: { role: "trash" } }), "not_found");
+    expect(await a.moveMail({ message_ids: [own.id, foreign.id], target: { role: "trash" } })).toEqual({
+      folder_id: fake.folderId(A, "trash"),
+      moved: 1,
+      not_found: [foreign.id],
+    });
+    expect(fake.email(B, foreign.id)!.mailboxIds).toEqual(before);
+
+    // B's folder id is no folder of A: refused before any message is touched.
+    const requests = jmapRequests().length;
+    await expectMailError(a.moveMail({ message_ids: [own.id], target: { folder_id: foreign.folderId } }), "not_found");
+    expect(jmapRequests().slice(requests).flatMap(methodNames)).toEqual(["Mailbox/get"]);
+    expect(fake.email(A, own.id)!.mailboxIds).toEqual({ [fake.folderId(A, "trash")!]: true });
+    expect(JSON.stringify(fake.requests)).not.toContain("secret");
+  });
+
+  it("answers mailbox_unsupported for a delete when the mailbox has no Trash folder", async () => {
+    fake.addMailbox(A, { trash: false });
+    const m = fake.addMessage(A, { subject: "stay" });
+    const a = await adapterFor(A);
+    await expectMailError(a.moveMail({ message_ids: [m.id], target: { role: "trash" } }), "mailbox_unsupported");
+    expect(fake.email(A, m.id)!.mailboxIds).toEqual({ [m.folderId]: true });
+  });
+
   it("answers mailbox_unsupported without a Drafts folder", async () => {
     fake.addMailbox(A, { drafts: false });
     const a = await adapterFor(A);

@@ -114,6 +114,21 @@ export function createdId(args: unknown, creationId: string): string | null {
   return parsed.data.created?.[creationId]?.id ?? null;
 }
 
+/** What a `/set` answer says about each id of an `update`: done, or refused with a reason. */
+export function updateResult(args: unknown): { updated: Set<string>; refused: Map<string, string> } {
+  const parsed = parseUpstream(
+    z.object({
+      updated: z.record(z.string(), z.unknown()).nullish(),
+      notUpdated: z.record(z.string(), z.object({ type: z.string() })).nullish(),
+    }),
+    args,
+  );
+  return {
+    updated: new Set(Object.keys(parsed.updated ?? {})),
+    refused: new Map(Object.entries(parsed.notUpdated ?? {}).map(([id, error]) => [id, error.type])),
+  };
+}
+
 /** True when a `/set` answer lists `creationId` under `notCreated`: the server refused it. */
 export function notCreated(args: unknown, creationId: string): boolean {
   const parsed = z.object({ notCreated: z.record(z.string(), z.unknown()).nullish() }).safeParse(args);

@@ -37,7 +37,7 @@ export interface ToolSpec<I extends z.ZodTypeAny, O extends z.ZodTypeAny> {
   name: string;
   title: string;
   description: string;
-  kind: "read" | "draft" | "send";
+  kind: "read" | "draft" | "send" | "move" | "trash";
   input: I;
   output: O;
   /** `grant` is the verified connection: its address may be shown, never chosen by the input. */

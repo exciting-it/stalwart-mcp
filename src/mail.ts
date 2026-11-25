@@ -13,6 +13,8 @@ export const MAIL_LIMITS = {
   threadMessagesMax: 25,
   sendsPerDay: 50,
   recipientsPerMessage: 10,
+  /** Messages one `move_mail` or `delete_mail` call may name. */
+  moveBatchMax: 50,
   sendDedupeSeconds: 600,
   toolCallsPerMinute: 60,
   upstreamConcurrency: 2,
@@ -117,6 +119,24 @@ function refineOutgoing(m: OutgoingShape, ctx: z.RefinementCtx): void {
 
 export const CreateDraftInput = OutgoingMessageBase.superRefine(refineOutgoing);
 
+const MessageIds = z.array(MailIdSchema).min(1).max(MAIL_LIMITS.moveBatchMax);
+
+export const MoveMailInput = z.object({ message_ids: MessageIds, folder_id: MailIdSchema }).strict();
+
+/** No folder: the target is always the mailbox's own Trash folder. */
+export const DeleteMailInput = z.object({ message_ids: MessageIds }).strict();
+
+/**
+ * What the two tools ask of the mailbox: move messages into one folder, named by id or by the
+ * Trash role. There is no request that removes a message for good.
+ */
+export const MoveMailRequest = z
+  .object({
+    message_ids: MessageIds,
+    target: z.union([z.object({ folder_id: MailIdSchema }).strict(), z.object({ role: z.literal("trash") }).strict()]),
+  })
+  .strict();
+
 export const SendMailInput = OutgoingMessageBase.superRefine((m, ctx) => {
   refineOutgoing(m, ctx);
   if (m.to.length + m.cc.length + m.bcc.length === 0) {
@@ -181,6 +201,8 @@ export type ThreadMessage = z.infer<typeof ThreadMessageSchema>;
 export type OutgoingMessage = z.infer<typeof OutgoingMessageBase>;
 export type SearchMailInputT = z.infer<typeof SearchMailInput>;
 export type ReadThreadInputT = z.infer<typeof ReadThreadInput>;
+export type MoveMailRequestT = z.infer<typeof MoveMailRequest>;
+export type MoveMailOutcome = z.infer<typeof MoveMailResult>;
 
 // ---- tool results ----
 
@@ -200,6 +222,13 @@ export const ReadThreadResult = z.object({
   messages: z.array(ThreadMessageSchema),
   omitted_messages: z.number().int(),
   content_notice: ContentNotice,
+});
+
+/** `not_found` lists the ids that are not messages of this mailbox; the others were moved. */
+export const MoveMailResult = z.object({
+  folder_id: z.string(),
+  moved: z.number().int(),
+  not_found: z.array(z.string()),
 });
 
 export const CreateDraftResult = z.object({
@@ -277,6 +306,8 @@ export interface MailboxAdapter {
     omitted_messages: number;
   }>;
   createDraft(input: OutgoingMessage): Promise<{ draft_id: string; folder_id: string }>;
+  /** Moves messages into one folder of this mailbox. Throws `not_found` when none could be moved. */
+  moveMail(input: MoveMailRequestT): Promise<MoveMailOutcome>;
   sendMail(
     input: OutgoingMessage,
   ): Promise<{ message_id: string; recipients: number; deduplicated: boolean }>;

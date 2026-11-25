@@ -108,6 +108,32 @@ describe("mail connector isolation, end to end", () => {
     expect(garbage.status).toBe(401);
   });
 
+  it("user A cannot move or delete user B's mail, and deleting only moves to Trash", async () => {
+    const a = await connect(fake, A);
+    await connect(fake, B);
+    const mine = fake.addMessage(A, { subject: "mine" });
+    const theirs = fake.addMessage(B, { subject: "theirs" });
+    const untouched = { ...fake.email(B, theirs.id)!.mailboxIds };
+
+    const foreignDelete = await callTool(a.accessToken!, "delete_mail", { message_ids: [theirs.id] });
+    expect(foreignDelete.isError).toBe(true);
+    const foreignMove = await callTool(a.accessToken!, "move_mail", {
+      message_ids: [theirs.id],
+      folder_id: fake.folderId(A, "drafts"),
+    });
+    expect(foreignMove.isError).toBe(true);
+    // B's folder as a target for A's own message: no such folder in A's mailbox.
+    const intoForeign = await callTool(a.accessToken!, "move_mail", { message_ids: [mine.id], folder_id: theirs.folderId });
+    expect(intoForeign.isError).toBe(true);
+    expect(fake.email(B, theirs.id)!.mailboxIds).toEqual(untouched);
+    expect(fake.email(A, mine.id)!.mailboxIds).toEqual({ [mine.folderId]: true });
+
+    const deleted = await callTool(a.accessToken!, "delete_mail", { message_ids: [mine.id] });
+    expect(deleted.isError).toBeFalsy();
+    expect(structured(deleted)).toEqual({ folder_id: fake.folderId(A, "trash"), moved: 1, not_found: [] });
+    expect(fake.email(A, mine.id)).toMatchObject({ subject: "mine", mailboxIds: { [fake.folderId(A, "trash")!]: true } });
+  });
+
   it("the same send_mail call twice over MCP delivers one message", async () => {
     const a = await connect(fake, A);
     const args = { to: ["ok@test.example"], subject: "Once", body: "Only one copy" };

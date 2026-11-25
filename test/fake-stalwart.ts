@@ -32,6 +32,7 @@ export type SubmitFailureKind = "network" | "accepted-then-503" | "accepted-then
 export interface AddMailboxOptions {
   drafts?: boolean; // default true
   sent?: boolean; // default true
+  trash?: boolean; // default true
   /** false: no identity; an object overrides the identity's name and/or address. Default: the mailbox address. */
   identity?: boolean | { name?: string; email?: string };
 }
@@ -190,7 +191,7 @@ export function createFakeStalwart(): FakeStalwart {
     folder("Inbox", "inbox");
     if (options.drafts !== false) folder("Drafts", "drafts");
     if (options.sent !== false) folder("Sent Items", "sent");
-    folder("Deleted Items", "trash");
+    if (options.trash !== false) folder("Deleted Items", "trash");
     if (options.identity !== false) {
       const custom = typeof options.identity === "object" ? options.identity : {};
       account.identities.push({

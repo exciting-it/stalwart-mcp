@@ -27,8 +27,11 @@ Why it is built this way, and what its security rests on: [docs/design.md](docs/
 | `read_thread` | A whole conversation as plain text |
 | `create_draft` | Save a new mail or a reply in Drafts |
 | `send_mail` | Send a new mail or a reply, plain text, from the mailbox's own address |
+| `move_mail` | Move messages into another folder of the mailbox |
+| `delete_mail` | Move messages to the Trash folder |
 
-It cannot delete, move or flag mail, touch filters, or send from another address.
+It cannot remove mail for good, flag mail, manage folders, touch filters, or send from another
+address. Deleting always means moving to Trash, and `move_mail` brings a message back.
 
 ## Sign-in flow
 
@@ -49,6 +52,7 @@ Constants live in `MAIL_LIMITS` in `src/mail.ts`.
 | Tool calls per mailbox | 60 per minute |
 | Messages sent per mailbox | 50 per day |
 | Recipients per message (To, Cc, Bcc together) | 10 |
+| Messages per `move_mail` or `delete_mail` call | 50 |
 | Identical send is not repeated within | 10 minutes (600 s) |
 | Parallel calls to Stalwart per mailbox | 2 |
 | Search results per page | at most 25 (default 10) |
@@ -216,6 +220,9 @@ request under a host other than `PUBLIC_ORIGIN` answers 404.
   Stalwart.
 - After a user removes the application at Stalwart and later connects one AI tool again, the
   earlier tools' grants for the same mailbox work again, without appearing on the approval page.
+- `delete_mail` moves messages to Trash and the connector never empties it. Whether Trash is
+  emptied after some time is your server's setting (Stalwart's auto-expunge), not the
+  connector's: with it switched on, a deleted message does disappear later.
 - The tool-call limit counts per clock minute, not a sliding minute: up to 120 calls can land
   within a few seconds around a minute boundary.
 - `/token` and `/register` are limited per source address. AI vendors call them from shared

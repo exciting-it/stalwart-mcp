@@ -8,6 +8,7 @@ import {
   MailError,
   type MailboxAdapter,
   type MailErrorCode,
+  type MoveMailRequestT,
   type OutgoingMessage,
   type ReadThreadInputT,
   type SearchMailInputT,
@@ -48,6 +49,10 @@ export class VaultMailbox implements MailboxAdapter {
     return this.#call<Awaited<ReturnType<MailboxAdapter["createDraft"]>>>((v, id, email) =>
       v.createDraft(id, email, input),
     );
+  }
+
+  moveMail(input: MoveMailRequestT) {
+    return this.#call<Awaited<ReturnType<MailboxAdapter["moveMail"]>>>((v, id, email) => v.moveMail(id, email, input));
   }
 
   sendMail(input: OutgoingMessage) {
