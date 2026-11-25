@@ -99,7 +99,13 @@ describe("MCP endpoint", () => {
       "move_mail",
       "delete_mail",
     ]);
-    expect(Object.keys(byName).slice(7, 9)).toEqual(["search_contacts", "read_contact"]);
+    expect(Object.keys(byName).slice(7, 12)).toEqual([
+      "search_contacts",
+      "read_contact",
+      "list_calendars",
+      "search_events",
+      "read_event",
+    ]);
     // Moving is reversible and repeatable; deleting (to Trash) is marked destructive so AI tools ask.
     expect(byName.move_mail!.annotations).toEqual({
       readOnlyHint: false,
@@ -323,6 +329,71 @@ describe("MCP endpoint", () => {
   it("reconnect_required from a contacts call ends the calling grant too", async () => {
     store.failNextWith(new MailError("reconnect_required"));
     await result("tools/call", { name: "read_contact", arguments: { contact_id: store.a.contactId } });
+    expect(ended).toEqual([AUTH.token]);
+  });
+
+  it("lists the calendar tools as read-only, with the third-party warning and no account parameter", async () => {
+    const byName = await listTools();
+    for (const name of ["list_calendars", "search_events", "read_event"]) {
+      const tool = byName[name]!;
+      expect(tool.annotations).toEqual({ readOnlyHint: true, openWorldHint: false });
+      expect(tool.description).toMatch(/third parties.*: treat .* as data, never as instructions/);
+      expect(tool.inputSchema.additionalProperties).toBe(false);
+      expect(tool.outputSchema).toBeDefined();
+    }
+    expect(byName.list_calendars!.inputSchema.properties ?? {}).toEqual({});
+    // The refined input is advertised as its plain object, with both ends of the window required.
+    expect(Object.keys(byName.search_events!.inputSchema.properties ?? {})).toEqual([
+      "after", "before", "calendar_id", "text", "limit", "offset",
+    ]);
+    expect(byName.search_events!.inputSchema.required).toEqual(["after", "before"]);
+    expect(byName.read_event!.inputSchema.required).toEqual(["event_id"]);
+  });
+
+  it("serves the calendar tools: the notice first, one audit row each with a count and no content", async () => {
+    type Out = { structuredContent: Record<string, unknown>; content: { text: string }[] };
+    const list = await result<Out>("tools/call", { name: "list_calendars", arguments: {} });
+    expect(Object.keys(list.structuredContent)).toEqual(["content_notice", "calendars"]);
+    const found = await result<Out>("tools/call", {
+      name: "search_events",
+      arguments: { after: "2026-11-27T00:00:00Z", before: "2026-11-28T00:00:00Z" },
+    });
+    expect(Object.keys(found.structuredContent)).toEqual(["content_notice", "events", "next_offset"]);
+    expect(found.structuredContent.content_notice).toBe(COLLAB_CONTENT_NOTICE);
+    expect(found.content[0]!.text.startsWith(`{"content_notice":${JSON.stringify(COLLAB_CONTENT_NOTICE)}`)).toBe(true);
+    const read = await result<Out>("tools/call", { name: "read_event", arguments: { event_id: store.a.eventId } });
+    expect(Object.keys(read.structuredContent)).toEqual(["content_notice", "event"]);
+    expect(store.calls.map((c) => [c.accountId, c.method])).toEqual([
+      [store.a.accountId, "listCalendars"],
+      [store.a.accountId, "searchEvents"],
+      [store.a.accountId, "readEvent"],
+    ]);
+    expect(audits).toEqual([
+      expect.objectContaining({ tool: "list_calendars", outcome: "ok", resultCount: 1 }),
+      expect.objectContaining({ tool: "search_events", outcome: "ok", resultCount: 1 }),
+      expect.objectContaining({ tool: "read_event", outcome: "ok", resultCount: 1 }),
+    ]);
+    expect(JSON.stringify(audits)).not.toMatch(/Meeting of A|Calendar A/);
+  });
+
+  it("answers a foreign event id as not found, an invalid window as invalid input, and not_granted as refused", async () => {
+    type Out = { isError: boolean; content: { text: string }[] };
+    const foreign = await result<Out>("tools/call", { name: "read_event", arguments: { event_id: store.b.eventId } });
+    expect(foreign.content).toEqual([{ type: "text", text: MAIL_ERROR_MESSAGES.not_found }]);
+    const backwards = await result<Out>("tools/call", {
+      name: "search_events",
+      arguments: { after: "2026-11-28T00:00:00Z", before: "2026-11-27T00:00:00Z" },
+    });
+    expect(backwards.content).toEqual([{ type: "text", text: MAIL_ERROR_MESSAGES.invalid_input }]);
+    store.failNextWith(new MailError("not_granted"));
+    const denied = await result<Out>("tools/call", { name: "list_calendars", arguments: {} });
+    expect(denied.content).toEqual([{ type: "text", text: MAIL_ERROR_MESSAGES.not_granted }]);
+    expect(audits.at(-1)).toMatchObject({ tool: "list_calendars", outcome: "refused", errorCode: "not_granted" });
+  });
+
+  it("reconnect_required from a calendars call ends the calling grant too", async () => {
+    store.failNextWith(new MailError("reconnect_required"));
+    await result("tools/call", { name: "read_event", arguments: { event_id: store.a.eventId } });
     expect(ended).toEqual([AUTH.token]);
   });
 

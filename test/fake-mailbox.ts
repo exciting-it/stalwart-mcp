@@ -119,7 +119,8 @@ function seedAccount(key: AccountKey): Account {
         updated: "2026-11-20T09:00:00Z",
       },
     ],
-    // Simple fixed data: part 2 of the calendar work refines these.
+    // One calendar and one event each; the search below behaves like the adapter's contract:
+    // overlap with the window, earliest first, an unknown calendar is an empty page.
     calendars: [
       { id: calendarId, name: `Calendar ${key}`, description: null, color: null, is_default: true, time_zone: null, can_write: true },
     ],
@@ -298,14 +299,17 @@ export function createFakeMailStore() {
       },
       async searchEvents(input) {
         record("searchEvents");
+        const needle = input.text?.toLowerCase();
         const hits = account.events
           .filter((e) => input.calendar_id === undefined || e.calendar_ids.includes(input.calendar_id))
+          .filter((e) => needle === undefined || `${e.title} ${e.description} ${e.location ?? ""}`.toLowerCase().includes(needle))
           .filter(
             (e) =>
               e.start !== null &&
               Date.parse(e.start) < Date.parse(input.before) &&
               Date.parse(e.end ?? e.start) > Date.parse(input.after),
-          );
+          )
+          .sort((x, y) => Date.parse(x.start ?? "") - Date.parse(y.start ?? ""));
         const page = hits.slice(input.offset, input.offset + input.limit);
         const next = input.offset + page.length;
         return { events: page.map(summaryOfEvent), next_offset: next < hits.length ? next : null };

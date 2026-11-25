@@ -76,6 +76,27 @@ export type FakeContact = Record<string, unknown> & {
   updated: string;
 };
 
+export interface FakeCalendar {
+  id: string;
+  name: string;
+  description: string | null;
+  color: string | null;
+  isDefault: boolean;
+  timeZone: string | null;
+  mayWrite: boolean;
+}
+
+/**
+ * A CalendarEvent as the fake stores it: a JSCalendar Event (RFC 8984) with `id` and `calendarIds`.
+ * `start` is a LocalDateTime in `timeZone` (null: UTC), `duration` an ISO 8601 duration.
+ */
+export type FakeEvent = Record<string, unknown> & {
+  id: string;
+  calendarIds: Record<string, true>;
+  start: string;
+  duration: string;
+};
+
 export interface FakeAccount {
   accountId: string;
   email: string;
@@ -85,6 +106,8 @@ export interface FakeAccount {
   sent: SentMessage[];
   addressBooks: Map<string, FakeAddressBook>;
   contacts: Map<string, FakeContact>;
+  calendars: Map<string, FakeCalendar>;
+  events: Map<string, FakeEvent>;
 }
 
 /** What the JMAP handlers need from the fake. */

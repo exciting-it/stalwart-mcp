@@ -6,12 +6,12 @@
  */
 import { clock } from "../src/clock";
 import { STALWART } from "../src/stalwart/endpoints";
-import { addDefaultAddressBook, AREA_SCOPES, COLLAB_CAPABILITIES } from "./fake-stalwart-collab";
+import { addDefaultAddressBook, addDefaultCalendar, AREA_SCOPES, COLLAB_CAPABILITIES } from "./fake-stalwart-collab";
 import { handleJmapRequest } from "./fake-stalwart-jmap";
 import type { FakeArea } from "./fake-stalwart-support";
-import type { FakeAccount, FakeAddress, FakeContact, FakeEmail, FakeFolder, FakeState, SentMessage } from "./fake-stalwart-state";
+import type { FakeAccount, FakeAddress, FakeContact, FakeEmail, FakeEvent, FakeFolder, FakeState, SentMessage } from "./fake-stalwart-state";
 
-export type { FakeAccount, FakeAddress, FakeAddressBook, FakeAttachment, FakeContact, FakeEmail, FakeFolder, FakeIdentity, FakeState, SentMessage } from "./fake-stalwart-state";
+export type { FakeAccount, FakeAddress, FakeAddressBook, FakeAttachment, FakeCalendar, FakeContact, FakeEmail, FakeEvent, FakeFolder, FakeIdentity, FakeState, SentMessage } from "./fake-stalwart-state";
 
 export interface RecordedRequest {
   url: string;
@@ -81,6 +81,18 @@ export interface FakeStalwart {
   addContact(email: string, card?: Record<string, unknown>): { id: string; addressBookId: string };
   addAddressBook(email: string, name?: string): { id: string };
   defaultAddressBookId(email: string): string;
+  /** Adds a calendar (not the default one) to `email`'s account. `readOnly` gives no write rights. */
+  addCalendar(
+    email: string,
+    name?: string,
+    options?: { description?: string; color?: string; timeZone?: string; readOnly?: boolean },
+  ): { id: string };
+  /**
+   * Adds a CalendarEvent (JSCalendar fields; `start` is a LocalDateTime in `timeZone`, default UTC;
+   * `duration` defaults to PT1H; `calendarIds` defaults to the default calendar) to `email`'s account.
+   */
+  addEvent(email: string, event: Record<string, unknown> & { start: string }): { id: string; calendarId: string };
+  defaultCalendarId(email: string): string;
   /** Cuts every grant of `email` down to the mail scope, as if the mailbox had connected before an area was switched on. */
   restrictToMail(email: string): void;
   /** The scope string of the grant `token` belongs to, or null for an unknown token. */
@@ -212,8 +224,11 @@ export function createFakeStalwart(): FakeStalwart {
       sent: [],
       addressBooks: new Map(),
       contacts: new Map(),
+      calendars: new Map(),
+      events: new Map(),
     };
     addDefaultAddressBook(account, nextId("ab"));
+    addDefaultCalendar(account, nextId("cal"));
     const folder = (name: string, role: string) => {
       const f: FakeFolder = { id: nextId("mb"), name, role, parentId: null };
       account.folders.set(f.id, f);
@@ -532,6 +547,38 @@ export function createFakeStalwart(): FakeStalwart {
       return { id };
     },
     defaultAddressBookId: (email) => [...accountFor(email).addressBooks.values()].find((b) => b.isDefault)!.id,
+    addCalendar(email, name = "Calendar", options = {}) {
+      const account = accountFor(email);
+      const id = nextId("cal");
+      account.calendars.set(id, {
+        id,
+        name,
+        description: options.description ?? null,
+        color: options.color ?? null,
+        isDefault: false,
+        timeZone: options.timeZone ?? null,
+        mayWrite: options.readOnly !== true,
+      });
+      return { id };
+    },
+    addEvent(email, event) {
+      const account = accountFor(email);
+      const defaultCalendar = [...account.calendars.values()].find((c) => c.isDefault)!;
+      const id = nextId("ev");
+      const stored: FakeEvent = {
+        "@type": "Event",
+        calendarIds: { [defaultCalendar.id]: true },
+        duration: "PT1H",
+        ...event,
+        id,
+      };
+      for (const calendarId of Object.keys(stored.calendarIds)) {
+        if (!account.calendars.has(calendarId)) throw new Error(`fake-stalwart: ${account.email} has no calendar ${calendarId}`);
+      }
+      account.events.set(id, stored);
+      return { id, calendarId: Object.keys(stored.calendarIds)[0]! };
+    },
+    defaultCalendarId: (email) => [...accountFor(email).calendars.values()].find((c) => c.isDefault)!.id,
     restrictToMail(email) {
       for (const g of grants) if (key(g.email) === key(email)) g.scope = MAIL_SCOPE;
     },

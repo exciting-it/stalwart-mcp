@@ -124,6 +124,44 @@ describe("mail connector isolation, end to end", () => {
     expect((theirs.structuredContent as { contact: { name: string } }).contact.name).toBe("B's secret");
   });
 
+  it("user A cannot read user B's calendars or events", async () => {
+    const accountIdA = fake.addMailbox(A).accountId;
+    const accountIdB = fake.addMailbox(B).accountId;
+    const a = await connect(fake, A);
+    const b = await connect(fake, B);
+    const day = { after: "2026-11-27T00:00:00Z", before: "2026-11-28T00:00:00Z" };
+    const mine = fake.addEvent(A, { title: "A's lunch", start: "2026-11-27T12:00:00" });
+    const privateCalendar = fake.addCalendar(B, "B's private");
+    const secret = fake.addEvent(B, { title: "B's secret", start: "2026-11-27T12:00:00", calendarIds: { [privateCalendar.id]: true } });
+
+    const before = fake.requests.length;
+    const calendars = await callTool(a.accessToken!, "list_calendars", {});
+    expect((calendars.structuredContent as { calendars: { id: string }[] }).calendars.map((c) => c.id)).toEqual([fake.defaultCalendarId(A)]);
+    const own = await callTool(a.accessToken!, "search_events", day);
+    expect((own.structuredContent as { events: { id: string }[] }).events.map((e) => e.id)).toEqual([mine.id]);
+    const byText = await callTool(a.accessToken!, "search_events", { ...day, text: "secret" });
+    const byCalendar = await callTool(a.accessToken!, "search_events", { ...day, calendar_id: privateCalendar.id });
+    for (const r of [byText, byCalendar]) expect((r.structuredContent as { events: unknown[] }).events).toEqual([]);
+    const foreign = await callTool(a.accessToken!, "read_event", { event_id: secret.id });
+    expect(foreign).toEqual({ isError: true, content: [{ type: "text", text: MAIL_ERROR_MESSAGES.not_found }] });
+    expect(JSON.stringify([calendars, own, byText, byCalendar, foreign])).not.toContain("B's");
+
+    const aRequests = fake.requests.slice(before);
+    const tokensA = fake.tokensFor(A);
+    expect(aRequests.length).toBeGreaterThan(0);
+    for (const r of aRequests) {
+      expect(r.authorization).toBe(`Bearer ${tokensA.accessToken}`);
+      const calls = (r.body as { methodCalls?: [string, { accountId?: string }, string][] } | null)?.methodCalls;
+      for (const [name, args] of calls ?? []) {
+        expect(args.accountId).toBe(accountIdA);
+        expect(args.accountId).not.toBe(accountIdB);
+        expect(name).toMatch(/\/(get|query)$/);
+      }
+    }
+    const theirs = await callTool(b.accessToken!, "read_event", { event_id: secret.id });
+    expect((theirs.structuredContent as { event: { title: string } }).event.title).toBe("B's secret");
+  });
+
   it("a mailbox connected with the mail scope only gets not_granted for contacts and calendars, audited as refused", async () => {
     const accountA = fake.addMailbox(A).accountId;
     const a = await connect(fake, A);
@@ -135,12 +173,15 @@ describe("mail connector isolation, end to end", () => {
     const calls: [string, Record<string, unknown>][] = [
       ["search_contacts", {}],
       ["read_contact", { contact_id: "ct1" }],
+      ["list_calendars", {}],
+      ["search_events", { after: "2026-11-27T00:00:00Z", before: "2026-11-28T00:00:00Z" }],
+      ["read_event", { event_id: "ev1" }],
     ];
     for (const [name, args] of calls) {
       const r = await callTool(a.accessToken!, name, args);
       expect(r).toEqual({ isError: true, content: [{ type: "text", text: MAIL_ERROR_MESSAGES.not_granted }] });
     }
-    // Only the session was read: no JMAP method call went out for either tool.
+    // Only the session was read: no JMAP method call went out for any of these tools.
     expect(fake.requests.filter((r) => r.url === `${STALWART.origin}/jmap/`).length).toBe(before);
     const { results } = await env.DB.prepare(
       "SELECT tool, outcome, error_code FROM audit_log WHERE account_id = ? AND event = 'tool_call' ORDER BY id",
@@ -150,6 +191,9 @@ describe("mail connector isolation, end to end", () => {
     expect(results).toEqual([
       { tool: "search_contacts", outcome: "refused", error_code: "not_granted" },
       { tool: "read_contact", outcome: "refused", error_code: "not_granted" },
+      { tool: "list_calendars", outcome: "refused", error_code: "not_granted" },
+      { tool: "search_events", outcome: "refused", error_code: "not_granted" },
+      { tool: "read_event", outcome: "refused", error_code: "not_granted" },
     ]);
     // Mail is unaffected.
     expect((await callTool(a.accessToken!, "list_mailboxes", {})).isError).toBeFalsy();

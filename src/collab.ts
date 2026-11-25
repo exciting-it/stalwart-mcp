@@ -26,6 +26,8 @@ export const COLLAB_LIMITS = {
   detailListMax: 20,
   locationsMax: 5,
   onlineMeetingsMax: 3,
+  /** A meeting link longer than this is dropped rather than cut (a cut link would point elsewhere). */
+  urlChars: 2000,
   participantsMax: 50,
 } as const;
 

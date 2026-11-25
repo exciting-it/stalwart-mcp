@@ -65,12 +65,35 @@ describe("collab through the vault", () => {
     await expectCode(box.readContact({ contact_id: fake.addContact(B, {}).id }), "not_found");
   });
 
+  it("answers calendars and events from the mailbox's own account", async () => {
+    const { box } = await signIn(A);
+    fake.addMailbox(B);
+    const mine = fake.addEvent(A, { title: "Standup", start: "2026-11-01T09:00:00" });
+    fake.addEvent(B, { title: "Secret", start: "2026-11-01T09:00:00" });
+    const { calendars } = await box.listCalendars();
+    expect(calendars.map((c) => c.id)).toEqual([fake.defaultCalendarId(A)]);
+    const found = await box.searchEvents(RANGE);
+    expect(found.events.map((e) => [e.id, e.title])).toEqual([[mine.id, "Standup"]]);
+    expect((await box.readEvent({ event_id: mine.id })).event.title).toBe("Standup");
+    await expectCode(box.readEvent({ event_id: fake.addEvent(B, { start: "2026-11-01T09:00:00" }).id }), "not_found");
+  });
+
   it("counts against the per-mailbox call limit, together with the mail calls", async () => {
     const { box } = await signIn(A);
     for (let i = 0; i < MAIL_LIMITS.toolCallsPerMinute - 1; i++) await box.searchContacts({ limit: 1, offset: 0 });
     await box.listMailboxes();
     await expectCode(box.searchContacts({ limit: 1, offset: 0 }), "rate_limited");
     await expectCode(box.readContact({ contact_id: "ct1" }), "rate_limited");
+  });
+
+  it("counts the calendar calls against the same limit", async () => {
+    const { box } = await signIn(A);
+    for (let i = 0; i < MAIL_LIMITS.toolCallsPerMinute - 2; i++) await box.listCalendars();
+    await box.searchEvents(RANGE);
+    await box.listMailboxes();
+    await expectCode(box.listCalendars(), "rate_limited");
+    await expectCode(box.searchEvents(RANGE), "rate_limited");
+    await expectCode(box.readEvent({ event_id: "ev1" }), "rate_limited");
   });
 
   it("refuses a caller whose account or address does not match the connection", async () => {

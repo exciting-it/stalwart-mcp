@@ -4,8 +4,17 @@
  * through `clean` or `cleanText`, so no path can skip the sanitizer.
  */
 import { z } from "zod";
-import { COLLAB_LIMITS, type ContactDetail, type ContactSummary, type SearchContactsInputT } from "../collab";
-import { cleanText } from "../content/sanitize";
+import {
+  type CalendarInfo,
+  COLLAB_LIMITS,
+  type ContactDetail,
+  type ContactSummary,
+  type EventDetail,
+  type EventSummary,
+  type SearchContactsInputT,
+  type SearchEventsInputT,
+} from "../collab";
+import { cleanText, htmlToText } from "../content/sanitize";
 import { MailIdSchema } from "../mail";
 import { clean, trueKeys } from "./map";
 
@@ -224,5 +233,198 @@ export function contactFilter(input: SearchContactsInputT): Record<string, unkno
   if (input.phone !== undefined) f.phone = input.phone;
   if (input.organization !== undefined) f.organization = input.organization;
   if (input.address_book_id !== undefined) f.inAddressBook = input.address_book_id;
+  return f;
+}
+
+// ---- calendars: a CalendarEvent is a JSCalendar Event (RFC 8984) plus `id`, `calendarIds` and the
+// server-computed `utcStart` / `utcEnd` (draft-ietf-jmap-calendars) ----
+
+export const JmapCalendar = z.object({
+  id: MailIdSchema,
+  name: z.string().nullish(),
+  description: z.string().nullish(),
+  color: z.string().nullish(),
+  isDefault: z.boolean().nullish(),
+  timeZone: z.string().nullish(),
+  myRights: z.object({ mayWriteAll: z.boolean().nullish(), mayWriteOwn: z.boolean().nullish() }).nullish(),
+});
+
+export const JmapCalendarEvent = z.object({
+  id: MailIdSchema,
+  calendarIds: z.record(z.string(), z.boolean()).nullish(),
+  title: z.string().nullish(),
+  description: z.string().nullish(),
+  descriptionContentType: z.string().nullish(),
+  start: z.string().nullish(),
+  timeZone: z.string().nullish(),
+  duration: z.string().nullish(),
+  showWithoutTime: z.boolean().nullish(),
+  utcStart: z.string().nullish(),
+  utcEnd: z.string().nullish(),
+  status: z.string().nullish(),
+  freeBusyStatus: z.string().nullish(),
+  privacy: z.string().nullish(),
+  recurrenceId: z.string().nullish(),
+  recurrenceRules: z
+    .array(
+      z.object({
+        frequency: z.string().nullish(),
+        interval: z.number().int().nullish(),
+        count: z.number().int().nullish(),
+        until: z.string().nullish(),
+      }),
+    )
+    .nullish(),
+  locations: Entries(z.object({ name: z.string().nullish() })),
+  virtualLocations: Entries(z.object({ uri: z.string().nullish(), name: z.string().nullish() })),
+  participants: Entries(
+    z.object({
+      name: z.string().nullish(),
+      email: z.string().nullish(),
+      sendTo: z.object({ imip: z.string().nullish() }).nullish(),
+      roles: z.record(z.string(), z.boolean()).nullish(),
+      participationStatus: z.string().nullish(),
+    }),
+  ),
+});
+
+type CalendarEventObject = z.infer<typeof JmapCalendarEvent>;
+
+export const CALENDAR_PROPERTIES = ["id", "name", "description", "color", "isDefault", "timeZone", "myRights"] as const;
+
+// `recurrenceOverrides` is never requested: the server answers `invalidArguments` when it comes
+// together with `utcStart`.
+const EVENT_SUMMARY_PROPERTIES = [
+  "id", "calendarIds", "title", "start", "timeZone", "duration", "showWithoutTime", "utcStart", "utcEnd",
+  "status", "locations", "recurrenceId", "recurrenceRules",
+] as const;
+export const EVENT_SUMMARY_REQUEST = EVENT_SUMMARY_PROPERTIES;
+export const EVENT_DETAIL_PROPERTIES = [
+  ...EVENT_SUMMARY_PROPERTIES, "description", "descriptionContentType", "virtualLocations", "participants",
+  "freeBusyStatus", "privacy",
+] as const;
+
+/** The zone the server computes `utcStart` / `utcEnd` for and reads the query's bounds in. */
+export const EVENT_TIME_ZONE = "Etc/UTC";
+
+export function toCalendarInfo(c: z.infer<typeof JmapCalendar>): CalendarInfo {
+  const optional = (v: string | null | undefined, chars: number): string | null => {
+    const text = v == null ? "" : clean(v, chars).trim();
+    return text === "" ? null : text;
+  };
+  return {
+    id: c.id,
+    name: c.name == null ? "" : clean(c.name, LINE).trim(),
+    description: optional(c.description, COLLAB_LIMITS.notesChars),
+    color: optional(c.color, 64),
+    is_default: c.isDefault === true,
+    time_zone: optional(c.timeZone, 64),
+    can_write: c.myRights?.mayWriteAll === true || c.myRights?.mayWriteOwn === true,
+  };
+}
+
+const optionalLine = (v: string | null | undefined, chars = 64): string | null => {
+  const text = v == null ? "" : clean(v, chars).trim();
+  return text === "" ? null : text;
+};
+
+function locationNames(e: CalendarEventObject, max: number): string[] {
+  return cleanedList(values(e.locations).map((l) => l.name), max, LINE);
+}
+
+function isRecurring(e: CalendarEventObject): boolean {
+  return e.recurrenceId != null || (e.recurrenceRules ?? []).length > 0;
+}
+
+export function toEventSummary(e: CalendarEventObject): EventSummary {
+  return {
+    id: e.id,
+    calendar_ids: trueKeys(e.calendarIds).slice(0, DETAIL_MAX),
+    title: e.title == null ? "" : clean(e.title, LINE).trim(),
+    start: optionalLine(e.utcStart),
+    end: optionalLine(e.utcEnd),
+    local_start: optionalLine(e.start),
+    time_zone: optionalLine(e.timeZone),
+    all_day: e.showWithoutTime === true,
+    location: locationNames(e, 1)[0] ?? null,
+    status: optionalLine(e.status),
+    recurring: isRecurring(e),
+  };
+}
+
+/** A short plain summary of the first rule, from its own fields only: `weekly, every 2, until 2027-01-01`. */
+function recurrenceSummary(e: CalendarEventObject): string | null {
+  const rule = (e.recurrenceRules ?? [])[0];
+  if (rule == null) return null;
+  const parts = [optionalLine(rule.frequency, 32) ?? "recurring"];
+  if (rule.interval != null && rule.interval > 1) parts.push(`every ${rule.interval}`);
+  if (rule.count != null) parts.push(`${rule.count} times`);
+  if (rule.until != null) {
+    const until = clean(rule.until, 64).trim();
+    // A rule that ends at the start of a day reads as that date.
+    const day = /^(\d{4}-\d{2}-\d{2})T00:00:00(?:\.0+)?Z?$/.exec(until);
+    parts.push(`until ${day?.[1] ?? until}`);
+  }
+  return parts.join(", ");
+}
+
+const ROLES = ["chair", "owner", "attendee", "optional", "informational"] as const;
+
+function onlineMeetings(e: CalendarEventObject): string[] {
+  const out: string[] = [];
+  for (const v of values(e.virtualLocations)) {
+    if (out.length >= COLLAB_LIMITS.onlineMeetingsMax) break;
+    if (v.uri == null) continue;
+    const uri = clean(v.uri, COLLAB_LIMITS.urlChars + 1).trim();
+    if (uri === "" || uri.length > COLLAB_LIMITS.urlChars || /\s/.test(uri)) continue;
+    try {
+      const { protocol } = new URL(uri);
+      if (protocol === "http:" || protocol === "https:") out.push(uri);
+    } catch {
+      // not a URL: dropped
+    }
+  }
+  return out;
+}
+
+export function toEventDetail(e: CalendarEventObject): EventDetail {
+  const raw = e.description ?? "";
+  const description = cleanText(
+    e.descriptionContentType?.toLowerCase().startsWith("text/html") === true ? htmlToText(raw) : raw,
+    COLLAB_LIMITS.descriptionChars,
+  );
+  const people = values(e.participants);
+  return {
+    ...toEventSummary(e),
+    description: description.text,
+    description_truncated: description.truncated,
+    locations: locationNames(e, COLLAB_LIMITS.locationsMax),
+    online_meetings: onlineMeetings(e),
+    participants: people.slice(0, COLLAB_LIMITS.participantsMax).map((p) => ({
+      name: optionalLine(p.name, LINE),
+      email: optionalLine(p.email ?? p.sendTo?.imip?.replace(/^mailto:/i, ""), 320),
+      role: ROLES.find((r) => p.roles?.[r] === true) ?? null,
+      status: optionalLine(p.participationStatus),
+    })),
+    participants_omitted: Math.max(0, people.length - COLLAB_LIMITS.participantsMax),
+    recurrence: recurrenceSummary(e),
+    free_busy: optionalLine(e.freeBusyStatus),
+    privacy: optionalLine(e.privacy),
+  };
+}
+
+/** An instant as a JMAP LocalDateTime in UTC: `YYYY-MM-DDTHH:MM:SS`, no offset and no `Z`. */
+function localDateTimeUtc(instant: string): string {
+  return new Date(instant).toISOString().slice(0, 19);
+}
+
+/** Search input → JMAP `CalendarEvent/query` FilterCondition (one condition, as `expandRecurrences` needs). */
+export function eventFilter(input: SearchEventsInputT): Record<string, unknown> {
+  const f: Record<string, unknown> = {
+    after: localDateTimeUtc(input.after),
+    before: localDateTimeUtc(input.before),
+  };
+  if (input.calendar_id !== undefined) f.inCalendar = input.calendar_id;
+  if (input.text !== undefined) f.text = input.text;
   return f;
 }

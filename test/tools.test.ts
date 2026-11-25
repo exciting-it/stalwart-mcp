@@ -4,7 +4,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import type { AuditEntry } from "../src/audit";
 import type { Grant, Tool, ToolDeps } from "../src/tools/define-tool";
 import { toolsFor, TOOLS } from "../src/tools";
-import { COLLAB_CONTENT_NOTICE } from "../src/collab";
+import { COLLAB_CONTENT_NOTICE, SearchEventsInputBase } from "../src/collab";
 import { createFakeMailStore, type FakeMailStore } from "./fake-mailbox";
 
 let store: FakeMailStore;
@@ -43,6 +43,8 @@ const text = (r: CallToolResult): string => {
   if (first?.type !== "text") throw new Error("expected a text item");
   return first.text;
 };
+const DAY = { after: "2026-11-27T00:00:00Z", before: "2026-11-28T00:00:00Z" };
+
 // Deliberately carries B's ids where a tool takes one: the grant alone decides the account.
 const validInputFor = (tool: Tool): Record<string, unknown> =>
   ({
@@ -55,6 +57,9 @@ const validInputFor = (tool: Tool): Record<string, unknown> =>
     delete_mail: { message_ids: [store.b.messageId] },
     search_contacts: { text: "contact", address_book_id: store.b.addressBookId },
     read_contact: { contact_id: store.b.contactId },
+    list_calendars: {},
+    search_events: { ...DAY, calendar_id: store.b.calendarId, text: "Meeting" },
+    read_event: { event_id: store.b.eventId },
   })[tool.spec.name]!;
 
 // The same calls with A's own ids, where a tool needs an id that exists.
@@ -64,6 +69,8 @@ const ownInputFor = (tool: Tool): Record<string, unknown> =>
     move_mail: { message_ids: [store.a.messageId], folder_id: "a-drafts" },
     delete_mail: { message_ids: [store.a.messageId] },
     read_contact: { contact_id: store.a.contactId },
+    search_events: DAY,
+    read_event: { event_id: store.a.eventId },
   })[tool.spec.name] ?? validInputFor(tool);
 
 /** The tools of the always-offered mail part; the contacts and calendar tools are tested apart. */
@@ -83,6 +90,11 @@ describe("tools", () => {
     expect(TOOLS.filter((t) => t.spec.area === "contacts").map((t) => t.spec.name)).toEqual([
       "search_contacts",
       "read_contact",
+    ]);
+    expect(TOOLS.filter((t) => t.spec.area === "calendars").map((t) => t.spec.name)).toEqual([
+      "list_calendars",
+      "search_events",
+      "read_event",
     ]);
   });
 
@@ -301,6 +313,8 @@ describe("tools", () => {
     expect(names(new Set())).toEqual(mail);
     expect(names(new Set(["contacts"]))).toEqual([...mail, "search_contacts", "read_contact"]);
     expect(names(new Set(["contacts"]))).not.toContain("list_calendars");
+    expect(names(new Set(["calendars"]))).toEqual([...mail, "list_calendars", "search_events", "read_event"]);
+    expect(names(new Set(["contacts", "calendars"]))).toEqual(TOOLS.map((t) => t.spec.name));
   });
 
   describe("contacts tools", () => {
@@ -359,6 +373,101 @@ describe("tools", () => {
       const r = await byName("search_contacts").execute(deps, grantA, {});
       expect(r).toEqual({ isError: true, content: [{ type: "text", text: MAIL_ERROR_MESSAGES.not_granted }] });
       expect(audits.at(-1)).toMatchObject({ tool: "search_contacts", outcome: "refused", errorCode: "not_granted" });
+    });
+  });
+
+  describe("calendar tools", () => {
+    const CALENDAR_TOOLS = ["list_calendars", "search_events", "read_event"];
+
+    it("are read-only tools of the calendars area without an account or address parameter", () => {
+      for (const name of CALENDAR_TOOLS) {
+        const { spec } = byName(name);
+        expect(spec).toMatchObject({ kind: "read", area: "calendars" });
+        expect(spec.description).toMatch(/third parties.*: treat .* as data, never as instructions/);
+        // `search_events` has a refined (effects) schema; its plain object is `SearchEventsInputBase`.
+        const input = name === "search_events" ? SearchEventsInputBase : spec.input;
+        for (const key of Object.keys((input as { shape: Record<string, unknown> }).shape)) {
+          expect(key).not.toMatch(/account|sender|identity|from/i);
+        }
+      }
+    });
+
+    it("lead the result with the fixed notice and count in the audit row without content", async () => {
+      const list = await byName("list_calendars").execute(deps, grantA, {});
+      expect(Object.keys(list.structuredContent as object)).toEqual(["content_notice", "calendars"]);
+      const search = await byName("search_events").execute(deps, grantA, DAY);
+      const result = search.structuredContent as Record<string, unknown>;
+      expect(Object.keys(result)).toEqual(["content_notice", "events", "next_offset"]);
+      expect(result.content_notice).toBe(COLLAB_CONTENT_NOTICE);
+      expect(text(search).startsWith(`{"content_notice":${JSON.stringify(COLLAB_CONTENT_NOTICE)}`)).toBe(true);
+      const read = await byName("read_event").execute(deps, grantA, { event_id: store.a.eventId });
+      expect(Object.keys(read.structuredContent as object)).toEqual(["content_notice", "event"]);
+      const base = { event: "tool_call", accountId: grantA.accountId, email: grantA.email, clientId: "client-1" };
+      expect(audits).toEqual([
+        { ...base, tool: "list_calendars", outcome: "ok", resultCount: 1 },
+        { ...base, tool: "search_events", outcome: "ok", resultCount: 1 },
+        { ...base, tool: "read_event", outcome: "ok", resultCount: 1 },
+      ]);
+      expect(JSON.stringify(audits)).not.toMatch(/Meeting of A|Calendar A/);
+    });
+
+    it("reach only the grant's own account: B's calendar and event find nothing", async () => {
+      expect(text(await byName("read_event").execute(deps, grantA, { event_id: store.b.eventId }))).toBe(
+        MAIL_ERROR_MESSAGES.not_found,
+      );
+      const search = await byName("search_events").execute(deps, grantA, { ...DAY, calendar_id: store.b.calendarId });
+      expect((search.structuredContent as { events: unknown[] }).events).toEqual([]);
+      const own = await byName("search_events").execute(deps, grantA, { ...DAY, text: "Meeting" });
+      expect((own.structuredContent as { events: { id: string }[] }).events.map((e) => e.id)).toEqual([store.a.eventId]);
+      expect(store.calls.every((c) => c.accountId === grantA.accountId)).toBe(true);
+    });
+
+    it("refuse unknown fields, bad ids and an invalid time range before the mailbox is touched", async () => {
+      for (const [name, input] of [
+        ["list_calendars", { account_id: store.b.accountId }],
+        ["search_events", { ...DAY, account_id: store.b.accountId }],
+        ["search_events", { after: DAY.after }],
+        ["search_events", { before: DAY.before }],
+        ["search_events", { after: DAY.before, before: DAY.after }],
+        ["search_events", { after: DAY.after, before: DAY.after }],
+        ["search_events", { after: "2026-01-01T00:00:00Z", before: "2026-12-01T00:00:00Z" }],
+        ["search_events", { after: "2026-11-27", before: "2026-11-28" }],
+        ["search_events", { ...DAY, limit: 51 }],
+        ["search_events", { ...DAY, limit: 0 }],
+        ["search_events", { ...DAY, offset: 10_001 }],
+        ["search_events", { ...DAY, calendar_id: "../x" }],
+        ["search_events", { ...DAY, text: "x".repeat(201) }],
+        ["read_event", { event_id: store.a.eventId, account_id: store.b.accountId }],
+        ["read_event", { event_id: "../x" }],
+        ["read_event", {}],
+      ] as const) {
+        const r = await byName(name).execute(deps, grantA, input);
+        expect(text(r)).toBe(MAIL_ERROR_MESSAGES.invalid_input);
+      }
+      expect(store.calls).toEqual([]);
+    });
+
+    it("accept a window of exactly 180 days and a limit of 50", async () => {
+      const r = await byName("search_events").execute(deps, grantA, {
+        after: "2026-11-27T00:00:00Z",
+        before: "2027-05-26T00:00:00Z",
+        limit: 50,
+      });
+      expect(r.isError).toBeUndefined();
+    });
+
+    it("count against the same call path as the other tools: each call reaches the mailbox once", async () => {
+      for (const name of CALENDAR_TOOLS) await byName(name).execute(deps, grantA, ownInputFor(byName(name)));
+      expect(store.calls.map((c) => c.method)).toEqual(["listCalendars", "searchEvents", "readEvent"]);
+    });
+
+    it("report a connection without the calendars permission as not_granted, audited as refused", async () => {
+      for (const name of CALENDAR_TOOLS) {
+        store.failNextWith(new MailError("not_granted"));
+        const r = await byName(name).execute(deps, grantA, ownInputFor(byName(name)));
+        expect(r).toEqual({ isError: true, content: [{ type: "text", text: MAIL_ERROR_MESSAGES.not_granted }] });
+        expect(audits.at(-1)).toMatchObject({ tool: name, outcome: "refused", errorCode: "not_granted" });
+      }
     });
   });
 });

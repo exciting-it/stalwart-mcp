@@ -4,7 +4,8 @@ A remote MCP server for [Stalwart](https://stalw.art) mailboxes, running on Clou
 
 A mailbox user adds the connector's address in an AI tool (Claude and others), signs in with the
 mailbox login on the mail server's own page, and the tool can then list folders, search, read
-conversations, write drafts and send mail in that one mailbox. The worker sits between the AI
+conversations, write drafts and send mail in that one mailbox. If the deployment switches it on,
+the tool can also read that mailbox's contacts and calendar. The worker sits between the AI
 tool and Stalwart's JMAP API: it is an OAuth server toward the tool and an OAuth client toward
 Stalwart. The tool never receives a Stalwart token.
 
@@ -29,6 +30,16 @@ Why it is built this way, and what its security rests on: [docs/design.md](docs/
 | `send_mail` | Send a new mail or a reply, plain text, from the mailbox's own address |
 | `move_mail` | Move messages into another folder of the mailbox |
 | `delete_mail` | Move messages to the Trash folder |
+| `search_contacts` | Search the address book by text, name, email, phone, organization or address book (needs `contacts`) |
+| `read_contact` | One contact: names, emails, phones, organizations, addresses, birthday, notes (needs `contacts`) |
+| `list_calendars` | The mailbox's calendars with id, name and whether they are writable (needs `calendars`) |
+| `search_events` | Events that overlap a time window of at most 180 days, one entry per occurrence of a recurring event (needs `calendars`) |
+| `read_event` | One event: time, locations, description, participants, meeting links, recurrence (needs `calendars`) |
+
+The last five tools exist only when the deployment names their area in `FEATURES`
+(see [Contacts and calendars](#contacts-and-calendars)). They only read: the connector has no
+call that creates, changes or deletes a contact or an event, answers an invitation, or sends
+anything.
 
 It cannot remove mail for good, flag mail, manage folders, touch filters, or send from another
 address. Deleting always means moving to Trash, and `move_mail` brings a message back. The
@@ -47,11 +58,12 @@ limits).
 
 ## Limits
 
-Constants live in `MAIL_LIMITS` in `src/mail.ts`.
+Constants live in `MAIL_LIMITS` in `src/mail.ts` and, for contacts and calendars,
+`COLLAB_LIMITS` in `src/collab.ts`.
 
 | What | Value |
 |---|---|
-| Tool calls per mailbox | 60 per minute |
+| Tool calls per mailbox (mail, contacts and calendar calls together) | 60 per minute |
 | Messages sent per mailbox | 50 per day |
 | Recipients per message (To, Cc, Bcc together) | 10 |
 | Messages per `move_mail` or `delete_mail` call | 50 |
@@ -59,6 +71,17 @@ Constants live in `MAIL_LIMITS` in `src/mail.ts`.
 | Parallel calls to Stalwart per mailbox | 2 |
 | Search results per page | at most 25 (default 10) |
 | Messages returned per thread | at most 25 |
+| Contacts per `search_contacts` page | at most 25 (default 10) |
+| Events per `search_events` page | at most 50 (default 25) |
+| Window of `search_events` (`after` to `before`) | at most 180 days |
+| `offset` of `search_contacts` and `search_events` | 0 to 10,000 |
+| Text of a name, title, label, location, participant or other single line | 200 characters |
+| Postal address of a contact | 500 characters |
+| Contact notes | 2,000 characters, then `notes_truncated` |
+| Event description | 5,000 characters, then `description_truncated` |
+| Emails and phones in a contact summary | 5 each |
+| Emails, phones, addresses, titles, nicknames, organizations in a contact | 20 each |
+| Locations, online meeting links, participants of an event | 5, 3 (http and https only), 50 (the rest counted in `participants_omitted`) |
 | Body text returned per message | 20,000 characters, then cut with a marker |
 | Body text accepted when writing | 100,000 characters |
 | Worker access token lifetime | 1 hour |
@@ -82,7 +105,9 @@ access to it, a Cloudflare account, and [Bun](https://bun.sh).
      same way. It must match `routes`; production answers under no other host.
    - `CONNECTOR_NAME`: the name AI tools show (optional, default "Stalwart Mail").
 2. **OAuth client on Stalwart**, one per environment: confidential, grant types authorization
-   code and refresh, scope mail, exactly one redirect URI `<origin of the worker>/callback`.
+   code and refresh, scope mail (plus the scopes of the areas you switch on, see
+   [Contacts and calendars](#contacts-and-calendars)), exactly one redirect URI
+   `<origin of the worker>/callback`.
 3. **Storage for staging.** Create the KV namespace and the D1 database once and put their ids
    into `env.staging` in `wrangler.jsonc` (they are not secrets):
    `bunx wrangler kv namespace create stalwart-mcp-staging-oauth` and
@@ -101,6 +126,7 @@ access to it, a Cloudflare account, and [Bun](https://bun.sh).
    - `STALWART_OAUTH_CLIENT_ID`: the client id from step 2.
    - `SIGNIN_ALLOWLIST`: comma-separated mailbox addresses that may connect (staging).
    - `SEND_ALLOWLIST`: comma-separated addresses `send_mail` may deliver to (staging).
+   - `FEATURES` (optional): `contacts`, `calendars` or `contacts,calendars`; see below.
    - `MAIL_MCP_ENABLED`: set to `true` last. Anything else makes every endpoint answer 503.
 7. Check that the Durable Object migration `v1` was applied (the `MailboxVault` class exists
    with SQLite storage), then work through the live checks below with a test mailbox.
@@ -112,6 +138,39 @@ access to it, a Cloudflare account, and [Bun](https://bun.sh).
 Outside production both allow-lists are enforced in code. If a list is empty, nobody can
 connect and nothing is sent. This is what makes it safe to point staging at your one, real
 mail server.
+
+### Contacts and calendars
+
+Mail is always offered. Contacts and calendars are off until you name them in the dashboard
+variable `FEATURES`: `contacts`, `calendars` or `contacts,calendars` (spaces are ignored; empty
+or unset means mail only). Any other name closes the worker with 503 and
+`config_error FEATURES` in its logs, so a typo never quietly asks Stalwart for more or less.
+
+- **Scopes.** Each area makes the worker ask Stalwart for one more scope at sign-in:
+  `urn:ietf:params:oauth:scope:contacts` and `urn:ietf:params:oauth:scope:calendars`
+  (`STALWART.scope` in `src/stalwart/endpoints.ts`). The OAuth client on Stalwart has to be
+  allowed to grant them. The approval page names each area, so the user knows what the tool
+  gets.
+- **Mailboxes that are already connected must connect again.** Their Stalwart token was issued
+  with the mail scope only. Until then the new tools answer with the fixed message "This
+  connection does not include that permission. Remove the connector in your AI tool and connect
+  the mailbox again." (`not_granted`, audited as `refused`), and send nothing to Stalwart.
+  Mail keeps working.
+- **Reach of the token.** As with mail, which also opens IMAP and SMTP, the scopes are Stalwart's,
+  not the connector's: a vault token with the contacts or calendars scope also reaches
+  CardDAV and CalDAV for that account. The connector only ever sends JMAP `/get` and `/query`
+  requests; the tests assert that no request contains a `/set`, `/copy` or `/parse` method.
+- **What the tools return.** Every result leads with a fixed `content_notice` saying that names,
+  titles, descriptions, notes, locations and addresses may come from third parties (for example
+  the sender of an invitation) and are data, not instructions. Text is stripped of control and
+  bidi characters and capped; an HTML description is reduced to text; a meeting link is kept
+  only when it is an http or https URL.
+- **Times.** `search_events` takes `after` and `before` as ISO date-times with an offset, converts
+  them to UTC and sends them to Stalwart as local times in `Etc/UTC`. `start` and `end` in the
+  results are the server's `utcStart` and `utcEnd`; `local_start` and `time_zone` are the event's
+  own. All-day events carry `all_day: true`. The recurrence summary of `read_event` is built from
+  the first rule's own fields only (for example `weekly, every 2, until 2027-01-01`); the tool
+  does not expand rules itself, the server does (`expandRecurrences`).
 
 ### Branding
 
@@ -165,6 +224,37 @@ These need the OAuth client and a test mailbox on your server:
 - [ ] Remove the application and reconnect with two AI tools: do the earlier tools regain access (see "Known limits")?
 - [ ] How long an issued Stalwart access token keeps working after the application is removed, and after the OAuth client is deleted.
 
+If `FEATURES` is set, also these (the tests cannot tell, because the stand-in is written from the
+same assumptions as the code):
+
+- [ ] The JMAP session lists `urn:ietf:params:jmap:contacts` and `urn:ietf:params:jmap:calendars`
+  as capabilities, and the keys of `primaryAccounts` for them are those same URNs. The connector
+  reads the capabilities of the token from `primaryAccounts`; a different key means the tools
+  answer `not_granted` although the scope was granted.
+- [ ] A token with only the mail scope really gets none of the two URNs, and its contacts or
+  calendar methods answer `unknownMethod`.
+- [ ] Which draft revision of JMAP Calendars the server implements, and that `Calendar/get`
+  accepts the properties asked for (`id`, `name`, `description`, `color`, `isDefault`,
+  `timeZone`, `myRights`) and answers `myRights` with `mayWriteAll` or `mayWriteOwn`.
+- [ ] `CalendarEvent/query` accepts `expandRecurrences: true` with `timeZone: "Etc/UTC"`, a
+  single filter condition with `after` and `before` as local times without offset, and the
+  filter key `inCalendar` (singular). Check that a daily or weekly series gives one id per
+  occurrence, and that the occurrence ids contain only letters, digits, `-` and `_` (the tools
+  refuse other ids as input, and an id that fails this makes the search answer a fixed error).
+- [ ] `CalendarEvent/get` returns `utcStart` and `utcEnd` when asked for, and `read_event` on an
+  occurrence id returns that occurrence (own `start`, `recurrenceId`, no rules). Asking for
+  `utcStart` together with `recurrenceOverrides` is refused by the server, which is why the
+  connector never asks for `recurrenceOverrides`.
+- [ ] Events in a time zone with a daylight-saving change, all-day events (`showWithoutTime`),
+  and events spanning midnight: `start`, `end` and the overlap with the window are right.
+- [ ] `ContactCard/query` accepts the filter keys `text`, `name`, `email`, `phone`,
+  `organization` and `inAddressBook`, rejects other keys with `unsupportedFilter`, and how its
+  string filters match (substring or prefix; the tool description does not promise either).
+- [ ] `AddressBook/get` and `Calendar/get` with an id of another account answer a not-found, so
+  a foreign `address_book_id` or `calendar_id` gives an empty page.
+- [ ] The Stalwart access token of a contacts or calendars grant: how long it keeps working after
+  the application is removed (as for mail above), and that CardDAV and CalDAV accept it.
+
 Repeat them after a Stalwart upgrade.
 
 ## Runbook
@@ -216,6 +306,10 @@ request under a host other than `PUBLIC_ORIGIN` answers 404.
   narrowed to JMAP. Anyone who took over this worker and its secrets could act as every
   connected mailbox. Mitigations: two secrets per environment, the off switch, and deleting the
   OAuth client.
+- Contacts and calendars are read only and cover the mailbox's own account: no shared address
+  books or calendars of other accounts, no free/busy lookups, no changes. A recurring event is
+  expanded by the server for the requested window only; `search_events` pages by `offset`, so a
+  change between two pages can shift the entries.
 - A send whose outcome is unknown (a timeout, a network failure or a 5xx on the submit request)
   answers `send_unconfirmed` ("Check the Sent folder before sending this message again."). It
   counts toward the daily limit, and an identical message cannot be sent again for 10 minutes;
