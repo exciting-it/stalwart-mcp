@@ -100,10 +100,23 @@ function expectHtmlHeaders(res: Response): void {
 }
 
 describe("sign-in through Stalwart", () => {
-  it("redirects to Stalwart with PKCE S256, the mail scope and our callback", async () => {
-    const flow = await beginFlow();
+  it("shows the intro page, whose one link goes to Stalwart with PKCE S256, the scopes and our callback", async () => {
+    const flow = await beginFlow({ clientName: "Acme <b>Tool" });
     const res = flow.responses[0]!;
-    expect(res.status).toBe(302);
+    // Our own page first, never an immediate redirect: it says where the sign-in happens.
+    expect(res.status).toBe(200);
+    expect(res.headers.get("location")).toBeNull();
+    expectHtmlHeaders(res);
+    const html = await res.clone().text();
+    expect(html).toContain("Acme &lt;b&gt;Tool");
+    expect(html).not.toContain("<b>Tool");
+    expect(html).toContain(new URL(STALWART.origin).host);
+    expect(html).toContain("The application never sees your password.");
+    // Exactly one address on the page leaves this origin: the link to the sign-in.
+    const external = [...html.matchAll(/(?:href|src|action)="(https?:[^"]*)"/g)].map((m) => m[1]!);
+    expect(external).toHaveLength(1);
+    expect(external[0]!.replaceAll("&amp;", "&")).toBe(flow.stalwartUrl);
+    expect(html).not.toMatch(/<script|<form|<input/i);
     const to = new URL(flow.stalwartUrl);
     expect(`${to.origin}${to.pathname}`).toBe(STALWART.authorize);
     const p = to.searchParams;

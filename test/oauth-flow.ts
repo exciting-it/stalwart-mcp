@@ -125,19 +125,22 @@ export interface Flow {
   clientId: string;
   verifier: string;
   responses: Response[];
-  /** Where `/authorize` sent the browser (Stalwart's sign-in). */
+  /** Where the intro page of `/authorize` links to (Stalwart's sign-in). */
   stalwartUrl: string;
 }
 
-/** Registers a client and runs `/authorize`; the browser now stands at Stalwart's sign-in. */
+/** Registers a client and runs `/authorize`; the browser now stands at our intro page, one click from Stalwart's sign-in. */
 export async function beginFlow(opts: { clientName?: string } = {}): Promise<Flow> {
   const ip = nextIp();
   const jar = new CookieJar();
   const clientId = await registerClient(opts.clientName ?? "Test Tool", ip);
   const { verifier, challenge } = await pkce();
   const res = await send(authorizeUrl(clientId, challenge), { jar, ip });
-  if (res.status !== 302) throw new Error(`authorize answered ${res.status}`);
-  return { jar, ip, clientId, verifier, responses: [res], stalwartUrl: res.headers.get("location")! };
+  if (res.status !== 200) throw new Error(`authorize answered ${res.status}`);
+  // The intro page: the user continues with its one link, as a browser would.
+  const href = /<a class="go" href="([^"]+)"/.exec(await res.clone().text())?.[1];
+  if (href === undefined) throw new Error("the intro page has no link to the sign-in");
+  return { jar, ip, clientId, verifier, responses: [res], stalwartUrl: href.replaceAll("&amp;", "&") };
 }
 
 export async function connect(

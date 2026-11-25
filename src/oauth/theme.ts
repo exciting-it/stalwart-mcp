@@ -37,8 +37,8 @@ export const THEME = {
    * in the words your users know. Deployment-specific, like the rest of this file.
    */
   signInHint: {
-    de: "Benutze deine E-Mail-Adresse und dein Mail-Passwort, dieselben wie im Webmail.",
-    en: "Use your email address and your mail password, the same as for webmail.",
+    de: "Benutze deine E-Mail-Adresse und dein Mail-Passwort.",
+    en: "Use your email address and your mail password.",
   },
   /** The right half on wide screens. The image is decoration; the lines are the brand's claim. */
   artwork: {

@@ -1,6 +1,6 @@
 import { MAIL_LIMITS } from "../src/mail";
 import { describe, expect, it } from "vitest";
-import { pageLanguage, renderApprovalPage, renderMessagePage } from "../src/oauth/approval-page";
+import { pageLanguage, renderApprovalPage, renderIntroPage, renderMessagePage } from "../src/oauth/approval-page";
 
 const base = { clientName: "Claude", redirectHost: "claude.ai", email: "a@test.example", handle: "h-123" };
 
@@ -177,6 +177,54 @@ describe("page design", () => {
         "/brand/artwork.jpg",
       ]),
     );
+  });
+});
+
+describe("intro page", () => {
+  const intro = (lang: "de" | "en", over: Partial<Parameters<typeof renderIntroPage>[0]> = {}) =>
+    renderIntroPage({
+      lang,
+      clientName: "Claude",
+      redirectHost: "claude.ai",
+      mailHost: "mail.test.example",
+      continueUrl: "https://mail.test.example/login?state=s&code_challenge=c",
+      ...over,
+    });
+
+  it("says in two steps what happens, names the mail server and which login is meant", async () => {
+    const de = await intro("de").text();
+    expect(de).toContain("Claude (claude.ai) möchte sich mit deinem Postfach verbinden. Das geht in zwei Schritten:");
+    expect(de).toContain("<strong>Anmelden</strong>Auf der nächsten Seite meldest du dich bei deinem Mailserver an (mail.test.example).");
+    expect(de).toContain('<span class="hint">Benutze deine E-Mail-Adresse und dein Mail-Passwort.</span>');
+    expect(de).toContain("<strong>Bestätigen</strong>");
+    expect(de).toContain("Dein Passwort bekommt die Anwendung nie zu sehen.");
+    expect(de).toContain("Fahre nur fort, wenn du die Verbindung gerade selbst gestartet hast.");
+    expect(de).toMatch(/<a class="go" href="[^"]+">Weiter zur Anmeldung<\/a>/);
+    const en = await intro("en").text();
+    expect(en).toContain("Claude (claude.ai) wants to connect to your mailbox. This takes two steps:");
+    expect(en).toContain('<span class="hint">Use your email address and your mail password.</span>');
+    expect(en).toMatch(/<a class="go" href="[^"]+">Continue to sign-in<\/a>/);
+  });
+
+  it("escapes the tool's name, its host and the link, and has the same headers as the other pages", async () => {
+    const res = intro("en", {
+      clientName: `<img src=x onerror=1>"'&`,
+      redirectHost: "<b>x.example",
+      continueUrl: `https://mail.test.example/login?a=1&b="><script>alert(1)</script>`,
+    });
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-security-policy")).toBe(
+      "default-src 'none'; style-src 'unsafe-inline'; img-src 'self'; font-src 'self'; frame-ancestors 'none'; base-uri 'none'",
+    );
+    expect(res.headers.get("cache-control")).toBe("no-store");
+    expect(res.headers.get("referrer-policy")).toBe("no-referrer");
+    const html = await res.text();
+    expect(html).not.toContain("<script");
+    expect(html).not.toContain("<img src=x");
+    expect(html).not.toContain("<b>x.example");
+    expect(html).toContain('href="https://mail.test.example/login?a=1&amp;b=&quot;&gt;&lt;script&gt;alert(1)&lt;/script&gt;"');
+    // No form and no field: the page collects nothing, least of all a password.
+    expect(html).not.toMatch(/<form|<input|<button/i);
   });
 });
 

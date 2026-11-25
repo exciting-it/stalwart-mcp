@@ -49,7 +49,10 @@ limits).
 ## Sign-in flow
 
 1. The AI tool registers itself and sends the user's browser to `/authorize` on this worker.
-2. The worker sends the browser on to Stalwart's sign-in page (PKCE, bound to the browser by a cookie).
+2. The worker shows its own intro page: what is about to happen, on which server the sign-in
+   takes place and which login is meant. Its one link leads to Stalwart's sign-in page (PKCE,
+   bound to the browser by a cookie). The page has no form: a password is only ever typed at
+   Stalwart.
 3. The user signs in at Stalwart and confirms its consent screen.
 4. Stalwart returns to `/callback`. The worker exchanges the code, reads the mailbox identity
    from Stalwart (never from the tool), stores the Stalwart tokens encrypted in that mailbox's

@@ -50,7 +50,7 @@ limit of the connector would hold, and MCP requires a server to accept only toke
 
 ```
 AI tool ──(1) OAuth: discover, register, authorize──► worker
-                                                        │ (2) redirect, PKCE + state (bound to the browser by a cookie)
+                                                        │ (2) own intro page, then its link: PKCE + state (bound to the browser by a cookie)
                                                         ▼
                                               Stalwart sign-in + consent (scope: mail, plus areas)
                                                         │ (3) code
@@ -66,6 +66,11 @@ AI tool ◄──(5) on Allow: the worker's own access/refresh token
 - Toward AI tools: `@cloudflare/workers-oauth-provider` (grants in KV, tokens stored as hashes),
   PKCE required, dynamic client registration and Client ID Metadata Documents enabled because
   AI tools register themselves. Tokens are bound to this server's resource URL.
+- Step 2 shows a page of the worker before the sign-in, because users land on a sign-in page
+  they may never have seen. It says where the sign-in happens and which login is meant, and
+  links there. It deliberately has no login form of its own: the worker must never see a
+  mailbox password, passkeys only work on the mail server's own origin, and failed sign-ins
+  coming from the worker's shared addresses could get the connector banned for everyone.
 - Step 4 is required, not decoration. Stalwart skips its consent screen once a grant for the
   worker's client exists, so without an own page any self-registered tool could obtain access
   silently from a user who is already signed in. The page comes **after** sign-in so that it
