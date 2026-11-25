@@ -1,0 +1,200 @@
+/**
+ * In-memory `MailboxAdapter` for the tool layer: two accounts (A and B) with folders, messages
+ * and threads. An id that belongs to the other account answers `MailError("not_found")`, as the
+ * real adapter does, and every call is recorded with the account id it ran against.
+ */
+import {
+  MailError,
+  type MailboxAdapter,
+  type MailFolder,
+  type MailSummary,
+  type OutgoingMessage,
+  type ThreadMessage,
+} from "../src/mail";
+
+type AccountKey = "A" | "B";
+
+interface StoredMessage {
+  id: string;
+  threadId: string;
+  folderId: string;
+  subject: string;
+  body: string;
+  date: string;
+}
+
+interface Account {
+  accountId: string;
+  email: string;
+  folders: MailFolder[];
+  messages: StoredMessage[];
+}
+
+export interface FakeCall {
+  accountId: string;
+  method: keyof MailboxAdapter;
+}
+
+export interface FakeIds {
+  accountId: string;
+  email: string;
+  folderId: string;
+  messageId: string;
+  threadId: string;
+}
+
+const folder = (id: string, name: string, role: string | null): MailFolder => ({
+  id,
+  name,
+  role,
+  parent_id: null,
+  total: 1,
+  unread: 0,
+});
+
+function seedAccount(key: AccountKey): Account {
+  const p = key.toLowerCase();
+  return {
+    accountId: `acct-${p}`,
+    email: `${p}@test.example`,
+    folders: [folder(`${p}-inbox`, "Inbox", "inbox"), folder(`${p}-drafts`, "Drafts", "drafts")],
+    messages: [
+      {
+        id: `${p}-msg-1`,
+        threadId: `${p}-thread-1`,
+        folderId: `${p}-inbox`,
+        subject: `Hello ${key}`,
+        body: `First message of ${key}`,
+        date: "2026-11-20T10:00:00Z",
+      },
+    ],
+  };
+}
+
+export function createFakeMailStore() {
+  const accounts: Record<AccountKey, Account> = { A: seedAccount("A"), B: seedAccount("B") };
+  const calls: FakeCall[] = [];
+  let nextFailure: unknown;
+  let counter = 0;
+
+  const ids = (key: AccountKey): FakeIds => {
+    const a = accounts[key];
+    const m = a.messages[0]!;
+    return { accountId: a.accountId, email: a.email, folderId: a.folders[0]!.id, messageId: m.id, threadId: m.threadId };
+  };
+
+  const summary = (m: StoredMessage, owner: Account): MailSummary => ({
+    id: m.id,
+    thread_id: m.threadId,
+    folder_ids: [m.folderId],
+    from: [{ name: "Sender", email: "sender@test.example" }],
+    to: [{ name: null, email: owner.email }],
+    subject: m.subject,
+    date: m.date,
+    preview: m.body.slice(0, 200),
+    unread: false,
+    flagged: false,
+    answered: false,
+    draft: false,
+    has_attachment: false,
+  });
+
+  const threadMessage = (m: StoredMessage, owner: Account): ThreadMessage => ({
+    id: m.id,
+    from: [{ name: "Sender", email: "sender@test.example" }],
+    to: [{ name: null, email: owner.email }],
+    cc: [],
+    date: m.date,
+    subject: m.subject,
+    body: m.body,
+    body_truncated: false,
+    attachments: [],
+  });
+
+  function mailboxFor(accountId: string): MailboxAdapter {
+    const account = Object.values(accounts).find((a) => a.accountId === accountId);
+    if (account === undefined) throw new Error("unknown fake account");
+
+    const record = (method: keyof MailboxAdapter): void => {
+      calls.push({ accountId, method });
+      if (nextFailure !== undefined) {
+        const failure = nextFailure;
+        nextFailure = undefined;
+        throw failure;
+      }
+    };
+    const assertOwnMessage = (id: string | undefined): void => {
+      if (id !== undefined && !account.messages.some((m) => m.id === id)) throw new MailError("not_found");
+    };
+
+    return {
+      async listMailboxes() {
+        record("listMailboxes");
+        return { folders: account.folders };
+      },
+      async searchMail(input) {
+        record("searchMail");
+        const hits = account.messages
+          .filter((m) => input.folder_id === undefined || m.folderId === input.folder_id)
+          .sort((x, y) => y.date.localeCompare(x.date));
+        const page = hits.slice(input.offset, input.offset + input.limit);
+        const next = input.offset + page.length;
+        return { messages: page.map((m) => summary(m, account)), next_offset: next < hits.length ? next : null };
+      },
+      async readThread(input) {
+        record("readThread");
+        const messages = account.messages.filter((m) => m.threadId === input.thread_id);
+        if (messages.length === 0) throw new MailError("not_found");
+        return { thread_id: input.thread_id, messages: messages.map((m) => threadMessage(m, account)), omitted_messages: 0 };
+      },
+      async createDraft(input: OutgoingMessage) {
+        record("createDraft");
+        assertOwnMessage(input.in_reply_to);
+        counter += 1;
+        return { draft_id: `${account.accountId}-draft-${counter}`, folder_id: account.folders[1]!.id };
+      },
+      async sendMail(input: OutgoingMessage) {
+        record("sendMail");
+        assertOwnMessage(input.in_reply_to);
+        counter += 1;
+        return {
+          message_id: `${account.accountId}-sent-${counter}`,
+          recipients: input.to.length + input.cc.length + input.bcc.length,
+          deduplicated: false,
+        };
+      },
+    };
+  }
+
+  return {
+    calls,
+    get a(): FakeIds {
+      return ids("A");
+    },
+    get b(): FakeIds {
+      return ids("B");
+    },
+    mailboxFor,
+    /** Adds a message in its own thread to the inbox of `key`; returns its ids. */
+    addMessage(key: AccountKey, m: { subject: string; body: string }): { messageId: string; threadId: string } {
+      const a = accounts[key];
+      counter += 1;
+      const stored: StoredMessage = {
+        id: `${a.accountId}-msg-x${counter}`,
+        threadId: `${a.accountId}-thread-x${counter}`,
+        folderId: a.folders[0]!.id,
+        subject: m.subject,
+        body: m.body,
+        date: "2026-11-24T10:00:00Z",
+      };
+      a.messages.push(stored);
+      return { messageId: stored.id, threadId: stored.threadId };
+    },
+    /** The next mailbox call throws `error` instead of answering. */
+    failNextWith(error: unknown): void {
+      nextFailure = error;
+    },
+  };
+}
+
+export type FakeMailStore = ReturnType<typeof createFakeMailStore>;

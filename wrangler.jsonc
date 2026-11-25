@@ -1,0 +1,77 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "stalwart-mcp",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-11-01",
+  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+  "keep_vars": true,
+  // Invocation logs record request URLs, i.e. `/callback?code=…&state=…` and `/approve?h=…`:
+  // off. The worker's own `console` output (fixed markers only) stays on.
+  "observability": { "enabled": true, "logs": { "invocation_logs": false } },
+  // DEPLOYING YOUR OWN: change `routes` and the three addresses and names in `vars`, here and
+  // in `env.staging` below. Everything else can stay as it is.
+  "routes": [{ "pattern": "mail-mcp.exciting-it.com", "custom_domain": true }],
+  // `vars` holds only what is fixed for a deployment and never tuned while it runs:
+  //   ENVIRONMENT      "production" or "staging" (staging only serves allow-listed mailboxes)
+  //   STALWART_ORIGIN  the Stalwart server, an https origin
+  //   PUBLIC_ORIGIN    this worker's own https origin (production only; must match `routes`)
+  //   CONNECTOR_NAME   the name AI tools show for the connector (optional)
+  // A variable declared here is rewritten on every deploy. What an operator changes while the
+  // worker runs lives in the Cloudflare dashboard instead, and `keep_vars` keeps it there:
+  //   MAIL_MCP_ENABLED             off switch; the worker answers 503 unless exactly "true"
+  //   STALWART_OAUTH_CLIENT_ID     OAuth client id of this worker at Stalwart
+  //   SIGNIN_ALLOWLIST             staging only: mailboxes allowed to sign in (comma-separated)
+  //   SEND_ALLOWLIST               staging only: recipients mail may be sent to (comma-separated)
+  // Secrets (`wrangler secret put`, separate per environment):
+  //   STALWART_OAUTH_CLIENT_SECRET OAuth client secret at Stalwart
+  //   TOKEN_ENC_KEY                base64 of 32 random bytes; encrypts stored mailbox tokens
+  "vars": {
+    "ENVIRONMENT": "production",
+    "STALWART_ORIGIN": "https://mail.exciting-it.com",
+    "PUBLIC_ORIGIN": "https://mail-mcp.exciting-it.com",
+    "CONNECTOR_NAME": "exciting IT Mail"
+  },
+  // KV and D1 carry no ids: the first `wrangler deploy` provisions them (wrangler >= 4.45);
+  // paste the ids back here afterwards.
+  "kv_namespaces": [{ "binding": "OAUTH_KV" }],
+  "d1_databases": [{ "binding": "DB", "database_name": "stalwart-mcp", "migrations_dir": "migrations" }],
+  "ratelimits": [
+    { "name": "AUTH_RATE_LIMITER", "namespace_id": "1101", "simple": { "limit": 30, "period": 60 } },
+    { "name": "REGISTER_RATE_LIMITER", "namespace_id": "1102", "simple": { "limit": 20, "period": 60 } },
+    { "name": "TOKEN_RATE_LIMITER", "namespace_id": "1103", "simple": { "limit": 120, "period": 60 } }
+  ],
+  "triggers": { "crons": ["17 3 * * *"] },
+  // One MailboxVault per Stalwart account id: the only holder of that mailbox's Stalwart tokens.
+  // `migrations` is inherited by env.staging; the binding itself is not and is repeated there.
+  "durable_objects": { "bindings": [{ "name": "MAILBOX_VAULT", "class_name": "MailboxVault" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["MailboxVault"] }],
+
+  // --- STAGING: deploys as the SEPARATE worker "stalwart-mcp-staging" ---
+  // Bindings and vars are not inherited, so staging declares its own. It never claims the
+  // production domain and is reachable only via its *.workers.dev URL. It talks to the same
+  // Stalwart server as production; the allow-lists are what keeps it away from real mailboxes.
+  // Staging answers under the origin of the request and has no PUBLIC_ORIGIN; wrangler's
+  // warning that it is "missing" in env.staging.vars is expected.
+  "env": {
+    "staging": {
+      "name": "stalwart-mcp-staging",
+      "workers_dev": true,
+      "routes": [],
+      "observability": { "enabled": true, "logs": { "invocation_logs": false } },
+      "vars": {
+        "ENVIRONMENT": "staging",
+        "STALWART_ORIGIN": "https://mail.exciting-it.com",
+        "CONNECTOR_NAME": "exciting IT Mail (staging)"
+      },
+      "kv_namespaces": [{ "binding": "OAUTH_KV" }],
+      "d1_databases": [{ "binding": "DB", "database_name": "stalwart-mcp-staging", "migrations_dir": "migrations" }],
+      "ratelimits": [
+        { "name": "AUTH_RATE_LIMITER", "namespace_id": "2101", "simple": { "limit": 30, "period": 60 } },
+        { "name": "REGISTER_RATE_LIMITER", "namespace_id": "2102", "simple": { "limit": 20, "period": 60 } },
+        { "name": "TOKEN_RATE_LIMITER", "namespace_id": "2103", "simple": { "limit": 120, "period": 60 } }
+      ],
+      "triggers": { "crons": ["17 3 * * *"] },
+      "durable_objects": { "bindings": [{ "name": "MAILBOX_VAULT", "class_name": "MailboxVault" }] }
+    }
+  }
+}
