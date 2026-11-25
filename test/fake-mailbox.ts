@@ -394,8 +394,9 @@ export function createFakeMailStore() {
         account.contacts = account.contacts.filter((c) => !gone.includes(c.id));
         return { deleted: gone.length, not_deleted: ids.filter((id) => !gone.includes(id)) };
       },
-      // The event writes keep it simple (part 2 refines): the title, location and description are
-      // stored as given, the time is not computed.
+      // The event writes keep it simple: the title, location, description and participants are
+      // stored as given, the time is not computed. Every participant counts as notified (the
+      // vault's decision about past events and limits is tested against the vault, not here).
       async createEvent(input) {
         record("createEvent");
         const calendar = input.calendar_id ?? account.calendars[0]!.id;
@@ -403,6 +404,7 @@ export function createFakeMailStore() {
         counter += 1;
         const id = `${accountId}-event-x${counter}`;
         const base = account.events[0]!;
+        const participants = (input.participants ?? []).map((p) => ({ name: p.name ?? null, email: p.email, role: "attendee", status: "needs-action" }));
         account.events.push({
           ...base,
           id,
@@ -410,9 +412,9 @@ export function createFakeMailStore() {
           title: input.title ?? "",
           location: input.location ?? null,
           description: input.description ?? "",
-          participants: [],
+          participants,
         });
-        return { event_id: id, calendar_id: calendar };
+        return { event_id: id, calendar_id: calendar, invitations: participants.length, deduplicated: false };
       },
       async updateEvent(input) {
         record("updateEvent");
@@ -421,19 +423,30 @@ export function createFakeMailStore() {
         if (input.calendar_id !== undefined && !account.calendars.some((c) => c.id === input.calendar_id)) {
           throw new MailError("not_found");
         }
+        const before = event.participants.map((p) => p.email ?? "");
         if (input.title !== undefined) event.title = input.title;
         if (input.location !== undefined) event.location = input.location === "" ? null : input.location;
         if (input.description !== undefined) event.description = input.description;
         if (input.calendar_id !== undefined) event.calendar_ids = [input.calendar_id];
-        return { event_id: input.event_id };
+        if (input.participants !== undefined) {
+          event.participants = input.participants.map((p) => ({ name: p.name ?? null, email: p.email, role: "attendee", status: "needs-action" }));
+        }
+        const involved = new Set([...before, ...event.participants.map((p) => p.email ?? "")].filter((a) => a !== ""));
+        return { event_id: input.event_id, invitations: involved.size };
       },
       async deleteEvent(input) {
         record("deleteEvent");
         const ids = [...new Set(input.event_ids)];
-        const gone = ids.filter((id) => account.events.some((e) => e.id === id));
+        const gone = account.events.filter((e) => ids.includes(e.id));
         if (gone.length === 0) throw new MailError("not_found");
-        account.events = account.events.filter((e) => !gone.includes(e.id));
-        return { deleted: gone.length, not_deleted: ids.filter((id) => !gone.includes(id)) };
+        account.events = account.events.filter((e) => !gone.includes(e));
+        const notifying = gone.filter((e) => e.participants.length > 0);
+        return {
+          deleted: gone.length,
+          not_deleted: ids.filter((id) => !gone.some((e) => e.id === id)),
+          cancellations: notifying.length,
+          cancelled_attendees: notifying.reduce((n, e) => n + e.participants.length, 0),
+        };
       },
     };
   }

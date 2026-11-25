@@ -1,7 +1,9 @@
 import type { Area } from "../config";
 import { createContact } from "./create-contact";
 import { createDraft } from "./create-draft";
+import { createEvent } from "./create-event";
 import { deleteContact } from "./delete-contact";
+import { deleteEvent } from "./delete-event";
 import { deleteMail } from "./delete-mail";
 import type { Tool } from "./define-tool";
 import { listCalendars } from "./list-calendars";
@@ -15,8 +17,9 @@ import { searchEvents } from "./search-events";
 import { searchMail } from "./search-mail";
 import { sendMail } from "./send-mail";
 import { updateContact } from "./update-contact";
+import { updateEvent } from "./update-event";
 
-export const TOOLS: Tool[] = [listMailboxes, searchMail, readThread, createDraft, sendMail, moveMail, deleteMail, searchContacts, readContact, listCalendars, searchEvents, readEvent, createContact, updateContact, deleteContact];
+export const TOOLS: Tool[] = [listMailboxes, searchMail, readThread, createDraft, sendMail, moveMail, deleteMail, searchContacts, readContact, listCalendars, searchEvents, readEvent, createContact, updateContact, deleteContact, createEvent, updateEvent, deleteEvent];
 
 /** The tools a deployment offers: every mail tool, and those of the areas it has switched on. */
 export function toolsFor(areas: ReadonlySet<Area>): Tool[] {

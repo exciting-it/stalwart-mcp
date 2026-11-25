@@ -1,14 +1,22 @@
 /**
  * Contacts handlers of the fake Stalwart (RFC 9610: `AddressBook/get`, `ContactCard/query`,
- * `ContactCard/get`), and the table `fake-stalwart-jmap.ts` merges into its method table.
- * and the calendar ones (draft-ietf-jmap-calendars: `Calendar/get`, `CalendarEvent/query`,
- * `CalendarEvent/get`, with `expandRecurrences` for daily and weekly rules and `utcStart` / `utcEnd`).
+ * `ContactCard/get`) and the calendar ones (draft-ietf-jmap-calendars: `Calendar/get`,
+ * `CalendarEvent/query`, `CalendarEvent/get`, with `expandRecurrences` and `utcStart` / `utcEnd`),
+ * and the table `fake-stalwart-jmap.ts` merges into its method table.
  *
- * and the write side, one shared `/set` engine (`applySet`: `create`, `update` as a PatchObject of
- * top-level properties, `destroy`) with a spec per type; `ContactCard/set` is the first user.
+ * The write side is one shared `/set` engine (`applySet`: `create`, `update` as a PatchObject of
+ * top-level properties, `destroy`) with a spec per type: `ContactCard/set` and `CalendarEvent/set`.
+ *
+ * Events use the property names Stalwart 1.x implements: one `recurrenceRule` object, participants
+ * addressed by `calendarAddress` (`mailto:` URI), `organizerCalendarAddress`. Like the server, the
+ * fake stores any other property name as inert data: `recurrenceRules`, `sendTo` and `replyTo` have
+ * no effect (an event with `recurrenceRules` does not recur; a participant with only `sendTo` is
+ * not an attendee). With `sendSchedulingMessages: true` it records the iTIP messages the server
+ * would send (`account.scheduling`).
  *
  * Everything is scoped to the request's account: another account's ids are `notFound`.
  */
+import { clock } from "../src/clock";
 import type { FakeAccount, FakeContact, FakeEvent } from "./fake-stalwart-state";
 import {
   type Args,
@@ -273,16 +281,27 @@ function localToUtc(local: unknown, zone: string | null): number {
   return t - (second === first ? first : second);
 }
 
-function durationMs(duration: unknown): number {
+/** The parts of an ISO 8601 duration: whole days (weeks count as 7) and the exact rest in ms. */
+function durationParts(duration: unknown): { days: number; restMs: number } {
   const m = typeof duration === "string" ? /^P(?:(\d+)W)?(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?$/.exec(duration) : null;
   if (!m) throw new MethodError("invalidArguments");
   const [w, d, h, min, sec] = m.slice(1).map((x) => Number(x ?? 0)) as [number, number, number, number, number];
-  return (w * 7 + d) * DAY + ((h * 60 + min) * 60 + sec) * 1000;
+  return { days: w * 7 + d, restMs: ((h * 60 + min) * 60 + sec) * 1000 };
+}
+
+/**
+ * The end (UTC ms) of an occurrence starting at the LocalDateTime `start` in `zone`: days are
+ * nominal (wall-clock days in the zone, as RFC 5545 counts them), the rest is exact time.
+ */
+function endUtc(start: string, zone: string | null, duration: unknown): number {
+  const { days, restMs } = durationParts(duration);
+  return localToUtc(formatLocal(localMs(start) + days * DAY), zone) + restMs;
 }
 
 const zoneOf = (e: FakeEvent): string | null => (typeof e.timeZone === "string" ? e.timeZone : null);
 
-// ---- recurrence: daily and weekly rules with interval, count and until ----
+// ---- recurrence: `recurrenceRule` (daily, weekly with byDay, monthly, yearly; interval, count,
+// until) and excluded occurrences in `recurrenceOverrides` ----
 
 interface Occurrence {
   id: string;
@@ -292,40 +311,94 @@ interface Occurrence {
 
 const compact = (local: string): string => local.replace(/[-:]/g, "");
 
+/** The rule of `e`: only `recurrenceRule` counts. `recurrenceRules` (the older name) is inert data. */
 function recurrenceRule(e: FakeEvent): Args | null {
-  const rule = Array.isArray(e.recurrenceRules) ? e.recurrenceRules.find(isObject) : undefined;
-  return rule ?? null;
+  return isObject(e.recurrenceRule) ? e.recurrenceRule : null;
 }
+
+const WEEKDAY_INDEX: Record<string, number> = { mo: 0, tu: 1, we: 2, th: 3, fr: 4, sa: 5, su: 6 };
+const CANDIDATES_MAX = 5000;
+
+/** The local starts (ms, as if UTC) a rule produces from `first`, in order, before count and until. */
+function* candidateStarts(first: number, rule: Args): Generator<number> {
+  const interval = typeof rule.interval === "number" ? rule.interval : 1;
+  const date = new Date(first);
+  const timeOfDay = first - Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate());
+  const byDay = Array.isArray(rule.byDay)
+    ? rule.byDay.filter(isObject).map((d) => WEEKDAY_INDEX[String(d.day)]).filter((d): d is number => d !== undefined).sort()
+    : [];
+  for (let k = 0; k < CANDIDATES_MAX; k++) {
+    if (rule.frequency === "daily") yield first + k * interval * DAY;
+    else if (rule.frequency === "weekly" && byDay.length === 0) yield first + k * 7 * interval * DAY;
+    else if (rule.frequency === "weekly") {
+      const monday = first - timeOfDay - ((date.getUTCDay() + 6) % 7) * DAY + k * 7 * interval * DAY;
+      for (const day of byDay) {
+        const start = monday + day * DAY + timeOfDay;
+        if (start >= first) yield start;
+      }
+    } else if (rule.frequency === "monthly" || rule.frequency === "yearly") {
+      const months = (rule.frequency === "monthly" ? 1 : 12) * interval * k;
+      const target = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth() + months, date.getUTCDate()));
+      // A month without that day (the 31st, 29 February) has no occurrence.
+      if (target.getUTCDate() === date.getUTCDate()) yield target.getTime() + timeOfDay;
+    } else {
+      throw new Error(`fake-stalwart: recurrence frequency ${String(rule.frequency)} is not supported`);
+    }
+  }
+}
+
+const isExcluded = (e: FakeEvent, start: string): boolean => {
+  const overrides = isObject(e.recurrenceOverrides) ? e.recurrenceOverrides : {};
+  const override = overrides[start];
+  return isObject(override) && override.excluded === true;
+};
 
 /**
  * The occurrences of `e` that start before the instant `beforeUtc`. A recurring event gets a
- * synthetic id for each, `<event id>-<YYYYMMDDTHHMMSS>`; a single event keeps its own id.
+ * synthetic id for each, `<event id>-<YYYYMMDDTHHMMSS>`; a single event keeps its own id. An
+ * excluded occurrence still counts towards the rule's `count`, but is not listed.
  */
 function occurrences(e: FakeEvent, beforeUtc: number): Occurrence[] {
   const rule = recurrenceRule(e);
   if (rule === null) return localToUtc(e.start, zoneOf(e)) < beforeUtc ? [{ id: e.id, start: e.start }] : [];
-  if (rule.frequency !== "daily" && rule.frequency !== "weekly") {
-    throw new Error(`fake-stalwart: recurrence frequency ${String(rule.frequency)} is not supported`);
-  }
-  const stepDays = (rule.frequency === "weekly" ? 7 : 1) * (typeof rule.interval === "number" ? rule.interval : 1);
   const count = typeof rule.count === "number" ? rule.count : Infinity;
   const until = typeof rule.until === "string" ? localMs(rule.until.slice(0, 19)) : Infinity;
-  const first = localMs(e.start);
   const found: Occurrence[] = [];
-  for (let k = 0; k < count && k < 5000; k++) {
-    const local = first + k * stepDays * DAY;
-    if (local > until) break;
+  let produced = 0;
+  for (const local of candidateStarts(localMs(e.start), rule)) {
+    if (produced >= count || local > until) break;
+    produced++;
     const start = formatLocal(local);
     if (localToUtc(start, zoneOf(e)) >= beforeUtc) break;
-    found.push({ id: `${e.id}-${compact(start)}`, start });
+    if (!isExcluded(e, start)) found.push({ id: `${e.id}-${compact(start)}`, start });
   }
   return found;
 }
 
-/** The event as the server shows it for one occurrence: its own start, `recurrenceId`, no rules. */
+/** When `e` ends (UTC ms): a series without count or until never does. */
+function eventEnd(e: FakeEvent): number {
+  const rule = recurrenceRule(e);
+  if (rule === null) return endUtc(e.start, zoneOf(e), e.duration);
+  if (typeof rule.count !== "number" && typeof rule.until !== "string") return Infinity;
+  const all = occurrences(e, Infinity);
+  const last = all.at(-1);
+  return last === undefined ? endUtc(e.start, zoneOf(e), e.duration) : endUtc(last.start, zoneOf(e), e.duration);
+}
+
+/** The event as the server shows it for one occurrence: its own start and overrides, `recurrenceId`, no rule. */
 function occurrenceView(e: FakeEvent, occurrence: Occurrence): FakeEvent {
   if (occurrence.id === e.id) return e;
-  return { ...e, id: occurrence.id, start: occurrence.start, recurrenceId: occurrence.start, recurrenceRules: null, recurrenceOverrides: null };
+  const overrides = isObject(e.recurrenceOverrides) ? e.recurrenceOverrides : {};
+  const override = isObject(overrides[occurrence.start]) ? (overrides[occurrence.start] as Args) : {};
+  return {
+    ...e,
+    ...override,
+    id: occurrence.id,
+    start: occurrence.start,
+    recurrenceId: occurrence.start,
+    recurrenceRule: null,
+    recurrenceOverrides: null,
+  } as FakeEvent;
 }
 
 // ---- CalendarEvent/query ----
@@ -348,7 +421,7 @@ function eventTexts(e: FakeEvent): string[] {
     text(e.title),
     text(e.description),
     ...values(e.locations).map((l) => text(l.name)),
-    ...values(e.participants).flatMap((p) => [text(p.name), text(p.email)]),
+    ...values(e.participants).flatMap((p) => [text(p.name), text(p.calendarAddress), text(p.email)]),
   ];
 }
 
@@ -365,7 +438,7 @@ function eventMatches(e: FakeEvent, start: string, zone: string, filter: unknown
     throw new MethodError("unsupportedFilter");
   }
   const begin = localToUtc(start, zoneOf(e));
-  const end = begin + durationMs(e.duration);
+  const end = endUtc(start, zoneOf(e), e.duration);
   for (const [k, v] of Object.entries(filter)) {
     if (!EVENT_FILTER_KEYS.has(k)) throw new MethodError("unsupportedFilter");
     if (typeof v !== "string") throw new MethodError("invalidArguments");
@@ -431,8 +504,9 @@ const calendarEventQuery: Handler = (args, { account, callId, out }) => {
 
 const EVENT_PROPS = [
   "id", "calendarIds", "uid", "title", "description", "descriptionContentType", "start", "timeZone", "duration",
-  "showWithoutTime", "utcStart", "utcEnd", "status", "freeBusyStatus", "privacy", "recurrenceId", "recurrenceRules",
-  "recurrenceOverrides", "locations", "virtualLocations", "participants", "created", "updated",
+  "showWithoutTime", "utcStart", "utcEnd", "status", "freeBusyStatus", "privacy", "recurrenceId", "recurrenceRule",
+  "recurrenceRules", "recurrenceOverrides", "locations", "virtualLocations", "participants", "organizerCalendarAddress",
+  "isDraft", "created", "updated",
 ] as const;
 
 /** The event or occurrence `id` names in this account, or null. */
@@ -463,7 +537,7 @@ const calendarEventGet: Handler = (args, { account, callId, out }) => {
     }
     const view = occurrenceView(found.event, found.occurrence);
     const begin = localToUtc(view.start, zoneOf(view));
-    const full: Args = { ...structuredClone(view), utcStart: formatUtc(begin), utcEnd: formatUtc(begin + durationMs(view.duration)) };
+    const full: Args = { ...structuredClone(view), utcStart: formatUtc(begin), utcEnd: formatUtc(endUtc(view.start, zoneOf(view), view.duration)) };
     // `utcStart` and `utcEnd` are only returned when asked for.
     if (args.properties === null || args.properties === undefined) {
       delete full.utcStart;
@@ -476,7 +550,7 @@ const calendarEventGet: Handler = (args, { account, callId, out }) => {
   out.push(["CalendarEvent/get", { accountId: account.accountId, state: "ce-state", list, notFound }, callId]);
 };
 
-// ---- /set: the engine shared by ContactCard/set and (part 2) CalendarEvent/set ----
+// ---- /set: the engine shared by ContactCard/set and CalendarEvent/set ----
 
 type Stored = Record<string, unknown> & { id: string };
 
@@ -484,12 +558,30 @@ interface SetSpec {
   store: Map<string, Stored>;
   /** Prefix of the ids the fake hands out (`nextId`). */
   idPrefix: string;
-  /** The properties a client may write; anything else is `invalidProperties`. */
-  writable: ReadonlySet<string>;
+  /**
+   * The properties a client may write; anything else is `invalidProperties`. Null: any name is
+   * stored (as the server keeps unknown JSCalendar properties), except those in `serverSet`.
+   */
+  writable: ReadonlySet<string> | null;
+  /** Properties only the server sets: refused in a create or update. */
+  serverSet?: ReadonlySet<string>;
   /** The invalid properties of a whole object (after the patch, for an update); empty when it is fine. */
   invalid(object: Record<string, unknown>, account: FakeAccount): string[];
   /** Server-set properties, written after every create and update. */
   stamp(object: Stored, ctx: Ctx): void;
+  /** A SetError for a create the server refuses for reasons beyond its properties, else null. */
+  refuseCreate?(object: Stored, ctx: Ctx): Args | null;
+  /** Run after a create, an update or a destroy took effect. */
+  created?(object: Stored, ctx: Ctx): void;
+  updated?(before: Stored, after: Stored, ctx: Ctx): void;
+  destroyed?(object: Stored, ctx: Ctx): void;
+}
+
+/** The keys of a create or patch the spec refuses: unknown ones, server-set ones, nested paths. */
+function refusedKeys(object: Args, spec: SetSpec): string[] {
+  return Object.keys(object).filter(
+    (k) => (spec.writable !== null && !spec.writable.has(k)) || spec.serverSet?.has(k) === true || k.includes("/"),
+  );
 }
 
 const notFoundError = { type: "notFound" };
@@ -520,7 +612,7 @@ function applySet(args: Args, ctx: Ctx, spec: SetSpec): Args {
       notCreated[cid] = invalidProperties([]);
       continue;
     }
-    const unknown = Object.keys(object).filter((k) => !spec.writable.has(k));
+    const unknown = refusedKeys(object, spec);
     const bad = unknown.length > 0 ? unknown : spec.invalid(object, account);
     if (bad.length > 0) {
       notCreated[cid] = invalidProperties(bad);
@@ -529,9 +621,15 @@ function applySet(args: Args, ctx: Ctx, spec: SetSpec): Args {
     const id = ctx.state.nextId(spec.idPrefix);
     const stored: Stored = { ...structuredClone(object), id };
     spec.stamp(stored, ctx);
+    const refusal = spec.refuseCreate?.(stored, ctx) ?? null;
+    if (refusal !== null) {
+      notCreated[cid] = refusal;
+      continue;
+    }
     spec.store.set(id, stored);
     ctx.createdIds.set(cid, id);
     created[cid] = { id };
+    spec.created?.(stored, ctx);
   }
 
   for (const [id, patch] of Object.entries((args.update as Args | undefined) ?? {})) {
@@ -544,7 +642,7 @@ function applySet(args: Args, ctx: Ctx, spec: SetSpec): Args {
       notUpdated[id] = invalidProperties([]);
       continue;
     }
-    const unknown = Object.keys(patch).filter((k) => !spec.writable.has(k));
+    const unknown = refusedKeys(patch, spec);
     if (unknown.length > 0) {
       notUpdated[id] = invalidProperties(unknown);
       continue;
@@ -563,11 +661,16 @@ function applySet(args: Args, ctx: Ctx, spec: SetSpec): Args {
     spec.stamp(stored, ctx);
     spec.store.set(id, stored);
     updated[id] = null;
+    spec.updated?.(current, stored, ctx);
   }
 
   for (const id of (args.destroy as string[] | undefined) ?? []) {
-    if (!spec.store.delete(id)) notDestroyed[id] = notFoundError;
-    else destroyed.push(id);
+    const current = spec.store.get(id);
+    if (!current || !spec.store.delete(id)) notDestroyed[id] = notFoundError;
+    else {
+      destroyed.push(id);
+      spec.destroyed?.(current, ctx);
+    }
   }
 
   return {
@@ -625,6 +728,183 @@ const contactSet: Handler = (args, ctx) => {
   ctx.out.push(["ContactCard/set", applySet(args, ctx, spec), ctx.callId]);
 };
 
+// ---- CalendarEvent/set ----
+
+/** More participants than this in one event is `invalidProperties`, as at the server. */
+const PARTICIPANTS_MAX = 20;
+/** Attendees at this domain cannot be reached: a scheduling create answers `noSupportedScheduleMethods`. */
+const UNREACHABLE = /@unreachable\.example$/i;
+
+/** Properties the server computes; a client must not send them. */
+const EVENT_SERVER_SET = new Set(["id", "utcStart", "utcEnd", "isOrigin", "created", "updated"]);
+
+const stripMailto = (v: unknown): string | null =>
+  typeof v === "string" && /^mailto:/i.test(v) ? v.slice("mailto:".length).toLowerCase() : null;
+
+/**
+ * Whom the server schedules with: the participants addressed by `calendarAddress`, except the
+ * account itself (the organizer). A participant with only `email` or `sendTo` is not one.
+ */
+function attendeesOf(e: Args, account: FakeAccount): string[] {
+  const own = account.email.toLowerCase();
+  const found = values(e.participants)
+    .map((p) => stripMailto(p.calendarAddress))
+    .filter((a): a is string => a !== null && a !== own);
+  return [...new Set(found)];
+}
+
+const endsInPast = (e: FakeEvent): boolean => eventEnd(e) < clock.now();
+
+/** True when a write with `sendSchedulingMessages: true` makes the server send for `e`. */
+function schedules(e: FakeEvent, account: FakeAccount): boolean {
+  return attendeesOf(e, account).length > 0 && e.isDraft !== true && !endsInPast(e);
+}
+
+function invalidEventProperties(e: Record<string, unknown>, account: FakeAccount): string[] {
+  const bad: string[] = [];
+  if (e["@type"] !== undefined && e["@type"] !== "Event") bad.push("@type");
+  if (e.uid !== undefined && (typeof e.uid !== "string" || e.uid === "")) bad.push("uid");
+  const calendars = e.calendarIds;
+  const ids = isObject(calendars) ? Object.keys(calendars) : [];
+  if (!isObject(calendars) || ids.length === 0 || !ids.every((c) => calendars[c] === true && account.calendars.has(c))) {
+    bad.push("calendarIds");
+  }
+  if (typeof e.start !== "string" || !LOCAL.test(e.start)) bad.push("start");
+  if (e.timeZone !== undefined && e.timeZone !== null && typeof e.timeZone !== "string") bad.push("timeZone");
+  if (e.duration !== undefined && (typeof e.duration !== "string" || !/^P/.test(e.duration))) bad.push("duration");
+  if (e.participants !== undefined) {
+    const list = isObject(e.participants) ? Object.values(e.participants) : null;
+    if (list === null || !list.every(isObject) || list.length > PARTICIPANTS_MAX) bad.push("participants");
+  }
+  if (e.recurrenceRule !== undefined && !isObject(e.recurrenceRule)) bad.push("recurrenceRule");
+  if (isObject(e.recurrenceRule) && !["daily", "weekly", "monthly", "yearly"].includes(String(e.recurrenceRule.frequency))) {
+    bad.push("recurrenceRule");
+  }
+  return [...new Set(bad)];
+}
+
+function record(ctx: Ctx, kind: "REQUEST" | "CANCEL", eventId: string, attendees: string[]): void {
+  if (attendees.length > 0) ctx.account.scheduling.push({ kind, eventId, attendees: [...attendees] });
+}
+
+/** The occurrence (not a stored event) an id names: `<event id>-<YYYYMMDDTHHMMSS>` of a series. */
+function occurrenceOf(account: FakeAccount, id: string): { event: FakeEvent; occurrence: Occurrence } | null {
+  if (account.events.has(id)) return null;
+  return resolveEvent(account, id);
+}
+
+/**
+ * Updates and destroys of occurrence ids: an update becomes (or extends) that occurrence's entry
+ * in `recurrenceOverrides`, a destroy marks it excluded and reports the id as destroyed. A series
+ * and one of its occurrences in the same destroy is an error for the occurrence.
+ */
+function applyToOccurrences(args: Args, ctx: Ctx, notify: boolean): { rest: Args; answer: Args } {
+  const { account } = ctx;
+  const updated: Args = {};
+  const notUpdated: Args = {};
+  const destroyed: string[] = [];
+  const notDestroyed: Args = {};
+  const update: Args = {};
+  for (const [id, patch] of Object.entries(isObject(args.update) ? args.update : {})) {
+    const found = occurrenceOf(account, id);
+    if (!found) {
+      update[id] = patch;
+      continue;
+    }
+    if (!isObject(patch) || Object.keys(patch).some((k) => EVENT_SERVER_SET.has(k) || k.includes("/") || k === "recurrenceRule")) {
+      notUpdated[id] = invalidProperties(isObject(patch) ? Object.keys(patch) : []);
+      continue;
+    }
+    const overrides = isObject(found.event.recurrenceOverrides) ? found.event.recurrenceOverrides : {};
+    const before = occurrenceView(found.event, found.occurrence);
+    found.event.recurrenceOverrides = { ...overrides, [found.occurrence.start]: { ...(isObject(overrides[found.occurrence.start]) ? overrides[found.occurrence.start] as Args : {}), ...structuredClone(patch) } };
+    const after = occurrenceView(found.event, found.occurrence);
+    updated[id] = null;
+    if (notify && (schedules(before, account) || schedules(after, account))) {
+      record(ctx, "REQUEST", id, attendeesOf(after, account));
+      record(ctx, "CANCEL", id, attendeesOf(before, account).filter((a) => !attendeesOf(after, account).includes(a)));
+    }
+  }
+  const destroy: string[] = [];
+  const all = Array.isArray(args.destroy) ? (args.destroy as string[]) : [];
+  for (const id of all) {
+    const found = occurrenceOf(account, id);
+    if (!found) {
+      destroy.push(id);
+      continue;
+    }
+    if (all.includes(found.event.id)) {
+      notDestroyed[id] = { type: "invalidArguments" };
+      continue;
+    }
+    const view = occurrenceView(found.event, found.occurrence);
+    const overrides = isObject(found.event.recurrenceOverrides) ? found.event.recurrenceOverrides : {};
+    found.event.recurrenceOverrides = { ...overrides, [found.occurrence.start]: { excluded: true } };
+    destroyed.push(id);
+    if (notify && schedules(view, account)) record(ctx, "CANCEL", id, attendeesOf(view, account));
+  }
+  return {
+    rest: { ...args, update: Object.keys(update).length > 0 ? update : undefined, destroy: destroy.length > 0 ? destroy : undefined },
+    answer: { updated, notUpdated, destroyed, notDestroyed },
+  };
+}
+
+/** Merges the entries of two `/set` answers (maps and lists; `null` when empty). */
+function mergeSetAnswers(base: Args, extra: Args): Args {
+  const out: Args = { ...base };
+  for (const key of ["updated", "notUpdated", "notDestroyed"] as const) {
+    const merged = { ...(isObject(base[key]) ? base[key] : {}), ...(extra[key] as Args) };
+    out[key] = Object.keys(merged).length > 0 ? merged : null;
+  }
+  const destroyed = [...(Array.isArray(base.destroyed) ? base.destroyed : []), ...(extra.destroyed as string[])];
+  out.destroyed = destroyed.length > 0 ? destroyed : null;
+  return out;
+}
+
+const calendarEventSet: Handler = (args, ctx) => {
+  if (args.sendSchedulingMessages !== undefined && typeof args.sendSchedulingMessages !== "boolean") {
+    throw new MethodError("invalidArguments");
+  }
+  const notify = args.sendSchedulingMessages === true;
+  const { account } = ctx;
+  const { rest, answer } = applyToOccurrences(args, ctx, notify);
+  const spec: SetSpec = {
+    store: account.events as Map<string, Stored>,
+    idPrefix: "ev",
+    writable: null,
+    serverSet: EVENT_SERVER_SET,
+    invalid: invalidEventProperties,
+    stamp: (object, c) => {
+      if (typeof object.uid !== "string") object.uid = c.state.nextId("ev-uid-");
+      if (object["@type"] === undefined) object["@type"] = "Event";
+      if (object.duration === undefined) object.duration = "PT0S";
+      // As the server: attendees without an organizer get the account as organizer.
+      if (attendeesOf(object, c.account).length > 0 && typeof object.organizerCalendarAddress !== "string") {
+        object.organizerCalendarAddress = `mailto:${c.account.email}`;
+      }
+      object.updated = c.state.nextReceivedAt();
+    },
+    refuseCreate: (object, c) =>
+      notify && schedules(object as FakeEvent, c.account) && attendeesOf(object, c.account).some((a) => UNREACHABLE.test(a))
+        ? { type: "noSupportedScheduleMethods" }
+        : null,
+    created: (object, c) => {
+      if (notify && schedules(object as FakeEvent, c.account)) record(c, "REQUEST", object.id, attendeesOf(object, c.account));
+    },
+    updated: (before, after, c) => {
+      if (!notify || !(schedules(before as FakeEvent, c.account) || schedules(after as FakeEvent, c.account))) return;
+      if (endsInPast(after as FakeEvent) || after.isDraft === true) return;
+      const now = attendeesOf(after, c.account);
+      record(c, "REQUEST", after.id, now);
+      record(c, "CANCEL", after.id, attendeesOf(before, c.account).filter((a) => !now.includes(a)));
+    },
+    destroyed: (object, c) => {
+      if (notify && schedules(object as FakeEvent, c.account)) record(c, "CANCEL", object.id, attendeesOf(object, c.account));
+    },
+  };
+  ctx.out.push(["CalendarEvent/set", mergeSetAnswers(applySet(rest, ctx, spec), answer), ctx.callId]);
+};
+
 // ---- data helpers for `createFakeStalwart` ----
 
 /** The default calendar every account has; created with the account. */
@@ -648,5 +928,5 @@ export const COLLAB_METHODS: Record<string, MethodEntry> = {
   "Calendar/get": { capability: CALENDARS, area: "calendars", handler: calendarGet },
   "CalendarEvent/query": { capability: CALENDARS, area: "calendars", handler: calendarEventQuery },
   "CalendarEvent/get": { capability: CALENDARS, area: "calendars", handler: calendarEventGet },
-  // Part 2: "CalendarEvent/set" goes here, built on `applySet` with its own `SetSpec`.
+  "CalendarEvent/set": { capability: CALENDARS, area: "calendars", handler: calendarEventSet },
 };

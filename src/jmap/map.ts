@@ -13,6 +13,7 @@ import {
   type SearchMailInputT,
   type ThreadMessage,
 } from "../mail";
+import type { DestroyOutcome } from "../collab";
 import { z } from "zod";
 import { cleanText, htmlToText } from "../content/sanitize";
 
@@ -132,12 +133,17 @@ export function updateResult(args: unknown): { updated: Set<string>; refused: Ma
 /**
  * The server id of the object a `/set` created as `creationId`. A refusal (`notCreated`) is
  * `upstream_rejected`. An answer that names the object in neither map shows nothing about what the
- * server did, so a create must not be repeated blindly: `upstream_unavailable`.
+ * server did, so a create must not be repeated blindly: `unknown` (`upstream_unavailable`, or
+ * `send_unconfirmed` for a create that makes the server send mail).
  */
-export function createdOrThrow(args: unknown, creationId: string): string {
+export function createdOrThrow(
+  args: unknown,
+  creationId: string,
+  unknown: "upstream_unavailable" | "send_unconfirmed" = "upstream_unavailable",
+): string {
   if (notCreated(args, creationId)) throw new MailError("upstream_rejected");
   const id = createdId(args, creationId);
-  if (id === null) throw new MailError("upstream_unavailable");
+  if (id === null) throw new MailError(unknown);
   return id;
 }
 
@@ -152,12 +158,8 @@ export function requireUpdated(args: unknown, id: string): void {
   throw new MailError(type === undefined || type === "notFound" ? "not_found" : "upstream_rejected");
 }
 
-/**
- * What a `/set` with `destroy: ids` did, as `moveMail` reports a batch: the ids in `destroyed` are
- * deleted and every other id is in `not_deleted`. When none was deleted: `not_found` if every
- * refusal is `notFound` (or the id is not mentioned), else `upstream_rejected`.
- */
-export function destroyResult(args: unknown, ids: string[]): { deleted: number; not_deleted: string[] } {
+/** What a `/set` with `destroy: ids` did, per id: deleted, or not (and whether only for unknown ids). */
+export function destroyOutcome(args: unknown, ids: string[]): DestroyOutcome {
   const parsed = parseUpstream(
     z.object({
       destroyed: z.array(z.string()).nullish(),
@@ -167,11 +169,28 @@ export function destroyResult(args: unknown, ids: string[]): { deleted: number; 
   );
   const destroyed = new Set(parsed.destroyed ?? []);
   const notDeleted = ids.filter((id) => !destroyed.has(id));
-  if (notDeleted.length === ids.length) {
-    const unknownOnly = notDeleted.every((id) => (parsed.notDestroyed?.[id]?.type ?? "notFound") === "notFound");
-    throw new MailError(unknownOnly ? "not_found" : "upstream_rejected");
-  }
-  return { deleted: ids.length - notDeleted.length, not_deleted: notDeleted };
+  return {
+    deleted: ids.filter((id) => destroyed.has(id)),
+    notDeleted,
+    unknownOnly: notDeleted.every((id) => (parsed.notDestroyed?.[id]?.type ?? "notFound") === "notFound"),
+  };
+}
+
+/**
+ * The result of one or more destroy outcomes, as `moveMail` reports a batch: the deleted ids count
+ * and every other id is in `not_deleted`. When none was deleted: `not_found` if every refusal is
+ * `notFound` (or the id is not mentioned), else `upstream_rejected`.
+ */
+export function batchResult(outcomes: DestroyOutcome[]): { deleted: number; not_deleted: string[] } {
+  const deleted = outcomes.reduce((n, o) => n + o.deleted.length, 0);
+  const notDeleted = outcomes.flatMap((o) => o.notDeleted);
+  if (deleted === 0) throw new MailError(outcomes.every((o) => o.unknownOnly) ? "not_found" : "upstream_rejected");
+  return { deleted, not_deleted: notDeleted };
+}
+
+/** What a `/set` with `destroy: ids` did, as one batch (see `batchResult`). */
+export function destroyResult(args: unknown, ids: string[]): { deleted: number; not_deleted: string[] } {
+  return batchResult([destroyOutcome(args, ids)]);
 }
 
 /** True when a `/set` answer lists `creationId` under `notCreated`: the server refused it. */

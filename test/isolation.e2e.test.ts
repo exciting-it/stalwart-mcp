@@ -158,6 +158,56 @@ describe("mail connector isolation, end to end", () => {
     }
   });
 
+  it("user A cannot change, delete or create into user B's calendars or events, and B's attendees hear nothing", async () => {
+    const accountIdA = fake.addMailbox(A).accountId;
+    const accountIdB = fake.addMailbox(B).accountId;
+    const a = await connect(fake, A);
+    const theirCalendar = fake.addCalendar(B, "B's private");
+    const secret = fake.addEvent(B, {
+      title: "B's secret",
+      start: "2031-03-03T09:00:00",
+      calendarIds: { [theirCalendar.id]: true },
+      participants: { p: { calendarAddress: "mailto:ok@test.example" } },
+    });
+    const before = fake.eventsOf(B);
+    const notFound = { isError: true, content: [{ type: "text", text: MAIL_ERROR_MESSAGES.not_found }] };
+
+    const mark = fake.requests.length;
+    expect(await callTool(a.accessToken!, "update_event", { event_id: secret.id, title: "Taken" })).toEqual(notFound);
+    expect(await callTool(a.accessToken!, "update_event", { event_id: secret.id, participants: [] })).toEqual(notFound);
+    expect(await callTool(a.accessToken!, "delete_event", { event_ids: [secret.id] })).toEqual(notFound);
+    expect(await callTool(a.accessToken!, "create_event", { title: "x", date: "2031-03-03", calendar_id: theirCalendar.id })).toEqual(notFound);
+    expect(fake.eventsOf(B)).toEqual(before);
+    expect(fake.eventsOf(A)).toEqual([]);
+    expect(fake.schedulingMessages(B)).toEqual([]);
+
+    // Own writes work and invite the attendee once; every request names A's account and A's token only.
+    const created = await callTool(a.accessToken!, "create_event", {
+      title: "Mine",
+      start: "2031-03-03T09:00:00Z",
+      end: "2031-03-03T10:00:00Z",
+      participants: [{ email: "ok@test.example" }],
+    });
+    const { event_id } = created.structuredContent as { event_id: string };
+    expect(created.structuredContent).toMatchObject({ invitations: 1, deduplicated: false });
+    const mixed = await callTool(a.accessToken!, "delete_event", { event_ids: [event_id, secret.id] });
+    expect(mixed.structuredContent).toEqual({ deleted: 1, not_deleted: [secret.id], cancellations: 1, cancelled_attendees: 1 });
+    expect(fake.schedulingMessages(A).map((m) => [m.kind, m.eventId])).toEqual([
+      ["REQUEST", event_id],
+      ["CANCEL", event_id],
+    ]);
+    expect(fake.eventsOf(B)).toEqual(before);
+    for (const r of fake.requests.slice(mark)) {
+      expect(r.authorization).toBe(`Bearer ${fake.tokensFor(A).accessToken}`);
+      const methodCalls = (r.body as { methodCalls?: [string, { accountId?: string }, string][] } | null)?.methodCalls;
+      for (const [name, args] of methodCalls ?? []) {
+        expect(args.accountId).toBe(accountIdA);
+        expect(args.accountId).not.toBe(accountIdB);
+        expect(name).toMatch(/^(Calendar\/get|CalendarEvent\/get|CalendarEvent\/set)$/);
+      }
+    }
+  });
+
   it("user A cannot read user B's calendars or events", async () => {
     const accountIdA = fake.addMailbox(A).accountId;
     const accountIdB = fake.addMailbox(B).accountId;

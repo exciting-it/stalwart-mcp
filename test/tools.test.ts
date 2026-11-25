@@ -7,8 +7,10 @@ import { toolsFor, TOOLS } from "../src/tools";
 import {
   COLLAB_CONTENT_NOTICE,
   CreateContactInputBase,
+  CreateEventInputBase,
   SearchEventsInputBase,
   UpdateContactInputBase,
+  UpdateEventInputBase,
 } from "../src/collab";
 import { createFakeMailStore, type FakeMailStore } from "./fake-mailbox";
 
@@ -68,6 +70,9 @@ const validInputFor = (tool: Tool): Record<string, unknown> =>
     create_contact: { name: "New Person", address_book_id: store.b.addressBookId },
     update_contact: { contact_id: store.b.contactId, name: "Renamed" },
     delete_contact: { contact_ids: [store.b.contactId] },
+    create_event: { title: "Planning", date: "2026-12-01", calendar_id: store.b.calendarId },
+    update_event: { event_id: store.b.eventId, title: "Renamed" },
+    delete_event: { event_ids: [store.b.eventId] },
   })[tool.spec.name]!;
 
 // The same calls with A's own ids, where a tool needs an id that exists.
@@ -82,6 +87,9 @@ const ownInputFor = (tool: Tool): Record<string, unknown> =>
     create_contact: { name: "New Person", emails: [{ address: "new@elsewhere.example", label: "work" }] },
     update_contact: { contact_id: store.a.contactId, organization: "Other Org" },
     delete_contact: { contact_ids: [store.a.contactId] },
+    create_event: { title: "Planning", date: "2026-12-01", participants: [{ email: "ok@test.example", name: "Ok" }] },
+    update_event: { event_id: store.a.eventId, location: "Room 2" },
+    delete_event: { event_ids: [store.a.eventId] },
   })[tool.spec.name] ?? validInputFor(tool);
 
 /** The tools of the always-offered mail part; the contacts and calendar tools are tested apart. */
@@ -109,6 +117,9 @@ describe("tools", () => {
       "list_calendars",
       "search_events",
       "read_event",
+      "create_event",
+      "update_event",
+      "delete_event",
     ]);
   });
 
@@ -334,7 +345,15 @@ describe("tools", () => {
       "delete_contact",
     ]);
     expect(names(new Set(["contacts"]))).not.toContain("list_calendars");
-    expect(names(new Set(["calendars"]))).toEqual([...mail, "list_calendars", "search_events", "read_event"]);
+    expect(names(new Set(["calendars"]))).toEqual([
+      ...mail,
+      "list_calendars",
+      "search_events",
+      "read_event",
+      "create_event",
+      "update_event",
+      "delete_event",
+    ]);
     expect(names(new Set(["contacts", "calendars"]))).toEqual(TOOLS.map((t) => t.spec.name));
   });
 
@@ -586,6 +605,111 @@ describe("tools", () => {
         expect(r).toEqual({ isError: true, content: [{ type: "text", text: MAIL_ERROR_MESSAGES.not_granted }] });
         expect(audits.at(-1)).toMatchObject({ tool: name, outcome: "refused", errorCode: "not_granted" });
       }
+    });
+  });
+
+  describe("event write tools", () => {
+    const WRITE = ["create_event", "update_event", "delete_event"];
+    const base = () => ({ event: "tool_call", accountId: grantA.accountId, email: grantA.email, clientId: "client-1" });
+
+    it("are notify and destroy_notify tools of the calendars area without an account or organizer parameter", () => {
+      expect(WRITE.map((n) => byName(n).spec.kind)).toEqual(["notify", "notify", "destroy_notify"]);
+      for (const name of WRITE) {
+        const { spec } = byName(name);
+        expect(spec.area).toBe("calendars");
+        expect(spec.description).toContain("Confirm participants and times with the user first.");
+        expect(spec.description).toContain("one of the mailbox's 50 sent messages per day");
+        const input = { create_event: CreateEventInputBase, update_event: UpdateEventInputBase }[name] ?? spec.input;
+        for (const key of Object.keys((input as { shape: Record<string, unknown> }).shape)) {
+          expect(key).not.toMatch(/account|sender|identity|from|organizer|send/i);
+        }
+      }
+      expect(byName("create_event").spec.description).toContain("sends them invitations by email");
+      expect(byName("create_event").spec.description).toContain("at most 10");
+      expect(byName("update_event").spec.description).toContain("changes that occurrence only");
+      const remove = byName("delete_event").spec.description;
+      expect(remove).toContain("removed for good and cannot be brought back");
+      expect(remove).toContain("up to 50 per call");
+      expect(remove).toContain("deletes that occurrence only");
+      expect(remove).toContain("cancellation");
+    });
+
+    it("delete_event takes a list of 1 to 50 ids and nothing else", async () => {
+      expect(Object.keys((byName("delete_event").spec.input as { shape: object }).shape)).toEqual(["event_ids"]);
+      const many = Array.from({ length: 51 }, (_, i) => `ev${i}`);
+      for (const input of [{}, { event_ids: [] }, { event_ids: many }, { event_ids: [store.a.eventId], notify: false }, { event_id: store.a.eventId }]) {
+        expect(text(await byName("delete_event").execute(deps, grantA, input))).toBe(MAIL_ERROR_MESSAGES.invalid_input);
+      }
+      expect(store.calls).toEqual([]);
+    });
+
+    it("answer with ids and counts only, and audit how many were notified, without any address or content", async () => {
+      const created = await byName("create_event").execute(deps, grantA, {
+        title: "Secret Title",
+        date: "2026-12-01",
+        description: "secret agenda",
+        participants: [{ email: "ok@test.example", name: "Secret Person" }],
+      });
+      const { event_id } = created.structuredContent as { event_id: string };
+      expect(created.structuredContent).toEqual({ event_id, calendar_id: store.a.calendarId, invitations: 1, deduplicated: false });
+      const updated = await byName("update_event").execute(deps, grantA, { event_id, location: "Secret Room" });
+      expect(updated.structuredContent).toEqual({ event_id, invitations: 1 });
+      const deleted = await byName("delete_event").execute(deps, grantA, { event_ids: [event_id, store.a.eventId] });
+      expect(deleted.structuredContent).toEqual({ deleted: 2, not_deleted: [], cancellations: 1, cancelled_attendees: 1 });
+      expect(audits).toEqual([
+        { ...base(), tool: "create_event", outcome: "ok", resultCount: 1, recipientCount: 1 },
+        { ...base(), tool: "update_event", outcome: "ok", resultCount: 1, recipientCount: 1 },
+        { ...base(), tool: "delete_event", outcome: "ok", resultCount: 2, recipientCount: 1 },
+      ]);
+      expect(JSON.stringify(audits)).not.toMatch(/Secret|secret|ok@test/);
+      expect(audits.every((a) => !("messageId" in a))).toBe(true);
+    });
+
+    it("audit a refused notifying write as refused, without a recipient count or address", async () => {
+      store.failNextWith(new MailError("recipient_not_allowed"));
+      const r = await byName("create_event").execute(deps, grantA, {
+        title: "x",
+        date: "2026-12-01",
+        participants: [{ email: "stranger@elsewhere.example" }],
+      });
+      expect(text(r)).toBe(MAIL_ERROR_MESSAGES.recipient_not_allowed);
+      store.failNextWith(new MailError("send_limit_reached"));
+      await byName("delete_event").execute(deps, grantA, { event_ids: [store.a.eventId] });
+      expect(audits).toEqual([
+        { ...base(), tool: "create_event", outcome: "refused", errorCode: "recipient_not_allowed" },
+        { ...base(), tool: "delete_event", outcome: "refused", errorCode: "send_limit_reached" },
+      ]);
+      expect(JSON.stringify(audits)).not.toContain("stranger");
+    });
+
+    it("refuse a bad input before the mailbox is touched", async () => {
+      const eleven = Array.from({ length: 11 }, (_, i) => ({ email: `p${i}@example.org` }));
+      for (const [name, input] of [
+        ["create_event", { title: "x", date: "2026-12-01", participants: eleven }],
+        ["create_event", { title: "x", date: "2026-12-01", participants: [{ email: "a@example.org" }, { email: "A@example.org" }] }],
+        ["create_event", { title: "x", date: "2026-12-01", participants: [{ email: "Name <a@example.org>" }] }],
+        ["create_event", { title: "x", date: "2026-12-01", recurrence: { frequency: "hourly" } }],
+        ["create_event", { title: "x", date: "2026-12-01", organizer: "boss@example.org" }],
+        ["create_event", { title: "x", date: "2026-12-01", send_invitations: false }],
+        ["update_event", { event_id: store.a.eventId }],
+        ["update_event", { event_id: store.a.eventId, account_id: store.b.accountId, title: "x" }],
+      ] as const) {
+        expect(text(await byName(name).execute(deps, grantA, input))).toBe(MAIL_ERROR_MESSAGES.invalid_input);
+      }
+      expect(store.calls).toEqual([]);
+    });
+
+    it("reach only the grant's own account: B's calendar and event answer not found", async () => {
+      for (const [name, input] of [
+        ["create_event", { title: "x", date: "2026-12-01", calendar_id: store.b.calendarId }],
+        ["update_event", { event_id: store.b.eventId, title: "Renamed" }],
+        ["delete_event", { event_ids: [store.b.eventId] }],
+      ] as const) {
+        expect(text(await byName(name).execute(deps, grantA, input))).toBe(MAIL_ERROR_MESSAGES.not_found);
+      }
+      expect(store.calls.every((c) => c.accountId === grantA.accountId)).toBe(true);
+      const b = await store.mailboxFor(store.b.accountId).readEvent({ event_id: store.b.eventId });
+      expect(b.event.title).toBe("Meeting of B");
     });
   });
 });

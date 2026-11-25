@@ -113,16 +113,21 @@ describe("areas beyond mail on the approval page", () => {
   it("adds one list entry for exactly each area that is switched on, after the mail entries", async () => {
     expect(permissions(await page("en", ["contacts"])).slice(4)).toEqual(["Read, create, change and delete your contacts"]);
     expect(await page("en", ["contacts"])).not.toMatch(/calendar/i);
-    expect(permissions(await page("en", ["calendars"])).slice(4)).toEqual(["Read, create, change and delete your calendar events"]);
+    expect(permissions(await page("en", ["calendars"])).slice(4)).toEqual([
+      "Read, create, change and delete your calendar events, and send invitations",
+    ]);
     expect(await page("en", ["calendars"])).not.toMatch(/address book/i);
     expect(permissions(await page("en", ["calendars", "contacts"])).slice(4)).toEqual([
       "Read, create, change and delete your contacts",
-      "Read, create, change and delete your calendar events",
+      "Read, create, change and delete your calendar events, and send invitations",
     ]);
     expect(permissions(await page("de", ["contacts", "calendars"])).slice(4)).toEqual([
       "Kontakte lesen, anlegen, ändern und löschen",
-      "Termine lesen, anlegen, ändern und löschen",
+      "Termine lesen, anlegen, ändern und löschen, und Einladungen verschicken",
     ]);
+    // Only the calendars entry speaks of invitations.
+    expect(await page("en", ["contacts"])).not.toMatch(/invitation/i);
+    expect(await page("de", ["contacts"])).not.toMatch(/Einladung/i);
   });
 
   it("tells what deleting does, naming only the areas that are on", async () => {

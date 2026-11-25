@@ -4,8 +4,24 @@
  * `VaultResult`. Sending is the one irreversible action: it is refused outside the recipient
  * allow-list, deduplicated, and counted against the daily limit before it goes out. A send whose
  * outcome is unknown stays counted and blocks an identical send for the dedupe window.
+ *
+ * An event write that makes the mail server notify people (invitations, updates, cancellations)
+ * is a send too: the same allow-list, the same daily counter (one per notified event) and, for a
+ * create or update, the same dedupe. Whether it notifies is decided here (`event-notices.ts`); the
+ * adapter only reads the event and writes with that decision.
  */
-import { type CollabAdapter, CollabRequest, type CollabValue } from "../collab";
+import {
+  type CollabUpstream,
+  CollabRequest,
+  type CollabValue,
+  type CreateEventInputT,
+  type CreateEventResultT,
+  type DeleteEventInputT,
+  type DeleteEventResultT,
+  type DestroyOutcome,
+  type UpdateEventInputT,
+  type UpdateEventResultT,
+} from "../collab";
 import {
   CreateDraftInput,
   MAIL_LIMITS,
@@ -23,16 +39,21 @@ import type { Env } from "../env";
 import type { JmapSession } from "../jmap/jmap-client";
 import { JmapCollabAdapter } from "../jmap/jmap-collab-adapter";
 import { JmapMailboxAdapter } from "../jmap/jmap-mailbox-adapter";
+import { batchResult } from "../jmap/map";
 import { recipientsAllowed } from "../policy/environment";
+import { createNotice, deleteNotice, updateNotice } from "./event-notices";
 import {
   confirmSend,
   dropSend,
+  eventWriteFingerprint,
   findRecentSend,
   markSendUnconfirmed,
   pruneRecentSends,
   type RecordedSend,
+  releaseSends,
   reserveSend,
   sendFingerprint,
+  takeSends,
   takeToolCall,
 } from "./limits";
 import { readConnection } from "./token-store";
@@ -99,8 +120,8 @@ export class MailboxOperations {
   readonly #env: Env;
   readonly #withAccessToken: WithAccessToken;
   readonly #slots = new Slots(MAIL_LIMITS.upstreamConcurrency);
-  /** Sends on their way upstream, by fingerprint: an identical send awaits the one in flight. */
-  readonly #sendsInFlight = new Map<string, Promise<SendResult>>();
+  /** Sends (and notifying event writes) on their way upstream, by fingerprint: an identical one awaits it. */
+  readonly #sendsInFlight = new Map<string, Promise<unknown>>();
 
   constructor(opts: { sql: SqlStorage; env: Env; withAccessToken: WithAccessToken }) {
     this.#sql = opts.sql;
@@ -143,13 +164,22 @@ export class MailboxOperations {
    * deployment has not switched on (`FEATURES`) is `not_granted`, whatever the stored token could do.
    */
   collab(caller: Caller, request: unknown): Promise<VaultResult<CollabValue>> {
+    const { accountId } = caller;
     return this.#operation("collab", caller, () => {
       const parsed = parse(CollabRequest, request);
       const area: Area = COLLAB_OP_AREA[parsed.op];
       if (!(parseFeatures(this.#env.FEATURES) ?? new Set<Area>()).has(area)) throw new MailError("not_granted");
       return parsed;
-    }, (req) =>
-      this.#collabUpstream(caller.accountId, (a): Promise<CollabValue> => {
+    }, (req): Promise<CollabValue> => {
+      switch (req.op) {
+        case "create_event":
+          return this.#createEvent(accountId, req.input);
+        case "update_event":
+          return this.#updateEvent(accountId, req.input);
+        case "delete_event":
+          return this.#deleteEvent(accountId, req.input);
+      }
+      return this.#collabUpstream(accountId, (a): Promise<CollabValue> => {
         switch (req.op) {
           case "search_contacts":
             return a.searchContacts(req.input);
@@ -167,56 +197,155 @@ export class MailboxOperations {
             return a.updateContact(req.input);
           case "delete_contact":
             return a.deleteContact(req.input);
-          case "create_event":
-            return a.createEvent(req.input);
-          case "update_event":
-            return a.updateEvent(req.input);
-          case "delete_event":
-            return a.deleteEvent(req.input);
         }
-      }),
-    );
+      });
+    });
   }
 
   sendMail(caller: Caller, input: unknown): Promise<VaultResult<SendResult>> {
     const { accountId } = caller;
     return this.#operation("sendMail", caller, () => parse(SendMailInput, input), async (message) => {
-      if (!recipientsAllowed(this.#env, [...message.to, ...message.cc, ...message.bcc])) {
-        throw new MailError("recipient_not_allowed");
-      }
-      const fingerprint = await sendFingerprint(message);
-      // From here to `set` nothing awaits, so no second identical send can slip in between.
-      const inFlight = this.#sendsInFlight.get(fingerprint);
-      if (inFlight) return { ...(await inFlight), deduplicated: true };
-      const now = clock.now();
-      pruneRecentSends(this.#sql, now);
-      const recent = findRecentSend(this.#sql, fingerprint, now);
-      if (recent?.state === "sent") return { ...recent.sent, deduplicated: true };
-      // Unconfirmed, or pending with no twin in this instance (the object restarted mid-send).
-      if (recent) throw new MailError("send_unconfirmed");
-      const day = reserveSend(this.#sql, fingerprint, now);
-      if (day === null) throw new MailError("send_limit_reached");
-
-      const sending = this.#submit(accountId, message, fingerprint, day);
-      this.#sendsInFlight.set(fingerprint, sending);
-      try {
-        return await sending;
-      } finally {
-        this.#sendsInFlight.delete(fingerprint);
-      }
+      this.#requireAllowed([...message.to, ...message.cc, ...message.bcc]);
+      return this.#exactlyOnce<SendResult>(await sendFingerprint(message), {
+        send: () => this.#upstream(accountId, (a) => a.sendMail(message)),
+        record: (sent) => ({ message_id: sent.message_id, recipients: sent.recipients }),
+        again: (sent) => ({ ...sent, deduplicated: true }),
+        recorded: (sent) => ({ ...sent, deduplicated: true }),
+      });
     });
   }
 
-  /** The send itself, with its day reserved and its `pending` row written. */
-  async #submit(
-    accountId: string,
-    message: z.output<typeof SendMailInput>,
+  /** A notifying create is a send: allow-listed attendees only, counted, deduplicated. */
+  async #createEvent(accountId: string, input: CreateEventInputT): Promise<CreateEventResultT> {
+    const notice = createNotice(input, clock.now());
+    if (!notice.notify) {
+      const created = await this.#collabUpstream(accountId, (a) => a.createEvent(input, false));
+      return { ...created, invitations: 0, deduplicated: false };
+    }
+    this.#requireAllowed(notice.addresses);
+    const invitations = notice.addresses.length;
+    return this.#exactlyOnce<CreateEventResultT>(await eventWriteFingerprint("create_event", input), {
+      send: async () => ({
+        ...(await this.#collabUpstream(accountId, (a) => a.createEvent(input, true))),
+        invitations,
+        deduplicated: false,
+      }),
+      record: (r) => ({ message_id: `${r.event_id}/${r.calendar_id}`, recipients: r.invitations }),
+      again: (r) => ({ ...r, deduplicated: true }),
+      recorded: (sent) => {
+        const [event_id = "", calendar_id = ""] = sent.message_id.split("/");
+        return { event_id, calendar_id, invitations: sent.recipients, deduplicated: true };
+      },
+    });
+  }
+
+  /**
+   * The event is read first: its attendees before the update, and when it ends. An update that
+   * notifies is a send like a create; one that does not is passed on as it is.
+   */
+  async #updateEvent(accountId: string, input: UpdateEventInputT): Promise<UpdateEventResultT> {
+    const audience = (await this.#collabUpstream(accountId, (a) => a.eventAudiences([input.event_id]))).get(input.event_id);
+    if (audience === undefined) throw new MailError("not_found");
+    const notice = updateNotice(input, audience, clock.now());
+    if (!notice.notify) {
+      const updated = await this.#collabUpstream(accountId, (a) => a.updateEvent(input, false));
+      return { ...updated, invitations: 0 };
+    }
+    this.#requireAllowed(notice.addresses);
+    const invitations = notice.addresses.length;
+    return this.#exactlyOnce<UpdateEventResultT>(await eventWriteFingerprint("update_event", input), {
+      send: async () => ({ ...(await this.#collabUpstream(accountId, (a) => a.updateEvent(input, true))), invitations }),
+      record: (r) => ({ message_id: r.event_id, recipients: r.invitations }),
+      again: (r) => r,
+      recorded: (sent) => ({ event_id: sent.message_id, invitations: sent.recipients }),
+    });
+  }
+
+  /**
+   * The events are read first. Every event that notifies costs one send, reserved all at once
+   * before anything is deleted: when fewer are left, nothing is deleted. Those events go in one
+   * `/set` with `sendSchedulingMessages: true`, the others in a second one with `false`. Sends of
+   * events that were definitely not deleted are given back; after an unknown outcome they stay.
+   * No dedupe: a repeated call finds nothing left to delete, so it notifies nobody.
+   */
+  async #deleteEvent(accountId: string, input: DeleteEventInputT): Promise<DeleteEventResultT> {
+    const ids = [...new Set(input.event_ids)];
+    const audiences = await this.#collabUpstream(accountId, (a) => a.eventAudiences(ids));
+    const now = clock.now();
+    const notices = new Map(ids.map((id) => [id, audiences.has(id) ? deleteNotice(audiences.get(id)!, now) : null]));
+    const notifying = ids.filter((id) => notices.get(id)?.notify === true);
+    const silent = ids.filter((id) => notices.get(id)?.notify !== true);
+    const outcomes: DestroyOutcome[] = [];
+    let cancelled: string[] = [];
+    if (notifying.length > 0) {
+      this.#requireAllowed(notifying.flatMap((id) => notices.get(id)!.addresses));
+      const day = takeSends(this.#sql, now, notifying.length);
+      if (day === null) throw new MailError("send_limit_reached");
+      let outcome: DestroyOutcome;
+      try {
+        outcome = await this.#collabUpstream(accountId, (a) => a.deleteEvents(notifying, true));
+      } catch (e) {
+        // Definite (refused, or never sent): nothing went out. Otherwise it may have: kept.
+        if (e instanceof MailError && e.code !== "send_unconfirmed") releaseSends(this.#sql, day, notifying.length);
+        throw e;
+      }
+      releaseSends(this.#sql, day, outcome.notDeleted.length);
+      cancelled = outcome.deleted;
+      outcomes.push(outcome);
+    }
+    if (silent.length > 0) outcomes.push(await this.#collabUpstream(accountId, (a) => a.deleteEvents(silent, false)));
+    return {
+      ...batchResult(outcomes),
+      cancellations: cancelled.length,
+      cancelled_attendees: cancelled.reduce((n, id) => n + notices.get(id)!.addresses.length, 0),
+    };
+  }
+
+  /** Outside production, every address a send or a notifying event write reaches must be allow-listed. */
+  #requireAllowed(addresses: string[]): void {
+    if (!recipientsAllowed(this.#env, addresses)) throw new MailError("recipient_not_allowed");
+  }
+
+  /**
+   * Runs `send` at most once per fingerprint within the dedupe window, counted against the daily
+   * send limit. An identical call in flight awaits it (`again`); one already confirmed answers
+   * from its row (`recorded`); one whose outcome is unknown is `send_unconfirmed`.
+   */
+  async #exactlyOnce<T>(
     fingerprint: string,
-    day: number,
-  ): Promise<SendResult> {
-    let sent: SendResult;
+    o: {
+      send: () => Promise<T>;
+      record: (result: T) => RecordedSend;
+      again: (result: T) => T;
+      recorded: (sent: RecordedSend) => T;
+    },
+  ): Promise<T> {
+    // From here to `set` nothing awaits, so no second identical send can slip in between.
+    const inFlight = this.#sendsInFlight.get(fingerprint) as Promise<T> | undefined;
+    if (inFlight) return o.again(await inFlight);
+    const now = clock.now();
+    pruneRecentSends(this.#sql, now);
+    const recent = findRecentSend(this.#sql, fingerprint, now);
+    if (recent?.state === "sent") return o.recorded(recent.sent);
+    // Unconfirmed, or pending with no twin in this instance (the object restarted mid-send).
+    if (recent) throw new MailError("send_unconfirmed");
+    const day = reserveSend(this.#sql, fingerprint, now);
+    if (day === null) throw new MailError("send_limit_reached");
+
+    const sending = this.#submit(fingerprint, day, o.send, o.record);
+    this.#sendsInFlight.set(fingerprint, sending);
     try {
-      sent = await this.#upstream(accountId, (a) => a.sendMail(message));
+      return await sending;
+    } finally {
+      this.#sendsInFlight.delete(fingerprint);
+    }
+  }
+
+  /** The send itself, with its day reserved and its `pending` row written. */
+  async #submit<T>(fingerprint: string, day: number, send: () => Promise<T>, record: (result: T) => RecordedSend): Promise<T> {
+    let sent: T;
+    try {
+      sent = await send();
     } catch (e) {
       // A `MailError` other than `send_unconfirmed` is definite: Stalwart refused, or the request
       // never left (`withAccessToken` repeats the call only after a 401, when nothing was
@@ -226,7 +355,7 @@ export class MailboxOperations {
       else markSendUnconfirmed(this.#sql, fingerprint);
       throw e;
     }
-    confirmSend(this.#sql, fingerprint, sent);
+    confirmSend(this.#sql, fingerprint, record(sent));
     return sent;
   }
 
@@ -270,7 +399,7 @@ export class MailboxOperations {
   }
 
   /** Like `#upstream`, with the contacts and calendar adapter. */
-  #collabUpstream<T>(accountId: string, call: (adapter: CollabAdapter) => Promise<T>): Promise<T> {
+  #collabUpstream<T>(accountId: string, call: (adapter: CollabUpstream) => Promise<T>): Promise<T> {
     return this.#slots.run(() =>
       this.#withAccessToken((accessToken, session) => call(new JmapCollabAdapter({ accountId, accessToken, session }))),
     );

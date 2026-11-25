@@ -38,7 +38,8 @@ export interface ToolSpec<I extends z.ZodTypeAny, O extends z.ZodTypeAny> {
   name: string;
   title: string;
   description: string;
-  kind: "read" | "draft" | "send" | "move" | "trash" | "create" | "update" | "destroy";
+  /** `notify` and `destroy_notify`: writes that can make the mail server send mail to third parties. */
+  kind: "read" | "draft" | "send" | "move" | "trash" | "create" | "update" | "destroy" | "notify" | "destroy_notify";
   /** The area this tool belongs to; without one it is a mail tool and always offered. */
   area?: Area;
   input: I;
@@ -46,6 +47,8 @@ export interface ToolSpec<I extends z.ZodTypeAny, O extends z.ZodTypeAny> {
   /** `grant` is the verified connection: its address may be shown, never chosen by the input. */
   run(mailbox: Mailbox, input: z.infer<I>, grant: Grant): Promise<z.infer<O>>;
   count?(result: z.infer<O>): number;
+  /** How many addresses a successful call made the mail server notify (the event writes); never an address. */
+  recipients?(result: z.infer<O>): number;
 }
 
 export interface Tool {
@@ -122,6 +125,7 @@ export function defineTool<I extends z.ZodTypeAny, O extends z.ZodTypeAny>(spec:
     }
     if (outcome.ok) {
       if (spec.count) entry.resultCount = spec.count(outcome.result as z.infer<O>);
+      if (spec.recipients) entry.recipientCount = spec.recipients(outcome.result as z.infer<O>);
       if (spec.kind === "send") entry.messageId = String(outcome.result.message_id);
       if (spec.kind === "draft") entry.messageId = String(outcome.result.draft_id);
     }

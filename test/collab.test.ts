@@ -10,6 +10,7 @@ import {
   CreateEventResult,
   DeleteContactInput,
   DeleteEventInput,
+  DeleteEventResult,
   DeleteResult,
   EventDetailSchema,
   ListCalendarsInput,
@@ -242,6 +243,9 @@ describe("limits of the write tools", () => {
       contactEntriesMax: 10,
       eventDaysMax: 366,
       eventSpanDaysMax: 31,
+      eventParticipantsMax: 10,
+      recurrenceIntervalMax: 99,
+      recurrenceCountMax: 730,
     });
   });
 });
@@ -482,19 +486,74 @@ describe("create_event input", () => {
     refused(CreateEventInput, { ...timed, description: "d".repeat(5001) });
   });
 
-  it("has no participants, recurrence or account parameter", () => {
+  it("has no account, organizer or scheduling parameter, and no JMAP property names", () => {
     for (const extra of [
-      { participants: [{ email: "a@example.org" }] },
       { attendees: ["a@example.org"] },
       { recurrence: "daily" },
       { recurrenceRules: [] },
+      { recurrenceRule: { frequency: "daily" } },
       { account_id: "a" },
+      { organizer: "boss@example.org" },
+      { organizerCalendarAddress: "mailto:boss@example.org" },
       { sendSchedulingMessages: true },
-      { send_invitations: true },
+      { send_invitations: false },
       { event_id: "ev1" },
     ]) {
       refused(CreateEventInput, { ...timed, ...extra });
     }
+  });
+
+  it("takes up to 10 participants, each a bare address once, with an optional one-line name", () => {
+    const people = (n: number) => Array.from({ length: n }, (_, i) => ({ email: `p${i}@example.org` }));
+    ok(CreateEventInput, { ...timed, participants: [] });
+    ok(CreateEventInput, { ...timed, participants: [{ email: "ada@example.org", name: "Ada Lovelace" }] });
+    ok(CreateEventInput, { ...timed, participants: people(COLLAB_LIMITS.eventParticipantsMax) });
+    refused(CreateEventInput, { ...timed, participants: people(11) });
+    refused(CreateEventInput, { ...timed, participants: [{ email: "ada@example.org" }, { email: "ADA@Example.org" }] });
+    for (const bad of [
+      { email: "Ada <ada@example.org>" },
+      { email: "a@example.org, b@example.org" },
+      { email: "a@example.org\r\nBcc: x@example.org" },
+      { email: "not an address" },
+      { email: "ada@example.org", name: "Ada\nBcc" },
+      { email: "ada@example.org", name: "x".repeat(201) },
+      { email: "ada@example.org", role: "chair" },
+      { email: "ada@example.org", calendarAddress: "mailto:other@example.org" },
+      { name: "No address" },
+      "ada@example.org",
+    ]) {
+      refused(CreateEventInput, { ...timed, participants: [bad] });
+    }
+  });
+
+  it("takes a recurrence rule: a frequency, interval 1 to 99, count 1 to 730 or until, by_day only weekly", () => {
+    for (const frequency of ["daily", "weekly", "monthly", "yearly"]) ok(CreateEventInput, { ...timed, recurrence: { frequency } });
+    ok(CreateEventInput, { ...timed, recurrence: { frequency: "weekly", interval: 2, count: 10, by_day: ["mo", "we", "fr"] } });
+    ok(CreateEventInput, { ...timed, recurrence: { frequency: "daily", interval: 99, until: "2027-02-28" } });
+    ok(CreateEventInput, { ...timed, recurrence: { frequency: "daily", count: 730 } });
+    ok(CreateEventInput, { title: "Birthday", date: "2026-12-24", recurrence: { frequency: "yearly" } });
+    for (const bad of [
+      { frequency: "hourly" },
+      { frequency: "secondly" },
+      {},
+      { frequency: "daily", interval: 0 },
+      { frequency: "daily", interval: 100 },
+      { frequency: "daily", count: 0 },
+      { frequency: "daily", count: 731 },
+      { frequency: "daily", count: 2, until: "2027-01-01" },
+      { frequency: "daily", until: "2027-02-30" },
+      { frequency: "daily", until: "2027-01-01T00:00:00Z" },
+      { frequency: "daily", by_day: ["mo"] },
+      { frequency: "monthly", by_day: ["mo"] },
+      { frequency: "weekly", by_day: [] },
+      { frequency: "weekly", by_day: ["mo", "mo"] },
+      { frequency: "weekly", by_day: ["monday"] },
+      { frequency: "weekly", byDay: [{ day: "mo" }] },
+      { frequency: "daily", rscale: "gregorian" },
+    ]) {
+      refused(CreateEventInput, { ...timed, recurrence: bad });
+    }
+    refused(CreateEventInput, { ...timed, recurrence: null });
   });
 });
 
@@ -527,10 +586,22 @@ describe("update_event input", () => {
     refused(UpdateEventInput, { event_id: "ev1", time_zone: "Mars/Olympus", start: "2026-11-27T09:00:00Z", end: "2026-11-27T10:00:00Z" });
   });
 
-  it("has no participants, recurrence or account parameter", () => {
-    for (const extra of [{ participants: [] }, { recurrence: "daily" }, { account_id: "a" }, { sendSchedulingMessages: false }]) {
+  it("has no account or scheduling parameter", () => {
+    for (const extra of [{ recurrence: "daily" }, { account_id: "a" }, { sendSchedulingMessages: false }, { organizer: "x@example.org" }]) {
       refused(UpdateEventInput, { event_id: "ev1", title: "x", ...extra });
     }
+  });
+
+  it("replaces the participants (an empty list removes them) and the rule (null removes it)", () => {
+    ok(UpdateEventInput, { event_id: "ev1", participants: [] });
+    ok(UpdateEventInput, { event_id: "ev1", participants: [{ email: "ada@example.org" }] });
+    ok(UpdateEventInput, { event_id: "ev1", recurrence: null });
+    ok(UpdateEventInput, { event_id: "ev1", recurrence: { frequency: "weekly", by_day: ["tu"] } });
+    const eleven = Array.from({ length: 11 }, (_, i) => ({ email: `p${i}@example.org` }));
+    refused(UpdateEventInput, { event_id: "ev1", participants: eleven });
+    refused(UpdateEventInput, { event_id: "ev1", participants: [{ email: "a@example.org" }, { email: "A@EXAMPLE.ORG" }] });
+    refused(UpdateEventInput, { event_id: "ev1", recurrence: { frequency: "daily", count: 1, until: "2027-01-01" } });
+    refused(UpdateEventInput, { event_id: "ev1", participants: null });
   });
 
   it("does not throw on a malformed instant: it is a refusal", () => {
@@ -545,12 +616,18 @@ describe("results of the write tools", () => {
     ok(CreateContactResult, { contact_id: "ct1", address_book_id: "ab1" });
     ok(UpdateContactResult, { contact_id: "ct1" });
     ok(DeleteResult, { deleted: 2, not_deleted: ["ct3"] });
-    ok(CreateEventResult, { event_id: "ev1", calendar_id: "cal1" });
-    ok(UpdateEventResult, { event_id: "ev1" });
+    ok(CreateEventResult, { event_id: "ev1", calendar_id: "cal1", invitations: 2, deduplicated: false });
+    ok(UpdateEventResult, { event_id: "ev1", invitations: 0 });
+    ok(DeleteEventResult, { deleted: 2, not_deleted: ["ev3"], cancellations: 1, cancelled_attendees: 3 });
     refused(DeleteResult, { deleted: true, id: "ct1" });
     refused(DeleteResult, { deleted: 1 });
     refused(CreateContactResult, { contact_id: "ct1" });
     refused(CreateEventResult, { event_id: "ev1" });
+    refused(CreateEventResult, { event_id: "ev1", calendar_id: "cal1" });
+    refused(UpdateEventResult, { event_id: "ev1" });
+    // The events' delete result says how many cancellations went out; the contacts' one does not.
+    refused(DeleteEventResult, { deleted: 2, not_deleted: [] });
+    expect(DeleteResult.parse({ deleted: 1, not_deleted: [], cancellations: 1 })).toEqual({ deleted: 1, not_deleted: [] });
     // No content notice: the schemas drop everything that is not an id.
     expect(CreateContactResult.parse({ contact_id: "ct1", address_book_id: "ab1", name: "Ada", content_notice: "x" })).toEqual({
       contact_id: "ct1",

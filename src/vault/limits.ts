@@ -3,6 +3,11 @@
  * send counter per UTC day, and the recent sends used to drop a repeated send. All access is
  * synchronous SQL, so a check and its increment can never interleave with another call.
  *
+ * Event writes that make the mail server notify people (invitations, updates, cancellations)
+ * count as sends: the same counter, and for a notifying create or update the same `recent_sends`
+ * rows. Such a row's `message_id` holds the event id (`<event id>/<calendar id>` for a create) and
+ * `recipients` the number of attendees notified.
+ *
  * `recent_sends` holds only a SHA-256 of the message, the time, the state of the send and, once
  * it is confirmed, the message id and the recipient count: no address, subject or body is
  * stored. A send is `pending` from its reservation until Stalwart answers, `sent` once it
@@ -35,17 +40,17 @@ interface CounterRow extends Record<string, SqlStorageValue> {
   count: number;
 }
 
-/** Counts one use of `name` in `period` unless `limit` uses are already counted there. */
-function take(sql: SqlStorage, name: string, period: number, limit: number): boolean {
+/** Counts `amount` uses of `name` in `period` unless that would go beyond `limit` uses there. */
+function take(sql: SqlStorage, name: string, period: number, limit: number, amount = 1): boolean {
   const row = sql.exec<CounterRow>("SELECT period, count FROM usage_counter WHERE name = ?", name).toArray()[0];
   const used = row && row.period === period ? row.count : 0;
-  if (used >= limit) return false;
+  if (used + amount > limit) return false;
   sql.exec(
     `INSERT INTO usage_counter (name, period, count) VALUES (?, ?, ?)
      ON CONFLICT (name) DO UPDATE SET period = excluded.period, count = excluded.count`,
     name,
     period,
-    used + 1,
+    used + amount,
   );
   return true;
 }
@@ -132,9 +137,24 @@ export function takeSend(sql: SqlStorage, now: number): number | null {
   return take(sql, "send", day, MAIL_LIMITS.sendsPerDay) ? day : null;
 }
 
+/**
+ * Reserves `n` sends at once in the UTC day of `now` (a `delete_event` that cancels `n` events):
+ * all of them, or none and null when fewer are left.
+ */
+export function takeSends(sql: SqlStorage, now: number, n: number): number | null {
+  const day = Math.floor(now / DAY_MS);
+  return take(sql, "send", day, MAIL_LIMITS.sendsPerDay, n) ? day : null;
+}
+
+/** Gives back `n` sends reserved for `day` that did not go out. */
+export function releaseSends(sql: SqlStorage, day: number, n: number): void {
+  if (n <= 0) return;
+  sql.exec("UPDATE usage_counter SET count = MAX(count - ?, 0) WHERE name = 'send' AND period = ?", n, day);
+}
+
 /** Gives back a send reserved for `day` that did not go out. */
 function releaseSend(sql: SqlStorage, day: number): void {
-  sql.exec("UPDATE usage_counter SET count = count - 1 WHERE name = 'send' AND period = ? AND count > 0", day);
+  releaseSends(sql, day, 1);
 }
 
 const normalized = (list: string[]): string[] => list.map((a) => a.toLowerCase()).sort();
@@ -153,5 +173,33 @@ export async function sendFingerprint(m: OutgoingMessage): Promise<string> {
     m.in_reply_to ?? null,
   ]);
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(canonical));
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/** Keys sorted at every level, so two equal inputs always serialize alike. */
+function canonical(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonical);
+  if (typeof value !== "object" || value === null) return value;
+  return Object.fromEntries(
+    Object.keys(value)
+      .sort()
+      .map((k) => [k, canonical((value as Record<string, unknown>)[k])]),
+  );
+}
+
+/**
+ * SHA-256 (hex) over the operation and its validated input, with keys sorted and participants
+ * compared by lower-cased address in any order: what makes two notifying event writes the same.
+ * It starts with the operation's name, so it never equals the fingerprint of a mail.
+ */
+export async function eventWriteFingerprint(
+  op: "create_event" | "update_event",
+  input: { participants?: { email: string; name?: string }[] } & Record<string, unknown>,
+): Promise<string> {
+  const participants = input.participants
+    ?.map((p) => ({ ...p, email: p.email.toLowerCase() }))
+    .sort((a, b) => a.email.localeCompare(b.email));
+  const text = JSON.stringify([op, canonical({ ...input, ...(participants ? { participants } : {}) })]);
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }

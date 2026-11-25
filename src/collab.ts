@@ -37,6 +37,13 @@ export const COLLAB_LIMITS = {
   /** The longest all-day event (`days`) and the longest timed event (`start` to `end`). */
   eventDaysMax: 366,
   eventSpanDaysMax: 31,
+  /**
+   * Participants one `create_event` or `update_event` may name: the mail server sends each an
+   * invitation, so the cap is the one of a sent message.
+   */
+  eventParticipantsMax: 10,
+  recurrenceIntervalMax: 99,
+  recurrenceCountMax: 730,
 } as const;
 
 export const COLLAB_CONTENT_NOTICE =
@@ -196,6 +203,24 @@ const TimeZone = z
     }
   }, "Not a time zone.");
 
+/** Someone an event invites: the mail server sends them the invitation, updates and the cancellation. */
+export const EventParticipant = z
+  .object({ email: EmailAddressSchema, name: singleLine(COLLAB_LIMITS.lineChars).optional() })
+  .strict();
+
+export const WEEKDAYS = ["mo", "tu", "we", "th", "fr", "sa", "su"] as const;
+
+/** A recurrence rule (RFC 8984 `RecurrenceRule`, reduced): plain, so the MCP handler can advertise it. */
+export const EventRecurrence = z
+  .object({
+    frequency: z.enum(["daily", "weekly", "monthly", "yearly"]),
+    interval: z.number().int().min(1).max(COLLAB_LIMITS.recurrenceIntervalMax).optional(),
+    count: z.number().int().min(1).max(COLLAB_LIMITS.recurrenceCountMax).optional(),
+    until: CalendarDate.optional(),
+    by_day: z.array(z.enum(WEEKDAYS)).min(1).max(WEEKDAYS.length).optional(),
+  })
+  .strict();
+
 const EventFieldsShape = {
   title: singleLine(COLLAB_LIMITS.lineChars).optional(),
   start: IsoDateTime.optional(),
@@ -205,6 +230,7 @@ const EventFieldsShape = {
   days: z.number().int().min(1).max(COLLAB_LIMITS.eventDaysMax).optional(),
   location: clearableLine(COLLAB_LIMITS.lineChars).optional(),
   description: z.string().max(COLLAB_LIMITS.descriptionChars).optional(),
+  participants: z.array(EventParticipant).max(COLLAB_LIMITS.eventParticipantsMax).optional(),
 };
 
 type EventTimeFields = {
@@ -238,7 +264,25 @@ function refineEventTime(m: EventTimeFields, ctx: z.RefinementCtx): void {
   }
 }
 
-export const CreateEventInputBase = z.object({ ...EventFieldsShape, calendar_id: MailIdSchema.optional() }).strict();
+/** The rules of the participant list and the recurrence that both event writes share. */
+function refineEventPeople(
+  m: { participants?: { email: string }[]; recurrence?: z.infer<typeof EventRecurrence> | null },
+  ctx: z.RefinementCtx,
+): void {
+  const addresses = (m.participants ?? []).map((p) => p.email.toLowerCase());
+  if (new Set(addresses).size !== addresses.length) return issue(ctx, "participants", "Each participant only once.");
+  const rule = m.recurrence;
+  if (rule == null) return;
+  if (rule.count !== undefined && rule.until !== undefined) return issue(ctx, "recurrence", "Give count or until, not both.");
+  if (rule.by_day !== undefined) {
+    if (rule.frequency !== "weekly") return issue(ctx, "recurrence", "by_day is only for a weekly rule.");
+    if (new Set(rule.by_day).size !== rule.by_day.length) return issue(ctx, "recurrence", "Each day only once.");
+  }
+}
+
+export const CreateEventInputBase = z
+  .object({ ...EventFieldsShape, recurrence: EventRecurrence.optional(), calendar_id: MailIdSchema.optional() })
+  .strict();
 
 export const CreateEventInput = CreateEventInputBase.superRefine((m, ctx) => {
   if (m.title === undefined) issue(ctx, "title", "A title is required.");
@@ -246,16 +290,27 @@ export const CreateEventInput = CreateEventInputBase.superRefine((m, ctx) => {
     return issue(ctx, "start", "Give start and end, or date.");
   }
   refineEventTime(m, ctx);
+  refineEventPeople(m, ctx);
 });
 
+/**
+ * In an update, `participants` replaces the attendees (`[]` removes them all) and `recurrence`
+ * replaces the rule (`null` removes it).
+ */
 export const UpdateEventInputBase = z
-  .object({ event_id: MailIdSchema, ...EventFieldsShape, calendar_id: MailIdSchema.optional() })
+  .object({
+    event_id: MailIdSchema,
+    ...EventFieldsShape,
+    recurrence: EventRecurrence.nullable().optional(),
+    calendar_id: MailIdSchema.optional(),
+  })
   .strict();
 
 export const UpdateEventInput = UpdateEventInputBase.superRefine((m, ctx) => {
   const { event_id: _id, ...fields } = m;
   if (Object.values(fields).every((v) => v === undefined)) return issue(ctx, "event_id", "At least one field to change is required.");
   refineEventTime(m, ctx);
+  refineEventPeople(m, ctx);
 });
 
 export const DeleteEventInput = DeleteIds("event_ids");
@@ -354,6 +409,7 @@ export type DeleteContactInputT = z.infer<typeof DeleteContactInput>;
 export type CreateEventInputT = z.infer<typeof CreateEventInput>;
 export type UpdateEventInputT = z.infer<typeof UpdateEventInput>;
 export type DeleteEventInputT = z.infer<typeof DeleteEventInput>;
+export type EventRecurrenceT = z.infer<typeof EventRecurrence>;
 
 // ---- tool results ----
 
@@ -382,8 +438,29 @@ export const CreateContactResult = z.object({ contact_id: z.string(), address_bo
 export const UpdateContactResult = z.object({ contact_id: z.string() });
 /** As `MoveMailResult`: how many were removed, and the ids that stayed (unknown here, or refused). */
 export const DeleteResult = z.object({ deleted: z.number().int(), not_deleted: z.array(z.string()) });
-export const CreateEventResult = z.object({ event_id: z.string(), calendar_id: z.string() });
-export const UpdateEventResult = z.object({ event_id: z.string() });
+/**
+ * `invitations`: how many attendees the mail server was asked to notify (0 when nobody).
+ * `deduplicated`: an identical notifying create of the last 10 minutes answered instead.
+ */
+export const CreateEventResult = z.object({
+  event_id: z.string(),
+  calendar_id: z.string(),
+  invitations: z.number().int(),
+  deduplicated: z.boolean(),
+});
+export const UpdateEventResult = z.object({ event_id: z.string(), invitations: z.number().int() });
+/**
+ * `cancellations`: the deleted events for which the mail server was asked to send cancellations;
+ * `cancelled_attendees`: how many attendee addresses those went to (counted once per event).
+ */
+export const DeleteEventResult = DeleteResult.extend({
+  cancellations: z.number().int(),
+  cancelled_attendees: z.number().int(),
+});
+
+export type CreateEventResultT = z.infer<typeof CreateEventResult>;
+export type UpdateEventResultT = z.infer<typeof UpdateEventResult>;
+export type DeleteEventResultT = z.infer<typeof DeleteEventResult>;
 
 // ---- the request that crosses the vault ----
 
@@ -416,11 +493,47 @@ export interface CollabAdapter {
   updateContact(input: UpdateContactInputT): Promise<{ contact_id: string }>;
   /** Removes the contacts for good (JMAP has no trash for them). Throws when none could be removed. */
   deleteContact(input: DeleteContactInputT): Promise<{ deleted: number; not_deleted: string[] }>;
-  createEvent(input: CreateEventInputT): Promise<{ event_id: string; calendar_id: string }>;
-  updateEvent(input: UpdateEventInputT): Promise<{ event_id: string }>;
-  /** Removes the events for good. Throws when none could be removed. */
-  deleteEvent(input: DeleteEventInputT): Promise<{ deleted: number; not_deleted: string[] }>;
+  /** With participants, the mail server sends them invitations (one send of the daily limit). */
+  createEvent(input: CreateEventInputT): Promise<CreateEventResultT>;
+  /** When the event has attendees before or after, the mail server sends them updates. */
+  updateEvent(input: UpdateEventInputT): Promise<UpdateEventResultT>;
+  /** Removes the events for good; attendees get cancellations. Throws when none could be removed. */
+  deleteEvent(input: DeleteEventInputT): Promise<DeleteEventResultT>;
 }
+
+/** What the vault learns about an existing event before it changes or deletes it. */
+export interface EventAudience {
+  /** Lower-cased addresses the server would notify: every participant and the organizer, except the mailbox itself. */
+  attendees: string[];
+  /** The latest instant (ms) the event may end at, or null when unknown. Not about a recurring event. */
+  end: number | null;
+  /** A series, or one occurrence of one. */
+  recurring: boolean;
+}
+
+/**
+ * The event writes as the JMAP adapter offers them to the vault: the vault decides whether a write
+ * makes the mail server notify people (`notify`), the adapter only reads and writes.
+ */
+export interface CalendarEventWriter {
+  /** The audience of each id that names an event (or occurrence) of this account; unknown ids are missing. */
+  eventAudiences(ids: string[]): Promise<Map<string, EventAudience>>;
+  createEvent(input: CreateEventInputT, notify: boolean): Promise<{ event_id: string; calendar_id: string }>;
+  updateEvent(input: UpdateEventInputT, notify: boolean): Promise<{ event_id: string }>;
+  /** One `/set` destroying `ids`; never throws for ids that were not deleted. */
+  deleteEvents(ids: string[], notify: boolean): Promise<DestroyOutcome>;
+}
+
+/** What one `/set` destroy did: the ids deleted, and those that were not. */
+export interface DestroyOutcome {
+  deleted: string[];
+  notDeleted: string[];
+  /** True when every id that was not deleted was unknown to the server (`notFound`, or not mentioned). */
+  unknownOnly: boolean;
+}
+
+/** The JMAP side of the contacts and calendars: reads and contact writes as the tools see them, event writes for the vault. */
+export type CollabUpstream = Omit<CollabAdapter, "createEvent" | "updateEvent" | "deleteEvent"> & CalendarEventWriter;
 
 /** What a tool works with: the mail operations and the contacts and calendar ones. */
 export type Mailbox = MailboxAdapter & CollabAdapter;

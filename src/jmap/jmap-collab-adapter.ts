@@ -9,18 +9,24 @@
  * A write is never repeated: the vault retries only after a 401 (the server refused the request
  * without processing it). Every write request is sent with `outcomeUnknown: "upstream_unavailable"`,
  * so a network error, timeout, 5xx or unreadable answer after which the server may have acted
- * leaves as `upstream_unavailable` and the caller decides whether to try again.
+ * leaves as `upstream_unavailable` and the caller decides whether to try again. An event write
+ * that makes the server send mail (`notify`) leaves as `send_unconfirmed` instead, like a send.
+ *
+ * Event writes take the vault's decision `notify` and pass it on as `sendSchedulingMessages`:
+ * whether the write may make the server send invitations, updates or cancellations. The vault
+ * learns whom an existing event would notify from `eventAudiences`.
  */
 import { z } from "zod";
 import {
   type CalendarInfo,
-  type CollabAdapter,
+  type CollabUpstream,
   type ContactDetail,
   type ContactSummary,
   type CreateContactInputT,
   type CreateEventInputT,
   type DeleteContactInputT,
-  type DeleteEventInputT,
+  type DestroyOutcome,
+  type EventAudience,
   type EventDetail,
   type EventSummary,
   type ReadContactInputT,
@@ -39,6 +45,7 @@ import {
   contactFilter,
   contactPatch,
   eventFilter,
+  EVENT_AUDIENCE_PROPERTIES,
   EVENT_DETAIL_PROPERTIES,
   EVENT_SUMMARY_REQUEST,
   EVENT_TIME_ZONE,
@@ -47,15 +54,19 @@ import {
   JmapCalendarEvent,
   JmapContactCard,
   JmapTarget,
+  eventPatch,
+  namesOwner,
+  newCalendarEvent,
   newContactCard,
   toCalendarInfo,
   toContactDetail,
   toContactSummary,
   toEventDetail,
+  toEventAudience,
   toEventSummary,
 } from "./collab-map";
 import { jmapCall, methodResult, type JmapInvocation, type JmapSession } from "./jmap-client";
-import { createdOrThrow, destroyResult, getResult, parseUpstream, requireUpdated } from "./map";
+import { createdOrThrow, destroyOutcome, destroyResult, getResult, parseUpstream, requireUpdated } from "./map";
 
 type Call = [name: string, args: Record<string, unknown>, callId: string];
 
@@ -67,7 +78,11 @@ const AREA_CAPABILITY: Record<CollabArea, string> = {
   calendars: "urn:ietf:params:jmap:calendars",
 };
 
-export class JmapCollabAdapter implements CollabAdapter {
+/** What an unknown outcome of a write is: unavailable, or for a write that notifies people, an unconfirmed send. */
+const unknownOutcome = (notify: boolean): "send_unconfirmed" | "upstream_unavailable" =>
+  notify ? "send_unconfirmed" : "upstream_unavailable";
+
+export class JmapCollabAdapter implements CollabUpstream {
   readonly #accountId: string;
   readonly #accessToken: string;
   readonly #session: JmapSession;
@@ -85,12 +100,16 @@ export class JmapCollabAdapter implements CollabAdapter {
   }
 
   /** The single exit to JMAP: the constructor's account id overrides anything in `args`. */
-  #call(area: CollabArea, calls: Call[], { write = false }: { write?: boolean } = {}): Promise<JmapInvocation[]> {
+  #call(
+    area: CollabArea,
+    calls: Call[],
+    { write = false, notify = false }: { write?: boolean; notify?: boolean } = {},
+  ): Promise<JmapInvocation[]> {
     return jmapCall(
       this.#session,
       this.#accessToken,
       calls.map(([name, args, callId]) => [name, { ...args, accountId: this.#accountId }, callId]),
-      { using: [CORE, AREA_CAPABILITY[area]], ...(write ? { outcomeUnknown: "upstream_unavailable" as const } : {}) },
+      { using: [CORE, AREA_CAPABILITY[area]], ...(write ? { outcomeUnknown: unknownOutcome(notify) } : {}) },
     );
   }
 
@@ -114,10 +133,12 @@ export class JmapCollabAdapter implements CollabAdapter {
     responses: JmapInvocation[],
     callId: string,
     name: string,
-    options: { idsFromInput?: boolean } = {},
+    options: { idsFromInput?: boolean; notify?: boolean } = {},
   ): Record<string, unknown> {
     const answer = responses.find((r) => r[2] === callId && (r[0] === name || r[0] === "error"));
-    if (!answer || (answer[0] === "error" && answer[1].type === "serverFail")) throw new MailError("upstream_unavailable");
+    if (!answer || (answer[0] === "error" && answer[1].type === "serverFail")) {
+      throw new MailError(unknownOutcome(options.notify === true));
+    }
     return this.#result(responses, callId, name, options);
   }
 
@@ -289,19 +310,69 @@ export class JmapCollabAdapter implements CollabAdapter {
     return destroyResult(this.#writeResult(responses, "s", "ContactCard/set", { idsFromInput: true }), ids);
   }
 
-  // Part 2 implements the three event writes; until then they stop after the permission check.
-  async createEvent(_input: CreateEventInputT): Promise<{ event_id: string; calendar_id: string }> {
+  /**
+   * Whom each event would notify and when it ends. An occurrence id answers for its event's
+   * participants. Ids the server does not know (or of another account) are missing from the map.
+   */
+  async eventAudiences(ids: string[]): Promise<Map<string, EventAudience>> {
     this.#require("calendars");
-    throw new MailError("mailbox_unsupported");
+    const unique = [...new Set(ids)];
+    const responses = await this.#call("calendars", [
+      ["CalendarEvent/get", { ids: unique, properties: EVENT_AUDIENCE_PROPERTIES, timeZone: EVENT_TIME_ZONE }, "a"],
+    ]);
+    const { list } = getResult(JmapCalendarEvent, this.#result(responses, "a", "CalendarEvent/get", { idsFromInput: true }));
+    const audiences = new Map<string, EventAudience>();
+    for (const event of list) if (unique.includes(event.id)) audiences.set(event.id, toEventAudience(event, this.#session.username));
+    return audiences;
   }
 
-  async updateEvent(_input: UpdateEventInputT): Promise<{ event_id: string }> {
+  /**
+   * The calendar is looked up first (as for contacts). With participants the mailbox is the
+   * organizer; its own address as a participant is invalid input. `sendSchedulingMessages` is
+   * always sent, `true` exactly when the vault decided this write notifies.
+   */
+  async createEvent(input: CreateEventInputT, notify: boolean): Promise<{ event_id: string; calendar_id: string }> {
     this.#require("calendars");
-    throw new MailError("mailbox_unsupported");
+    const owner = this.#session.username;
+    if (namesOwner(input.participants, owner)) throw new MailError("invalid_input");
+    const calendars = await this.#call("calendars", [["Calendar/get", { ids: null, properties: ["id", "isDefault"] }, "c"]]);
+    const target = chooseTarget(getResult(JmapTarget, this.#result(calendars, "c", "Calendar/get")).list, input.calendar_id);
+    const responses = await this.#call(
+      "calendars",
+      [["CalendarEvent/set", { create: { e: newCalendarEvent(input, target, owner) }, sendSchedulingMessages: notify }, "s"]],
+      { write: true, notify },
+    );
+    const set = this.#writeResult(responses, "s", "CalendarEvent/set", { notify });
+    return { event_id: createdOrThrow(set, "e", unknownOutcome(notify)), calendar_id: target };
   }
 
-  async deleteEvent(_input: DeleteEventInputT): Promise<{ deleted: number; not_deleted: string[] }> {
+  /** A calendar id from the input is checked first: one that is not this account's is `not_found`. */
+  async updateEvent(input: UpdateEventInputT, notify: boolean): Promise<{ event_id: string }> {
     this.#require("calendars");
-    throw new MailError("mailbox_unsupported");
+    const owner = this.#session.username;
+    if (namesOwner(input.participants, owner)) throw new MailError("invalid_input");
+    if (input.calendar_id !== undefined) {
+      const calendars = await this.#call("calendars", [["Calendar/get", { ids: [input.calendar_id], properties: ["id"] }, "c"]]);
+      chooseTarget(getResult(JmapTarget, this.#result(calendars, "c", "Calendar/get", { idsFromInput: true })).list, input.calendar_id);
+    }
+    const responses = await this.#call(
+      "calendars",
+      [["CalendarEvent/set", { update: { [input.event_id]: eventPatch(input, owner) }, sendSchedulingMessages: notify }, "s"]],
+      { write: true, notify },
+    );
+    requireUpdated(this.#writeResult(responses, "s", "CalendarEvent/set", { idsFromInput: true, notify }), input.event_id);
+    return { event_id: input.event_id };
+  }
+
+  /** Permanent: one `/set` destroying `ids` (duplicates once). Reports, never throws, for ids that stayed. */
+  async deleteEvents(ids: string[], notify: boolean): Promise<DestroyOutcome> {
+    this.#require("calendars");
+    const unique = [...new Set(ids)];
+    const responses = await this.#call(
+      "calendars",
+      [["CalendarEvent/set", { destroy: unique, sendSchedulingMessages: notify }, "s"]],
+      { write: true, notify },
+    );
+    return destroyOutcome(this.#writeResult(responses, "s", "CalendarEvent/set", { idsFromInput: true, notify }), unique);
   }
 }

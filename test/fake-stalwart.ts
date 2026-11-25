@@ -9,9 +9,9 @@ import { STALWART } from "../src/stalwart/endpoints";
 import { addDefaultAddressBook, addDefaultCalendar, AREA_SCOPES, COLLAB_CAPABILITIES } from "./fake-stalwart-collab";
 import { handleJmapRequest } from "./fake-stalwart-jmap";
 import type { FakeArea } from "./fake-stalwart-support";
-import type { FakeAccount, FakeAddress, FakeContact, FakeEmail, FakeEvent, FakeFolder, FakeState, SentMessage } from "./fake-stalwart-state";
+import type { FakeAccount, FakeAddress, FakeContact, FakeEmail, FakeEvent, FakeFolder, FakeState, SchedulingMessage, SentMessage } from "./fake-stalwart-state";
 
-export type { FakeAccount, FakeAddress, FakeAddressBook, FakeAttachment, FakeCalendar, FakeContact, FakeEmail, FakeEvent, FakeFolder, FakeIdentity, FakeState, SentMessage } from "./fake-stalwart-state";
+export type { FakeAccount, FakeAddress, FakeAddressBook, FakeAttachment, FakeCalendar, FakeContact, FakeEmail, FakeEvent, FakeFolder, FakeIdentity, FakeState, SchedulingMessage, SentMessage } from "./fake-stalwart-state";
 
 export interface RecordedRequest {
   url: string;
@@ -85,6 +85,8 @@ export interface FakeStalwart {
   contactsOf(email: string): FakeContact[];
   /** A copy of every CalendarEvent stored in `email`'s account. */
   eventsOf(email: string): FakeEvent[];
+  /** The iTIP messages the fake "sent" for `email`'s account, oldest first. */
+  schedulingMessages(email: string): SchedulingMessage[];
   /** Adds a calendar (not the default one) to `email`'s account. `readOnly` gives no write rights. */
   addCalendar(
     email: string,
@@ -118,6 +120,8 @@ export interface FakeStalwart {
   sent(email: string): SentMessage[];
   failNext(kind: FailureKind): void;
   failNextSubmit(kind: SubmitFailureKind): void;
+  /** Like `failNextSubmit`, for the next JMAP request that holds `CalendarEvent/set`. */
+  failNextEventWrite(kind: SubmitFailureKind): void;
   omitRefreshTokenOnce(): void;
   expireAccessToken(email: string): void;
   folderId(email: string, role: string): string | null;
@@ -194,6 +198,7 @@ export function createFakeStalwart(): FakeStalwart {
   const revokedEmails = new Set<string>();
   const transportFailures: FailureKind[] = [];
   const submitFailures: SubmitFailureKind[] = [];
+  const eventWriteFailures: SubmitFailureKind[] = [];
   const codeGrants: (FakeTokens & { email: string })[] = [];
   let submissionRejections = 0;
   let omitRefreshToken = false;
@@ -230,6 +235,7 @@ export function createFakeStalwart(): FakeStalwart {
       contacts: new Map(),
       calendars: new Map(),
       events: new Map(),
+      scheduling: [],
     };
     addDefaultAddressBook(account, nextId("ab"));
     addDefaultCalendar(account, nextId("cal"));
@@ -492,7 +498,11 @@ export function createFakeStalwart(): FakeStalwart {
     if ((url.pathname === "/jmap/" || url.pathname === "/jmap") && req.method === "POST") {
       const bearer = bearerAccount(req);
       if (!bearer) return unauthorized();
-      const submitFailure = text.includes("EmailSubmission/set") ? submitFailures.shift() : undefined;
+      const submitFailure = text.includes("EmailSubmission/set")
+        ? submitFailures.shift()
+        : text.includes("CalendarEvent/set")
+          ? eventWriteFailures.shift()
+          : undefined;
       if (submitFailure === "network") throw new TypeError("fake-stalwart: network failure");
       const result = handleJmapRequest(state, bearer.account, parseBody(text, "application/json"), bearer.areas);
       if (submitFailure === "accepted-then-503") return new Response("fake-stalwart upstream detail", { status: 503 });
@@ -554,6 +564,7 @@ export function createFakeStalwart(): FakeStalwart {
     },
     contactsOf: (email) => structuredClone([...accountFor(email).contacts.values()]),
     eventsOf: (email) => structuredClone([...accountFor(email).events.values()]),
+    schedulingMessages: (email) => structuredClone(accountFor(email).scheduling),
     defaultAddressBookId: (email) => [...accountFor(email).addressBooks.values()].find((b) => b.isDefault)!.id,
     addCalendar(email, name = "Calendar", options = {}) {
       const account = accountFor(email);
@@ -637,6 +648,9 @@ export function createFakeStalwart(): FakeStalwart {
     },
     failNextSubmit(kind) {
       submitFailures.push(kind);
+    },
+    failNextEventWrite(kind) {
+      eventWriteFailures.push(kind);
     },
     omitRefreshTokenOnce() {
       omitRefreshToken = true;

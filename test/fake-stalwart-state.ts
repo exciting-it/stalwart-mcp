@@ -97,6 +97,16 @@ export type FakeEvent = Record<string, unknown> & {
   duration: string;
 };
 
+/**
+ * One iTIP message the fake "sent" for a `CalendarEvent/set` with `sendSchedulingMessages: true`:
+ * an invitation or update (`REQUEST`) or a cancellation (`CANCEL`), with the attendees it went to.
+ */
+export interface SchedulingMessage {
+  kind: "REQUEST" | "CANCEL";
+  eventId: string;
+  attendees: string[];
+}
+
 export interface FakeAccount {
   accountId: string;
   email: string;
@@ -108,6 +118,7 @@ export interface FakeAccount {
   contacts: Map<string, FakeContact>;
   calendars: Map<string, FakeCalendar>;
   events: Map<string, FakeEvent>;
+  scheduling: SchedulingMessage[];
 }
 
 /** What the JMAP handlers need from the fake. */

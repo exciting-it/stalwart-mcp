@@ -1,6 +1,6 @@
 import { MailError } from "../src/mail";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { COLLAB_LIMITS, type CollabAdapter } from "../src/collab";
+import { COLLAB_LIMITS, type CollabUpstream } from "../src/collab";
 import { fetchSession, jmapCall } from "../src/jmap/jmap-client";
 import { chooseTarget } from "../src/jmap/collab-map";
 import { JmapCollabAdapter } from "../src/jmap/jmap-collab-adapter";
@@ -30,7 +30,7 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-async function adapterFor(email: string, options: { mailOnly?: boolean } = {}): Promise<JmapCollabAdapter & CollabAdapter> {
+async function adapterFor(email: string, options: { mailOnly?: boolean } = {}): Promise<JmapCollabAdapter> {
   const { accessToken } = fake.tokensFor(email, options);
   const session = await fetchSession(accessToken);
   return new JmapCollabAdapter({ accountId: session.accountId, accessToken, session });
@@ -425,13 +425,13 @@ describe("the fake Stalwart's capability handling", () => {
 
 const WINDOW = { after: "2026-11-27T00:00:00Z", before: "2026-11-28T00:00:00Z", limit: 25, offset: 0 };
 type EventSearch = Parameters<JmapCollabAdapter["searchEvents"]>[0];
-const search = (adapter: CollabAdapter, input: Partial<EventSearch> = {}) => adapter.searchEvents({ ...WINDOW, ...input });
-const searchIds = async (adapter: CollabAdapter, input: Partial<EventSearch> = {}) =>
+const search = (adapter: CollabUpstream, input: Partial<EventSearch> = {}) => adapter.searchEvents({ ...WINDOW, ...input });
+const searchIds = async (adapter: CollabUpstream, input: Partial<EventSearch> = {}) =>
   (await search(adapter, input)).events.map((e) => e.id);
 
 const EVENT_SUMMARY_REQUEST = [
   "id", "calendarIds", "title", "start", "timeZone", "duration", "showWithoutTime", "utcStart", "utcEnd",
-  "status", "locations", "recurrenceId", "recurrenceRules",
+  "status", "locations", "recurrenceId", "recurrenceRule", "recurrenceRules",
 ];
 
 describe("listCalendars", () => {
@@ -624,7 +624,7 @@ describe("searchEvents", () => {
     const daily = fake.addEvent(A, {
       title: "Standup",
       start: "2026-11-01T09:00:00",
-      recurrenceRules: [{ "@type": "RecurrenceRule", frequency: "daily", count: 5 }],
+      recurrenceRule: { "@type": "RecurrenceRule", frequency: "daily", count: 5 },
     }).id;
     const adapter = await adapterFor(A);
     const { events } = await search(adapter, { after: "2026-11-02T00:00:00Z", before: "2026-11-04T12:00:00Z" });
@@ -642,7 +642,7 @@ describe("searchEvents", () => {
     const weekly = fake.addEvent(A, {
       title: "Sync",
       start: "2026-11-02T09:00:00",
-      recurrenceRules: [{ frequency: "weekly", interval: 2, until: "2026-12-01T00:00:00" }],
+      recurrenceRule: { frequency: "weekly", interval: 2, until: "2026-12-01T00:00:00" },
     }).id;
     const single = fake.addEvent(A, { title: "Once", start: "2026-11-10T09:00:00" }).id;
     const adapter = await adapterFor(A);
@@ -706,11 +706,11 @@ describe("readEvent", () => {
     locations: { l1: { name: "Room 1" }, l2: { name: "Annex" } },
     virtualLocations: { v1: { uri: "https://meet.example.org/abc", name: "Video" } },
     participants: {
-      p1: { name: "Ada", email: "ada@example.org", roles: { attendee: true, chair: true }, participationStatus: "accepted" },
-      p2: { name: "Bob", sendTo: { imip: "mailto:bob@example.org" }, roles: { optional: true }, participationStatus: "needs-action" },
+      p1: { name: "Ada", calendarAddress: "mailto:ada@example.org", roles: { required: true, chair: true }, participationStatus: "accepted" },
+      p2: { name: "Bob", calendarAddress: "mailto:bob@example.org", roles: { optional: true }, participationStatus: "needs-action" },
       p3: { roles: { informational: true } },
     },
-    recurrenceRules: [{ frequency: "weekly", interval: 2, until: "2027-01-01T00:00:00" }],
+    recurrenceRule: { frequency: "weekly", interval: 2, until: "2027-01-01T00:00:00" },
   };
 
   it("maps the whole event and sends the documented request", async () => {
@@ -762,7 +762,7 @@ describe("readEvent", () => {
     const series = fake.addEvent(A, {
       title: "Standup",
       start: "2026-11-01T09:00:00",
-      recurrenceRules: [{ frequency: "daily", count: 5 }],
+      recurrenceRule: { frequency: "daily", count: 5 },
     }).id;
     const adapter = await adapterFor(A);
     const { events } = await search(adapter, { after: "2026-11-03T00:00:00Z", before: "2026-11-04T00:00:00Z" });
@@ -782,8 +782,8 @@ describe("readEvent", () => {
 
   it("describes rules from their own fields only", async () => {
     fake.addMailbox(A);
-    const a = fake.addEvent(A, { start: "2026-11-01T09:00:00", recurrenceRules: [{ frequency: "daily", count: 10 }] }).id;
-    const b = fake.addEvent(A, { start: "2026-11-01T09:00:00", recurrenceRules: [{ frequency: "weekly", until: "2026-12-24T18:30:00" }, { frequency: "daily" }] }).id;
+    const a = fake.addEvent(A, { start: "2026-11-01T09:00:00", recurrenceRule: { frequency: "daily", count: 10 } }).id;
+    const b = fake.addEvent(A, { start: "2026-11-01T09:00:00", recurrenceRule: { frequency: "weekly", until: "2026-12-24T18:30:00" } }).id;
     const c = fake.addEvent(A, { start: "2026-11-01T09:00:00" }).id;
     const adapter = await adapterFor(A);
     const recurrence = async (id: string) => (await adapter.readEvent({ event_id: id })).event.recurrence;
@@ -792,9 +792,33 @@ describe("readEvent", () => {
     expect(await recurrence(c)).toBeNull();
   });
 
+  it("reads the older names as a fallback: recurrenceRules, a participant's email or sendTo, and required as attendee", async () => {
+    fake.addMailbox(A);
+    const { id } = fake.addEvent(A, {
+      start: "2026-11-01T09:00:00",
+      recurrenceRules: [{ frequency: "daily", count: 4 }],
+      participants: {
+        a: { calendarAddress: "mailto:first@example.org", email: "not-this@example.org", roles: { required: true } },
+        b: { email: "second@example.org", roles: { attendee: true } },
+        c: { sendTo: { imip: "MAILTO:third@example.org" }, roles: { owner: true } },
+      },
+    });
+    const adapter = await adapterFor(A);
+    const { event } = await adapter.readEvent({ event_id: id });
+    expect(event).toMatchObject({ recurring: true, recurrence: "daily, 4 times" });
+    expect(event.participants.map((p) => [p.email, p.role])).toEqual([
+      ["first@example.org", "attendee"],
+      ["second@example.org", "attendee"],
+      ["third@example.org", "owner"],
+    ]);
+    // A rule ending at the last second of a day (as create_event writes it) reads as that date.
+    const until = fake.addEvent(A, { start: "2026-11-01T09:00:00", recurrenceRule: { frequency: "daily", until: "2026-11-30T23:59:59" } }).id;
+    expect((await adapter.readEvent({ event_id: until })).event.recurrence).toBe("daily, until 2026-11-30");
+  });
+
   it("caps description, participants, locations and links, and drops unsafe links", async () => {
     fake.addMailbox(A);
-    const participants = Object.fromEntries(Array.from({ length: 60 }, (_, i) => [`p${i}`, { name: `P${i}`, email: `p${i}@example.org` }]));
+    const participants = Object.fromEntries(Array.from({ length: 60 }, (_, i) => [`p${i}`, { name: `P${i}`, calendarAddress: `mailto:p${i}@example.org` }]));
     const locations = Object.fromEntries(Array.from({ length: 8 }, (_, i) => [`l${i}`, { name: `Place ${i}` }]));
     const virtualLocations = {
       v0: { uri: "https://meet.example.org@evil.example/join" },
@@ -848,7 +872,7 @@ describe("readEvent", () => {
     const { id } = fake.addEvent(A, {
       title: "T\u202ee",
       start: "2026-11-27T09:00:00",
-      participants: { p: { name: "Mal\u0000lory\u2067", email: "m\u202e@example.org", participationStatus: "ac\u200bcepted" } },
+      participants: { p: { name: "Mal\u0000lory\u2067", calendarAddress: "mailto:m\u202e@example.org", participationStatus: "ac\u200bcepted" } },
     });
     const adapter = await adapterFor(A);
     const { event } = await adapter.readEvent({ event_id: id });
@@ -944,7 +968,7 @@ describe("calendar permission", () => {
     vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
       const response = await fake.fetch(input, init);
       const body = (await response.clone().json()) as { methodResponses?: [string, { list?: Record<string, unknown>[] }][] };
-      for (const [, args] of body.methodResponses ?? []) for (const e of args.list ?? []) e.recurrenceRules = "secret text";
+      for (const [, args] of body.methodResponses ?? []) for (const e of args.list ?? []) e.recurrenceRule = "secret text";
       return Response.json(body);
     });
     await expectMailError(adapter.readEvent({ event_id: id }), "upstream_rejected");
@@ -1391,9 +1415,10 @@ describe("writing contacts", () => {
       await expectMailError(adapter.createContact({ name: "x" }), "not_granted");
       await expectMailError(adapter.updateContact({ contact_id: "ct1", name: "x" }), "not_granted");
       await expectMailError(adapter.deleteContact({ contact_ids: ["ct1"] }), "not_granted");
-      await expectMailError(adapter.createEvent({ title: "x", date: "2026-11-27" }), "not_granted");
-      await expectMailError(adapter.updateEvent({ event_id: "ev1", title: "x" }), "not_granted");
-      await expectMailError(adapter.deleteEvent({ event_ids: ["ev1"] }), "not_granted");
+      await expectMailError(adapter.createEvent({ title: "x", date: "2026-11-27" }, false), "not_granted");
+      await expectMailError(adapter.updateEvent({ event_id: "ev1", title: "x" }, false), "not_granted");
+      await expectMailError(adapter.deleteEvents(["ev1"], false), "not_granted");
+      await expectMailError(adapter.eventAudiences(["ev1"]), "not_granted");
       expect(fake.requests.length).toBe(before);
     });
 
@@ -1500,6 +1525,605 @@ describe("writing contacts", () => {
   });
 });
 
+// ---- writing events ----
+
+/** Far enough ahead that the server would schedule for it, whatever day the tests run on. */
+const FUTURE = { start: "2031-03-03T09:00:00Z", end: "2031-03-03T10:00:00Z" };
+const OK = "ok@test.example";
+const OTHER = "other@test.example";
+
+const eventSets = () => setCalls("CalendarEvent/set");
+const lastEventSet = () => eventSets().at(-1)![1];
+
+describe("writing events", () => {
+  beforeAll(() => {
+    writing = true;
+  });
+  afterAll(() => {
+    writing = false;
+  });
+
+  describe("createEvent", () => {
+    it("looks up the calendars, then creates a JSCalendar event in the default one without a uid", async () => {
+      const { accountId } = fake.addMailbox(A);
+      fake.addCalendar(A, "Work");
+      const adapter = await adapterFor(A);
+      const result = await adapter.createEvent(
+        {
+          title: "Kickoff",
+          start: "2026-11-27T09:00:00+01:00",
+          end: "2026-11-27T10:30:00+01:00",
+          time_zone: "Europe/Berlin",
+          location: "Room 1",
+          description: "Agenda\nItem",
+        },
+        false,
+      );
+      const calendar = fake.defaultCalendarId(A);
+      expect(result).toEqual({ event_id: expect.any(String), calendar_id: calendar });
+
+      const requests = jmapRequests();
+      expect(requests).toHaveLength(2);
+      expect(requests[0]!.body.using).toEqual([CORE, CALENDARS]);
+      expect(calls(requests[0]!)).toEqual([["Calendar/get", { ids: null, properties: ["id", "isDefault"], accountId }, "c"]]);
+      expect(requests[1]!.body.using).toEqual([CORE, CALENDARS]);
+      expect(calls(requests[1]!)).toEqual([
+        [
+          "CalendarEvent/set",
+          {
+            accountId,
+            sendSchedulingMessages: false,
+            create: {
+              e: {
+                "@type": "Event",
+                calendarIds: { [calendar]: true },
+                title: "Kickoff",
+                start: "2026-11-27T09:00:00",
+                timeZone: "Europe/Berlin",
+                duration: "PT1H30M",
+                showWithoutTime: false,
+                description: "Agenda\nItem",
+                locations: { l1: { "@type": "Location", name: "Room 1" } },
+              },
+            },
+          },
+          "s",
+        ],
+      ]);
+
+      // The server made the uid; the stored event reads back as it was written.
+      const [stored] = fake.eventsOf(A);
+      expect(stored).toMatchObject({ id: result.event_id, uid: expect.any(String), title: "Kickoff" });
+      const { event } = await adapter.readEvent({ event_id: result.event_id });
+      expect(event).toMatchObject({
+        title: "Kickoff",
+        start: "2026-11-27T08:00:00Z",
+        end: "2026-11-27T09:30:00Z",
+        local_start: "2026-11-27T09:00:00",
+        time_zone: "Europe/Berlin",
+        all_day: false,
+        location: "Room 1",
+        description: "Agenda\nItem",
+        participants: [],
+        recurring: false,
+        calendar_ids: [calendar],
+      });
+      expect(fake.schedulingMessages(A)).toEqual([]);
+    });
+
+    it("maps the time: another zone, UTC by default, a DST change, and whole days", async () => {
+      fake.addMailbox(A);
+      const adapter = await adapterFor(A);
+      const created = async (input: Record<string, unknown>) => {
+        await adapter.createEvent({ title: "t", ...input } as Parameters<JmapCollabAdapter["createEvent"]>[0], false);
+        return (lastEventSet().create as { e: Record<string, unknown> }).e;
+      };
+      const instants = { start: "2026-11-27T09:00:00+01:00", end: "2026-11-27T10:30:00+01:00" };
+      expect(await created({ ...instants, time_zone: "Asia/Dubai" })).toMatchObject({
+        start: "2026-11-27T12:00:00",
+        timeZone: "Asia/Dubai",
+        duration: "PT1H30M",
+      });
+      expect(await created(instants)).toMatchObject({ start: "2026-11-27T08:00:00", timeZone: "Etc/UTC", duration: "PT1H30M" });
+      // Across the end of summer time in Berlin (03:00 CEST becomes 02:00 CET): 12 hours pass,
+      // though the wall clock only moves 11.
+      const night = await created({ start: "2026-10-24T22:00:00+02:00", end: "2026-10-25T09:00:00+01:00", time_zone: "Europe/Berlin" });
+      expect(night).toMatchObject({ start: "2026-10-24T22:00:00", duration: "PT12H" });
+      // Whole wall-clock days stay days, even when one of them is 25 hours long.
+      const days = await created({ start: "2026-10-24T10:00:00+02:00", end: "2026-10-26T11:15:30+01:00", time_zone: "Europe/Berlin" });
+      expect(days).toMatchObject({ start: "2026-10-24T10:00:00", duration: "P2DT1H15M30S" });
+      expect(await created({ date: "2026-12-24", days: 3 })).toMatchObject({
+        start: "2026-12-24T00:00:00",
+        timeZone: null,
+        duration: "P3D",
+        showWithoutTime: true,
+      });
+      expect(await created({ date: "2026-12-24" })).toMatchObject({ duration: "P1D" });
+
+      // The fake computes the end the same way: the read-back ends where the input ended.
+      const ids = fake.eventsOf(A).map((e) => e.id);
+      const ends = await Promise.all(ids.map(async (id) => (await adapter.readEvent({ event_id: id })).event.end));
+      expect(ends).toEqual([
+        "2026-11-27T09:30:00Z",
+        "2026-11-27T09:30:00Z",
+        "2026-10-25T08:00:00Z",
+        "2026-10-26T10:15:30Z",
+        "2026-12-27T00:00:00Z",
+        "2026-12-25T00:00:00Z",
+      ]);
+    });
+
+    it("with participants and a rule: the server's property names, the mailbox as organizer, and invitations when asked", async () => {
+      const { accountId } = fake.addMailbox(A);
+      const adapter = await adapterFor(A);
+      const result = await adapter.createEvent(
+        {
+          title: "Weekly",
+          ...FUTURE,
+          time_zone: "Europe/Berlin",
+          participants: [{ email: OK, name: "Ok Person" }, { email: OTHER }],
+          recurrence: { frequency: "weekly", interval: 2, until: "2031-06-30", by_day: ["mo", "th"] },
+        },
+        true,
+      );
+      const set = lastEventSet();
+      expect(set.sendSchedulingMessages).toBe(true);
+      expect(set.accountId).toBe(accountId);
+      const sent = (set.create as { e: Record<string, unknown> }).e;
+      expect(sent).toEqual({
+        "@type": "Event",
+        calendarIds: { [fake.defaultCalendarId(A)]: true },
+        title: "Weekly",
+        start: "2031-03-03T10:00:00",
+        timeZone: "Europe/Berlin",
+        duration: "PT1H",
+        showWithoutTime: false,
+        organizerCalendarAddress: `mailto:${A}`,
+        participants: {
+          o: { "@type": "Participant", calendarAddress: `mailto:${A}`, roles: { owner: true }, participationStatus: "accepted" },
+          p1: {
+            "@type": "Participant",
+            calendarAddress: `mailto:${OK}`,
+            name: "Ok Person",
+            roles: { required: true },
+            participationStatus: "needs-action",
+            expectReply: true,
+          },
+          p2: {
+            "@type": "Participant",
+            calendarAddress: `mailto:${OTHER}`,
+            roles: { required: true },
+            participationStatus: "needs-action",
+            expectReply: true,
+          },
+        },
+        recurrenceRule: {
+          "@type": "RecurrenceRule",
+          frequency: "weekly",
+          interval: 2,
+          until: "2031-06-30T23:59:59",
+          byDay: [
+            { "@type": "NDay", day: "mo" },
+            { "@type": "NDay", day: "th" },
+          ],
+        },
+      });
+      for (const name of ["uid", "sendTo", "replyTo", "recurrenceRules", "isOrigin", "email"]) {
+        expect(JSON.stringify(sent)).not.toContain(`"${name}"`);
+      }
+      const [stored] = fake.eventsOf(A);
+      expect(stored).toMatchObject({ id: result.event_id, recurrenceRule: sent.recurrenceRule, participants: sent.participants });
+      expect(fake.schedulingMessages(A)).toEqual([{ kind: "REQUEST", eventId: result.event_id, attendees: [OK, OTHER] }]);
+
+      const { event } = await adapter.readEvent({ event_id: result.event_id });
+      expect(event.participants).toEqual([
+        { name: null, email: A, role: "owner", status: "accepted" },
+        { name: "Ok Person", email: OK, role: "attendee", status: "needs-action" },
+        { name: null, email: OTHER, role: "attendee", status: "needs-action" },
+      ]);
+      expect(event).toMatchObject({ recurring: true, recurrence: "weekly, every 2, until 2031-06-30" });
+      // Expanded by the rule: Monday and Thursday of every other week.
+      const { events } = await search(adapter, { after: "2031-03-01T00:00:00Z", before: "2031-03-21T00:00:00Z" });
+      expect(events.map((e) => e.local_start)).toEqual(["2031-03-03T10:00:00", "2031-03-06T10:00:00", "2031-03-17T10:00:00", "2031-03-20T10:00:00"]);
+    });
+
+    it("sends sendSchedulingMessages: false when told so, and the server sends nothing", async () => {
+      fake.addMailbox(A);
+      const adapter = await adapterFor(A);
+      await adapter.createEvent({ title: "Quiet", ...FUTURE, participants: [{ email: OK }] }, false);
+      expect(lastEventSet().sendSchedulingMessages).toBe(false);
+      expect(fake.schedulingMessages(A)).toEqual([]);
+    });
+
+    it("refuses the mailbox's own address as a participant, before any request", async () => {
+      fake.addMailbox(A);
+      const adapter = await adapterFor(A);
+      const before = fake.requests.length;
+      await expectMailError(adapter.createEvent({ title: "x", ...FUTURE, participants: [{ email: "A@Test.Example" }] }, true), "invalid_input");
+      await expectMailError(adapter.updateEvent({ event_id: "ev1", participants: [{ email: A }] }, true), "invalid_input");
+      expect(fake.requests.length).toBe(before);
+    });
+
+    it("creates into the given calendar of this account; one of another account is not_found and nothing is created", async () => {
+      fake.addMailbox(A);
+      const mine = fake.addCalendar(A, "Mine");
+      const theirs = fake.addCalendar(B, "Theirs");
+      const adapter = await adapterFor(A);
+      expect((await adapter.createEvent({ title: "x", date: "2026-12-01", calendar_id: mine.id }, false)).calendar_id).toBe(mine.id);
+      const before = eventSets().length;
+      await expectMailError(adapter.createEvent({ title: "y", date: "2026-12-01", calendar_id: theirs.id }, false), "not_found");
+      expect(eventSets()).toHaveLength(before);
+      expect(fake.eventsOf(A)).toHaveLength(1);
+      expect(fake.eventsOf(B)).toHaveLength(0);
+    });
+
+    it("an unknown outcome is upstream_unavailable, or send_unconfirmed when it notifies; never tried again", async () => {
+      fake.addMailbox(A);
+      const adapter = await adapterFor(A);
+      for (const notify of [false, true]) {
+        for (const answer of [
+          () => Promise.reject(new TypeError("network")),
+          () => Promise.resolve(new Response("upstream detail", { status: 503 })),
+          () => Promise.resolve(new Response("<html>upstream detail", { status: 200, headers: { "Content-Type": "application/json" } })),
+          () => Promise.resolve(new Response(JSON.stringify({ methodResponses: [] }), { status: 200, headers: { "Content-Type": "application/json" } })),
+        ]) {
+          const before = fake.requests.length;
+          failRequest(2, answer);
+          await expectMailError(
+            adapter.createEvent({ title: "Once", ...FUTURE, participants: [{ email: OK }] }, notify),
+            notify ? "send_unconfirmed" : "upstream_unavailable",
+          );
+          expect(fake.requests.length - before).toBe(1);
+          vi.stubGlobal("fetch", fake.fetch);
+        }
+      }
+      // A set answer that names the event in neither map, or a serverFail, says nothing either.
+      fake.failNextEventWrite("accepted-then-empty");
+      await expectMailError(adapter.createEvent({ title: "Once", ...FUTURE, participants: [{ email: OK }] }, true), "send_unconfirmed");
+      expect(fake.schedulingMessages(A)).toHaveLength(1);
+    });
+
+    it("an unreachable attendee is upstream_rejected, without passing text on, and nothing is stored", async () => {
+      fake.addMailbox(A);
+      const adapter = await adapterFor(A);
+      const error = await adapter
+        .createEvent({ title: "x", ...FUTURE, participants: [{ email: "nobody@unreachable.example" }] }, true)
+        .catch((e: unknown) => e);
+      expect(error).toMatchObject({ code: "upstream_rejected" });
+      expect(String((error as Error).message)).not.toMatch(/unreachable|noSupported/);
+      expect(fake.eventsOf(A)).toEqual([]);
+      expect(fake.schedulingMessages(A)).toEqual([]);
+    });
+  });
+
+  describe("updateEvent", () => {
+    it("patches one top-level key per given field and leaves the others as they are", async () => {
+      const { accountId } = fake.addMailbox(A);
+      const adapter = await adapterFor(A);
+      const { event_id } = await adapter.createEvent({ title: "Old", ...FUTURE, location: "Room 1", description: "Keep" }, false);
+      expect(await adapter.updateEvent({ event_id, title: "New", location: "" }, false)).toEqual({ event_id });
+      expect(lastEventSet()).toEqual({ accountId, sendSchedulingMessages: false, update: { [event_id]: { title: "New", locations: null } } });
+      const { event } = await adapter.readEvent({ event_id });
+      expect(event).toMatchObject({ title: "New", location: null, description: "Keep", start: "2031-03-03T09:00:00Z" });
+
+      await adapter.updateEvent({ event_id, date: "2031-04-01", days: 2 }, false);
+      expect(lastEventSet().update).toEqual({
+        [event_id]: { start: "2031-04-01T00:00:00", timeZone: null, duration: "P2D", showWithoutTime: true },
+      });
+      await adapter.updateEvent({ event_id, start: "2031-04-01T09:00:00Z", end: "2031-04-01T09:45:00Z", time_zone: "Europe/Berlin" }, false);
+      expect(lastEventSet().update).toEqual({
+        [event_id]: { start: "2031-04-01T11:00:00", timeZone: "Europe/Berlin", duration: "PT45M", showWithoutTime: false },
+      });
+    });
+
+    it("replaces the participants and the rule; [] and null remove them, with the organizer", async () => {
+      fake.addMailbox(A);
+      const adapter = await adapterFor(A);
+      const { event_id } = await adapter.createEvent(
+        { title: "Series", ...FUTURE, participants: [{ email: OK }], recurrence: { frequency: "daily", count: 3 } },
+        true,
+      );
+      await adapter.updateEvent({ event_id, participants: [{ email: OTHER, name: "Other" }], recurrence: { frequency: "weekly", count: 2 } }, true);
+      const patch = (lastEventSet().update as Record<string, Record<string, unknown>>)[event_id]!;
+      expect(Object.keys(patch).sort()).toEqual(["organizerCalendarAddress", "participants", "recurrenceRule"]);
+      expect(patch.recurrenceRule).toEqual({ "@type": "RecurrenceRule", frequency: "weekly", interval: 1, count: 2 });
+      expect(Object.keys(patch.participants as object)).toEqual(["o", "p1"]);
+      let { event } = await adapter.readEvent({ event_id });
+      expect(event.participants.map((p) => p.email)).toEqual([A, OTHER]);
+      expect(event.recurrence).toBe("weekly, 2 times");
+      // The added attendee is invited, the removed one gets a cancellation.
+      expect(fake.schedulingMessages(A).slice(1)).toEqual([
+        { kind: "REQUEST", eventId: event_id, attendees: [OTHER] },
+        { kind: "CANCEL", eventId: event_id, attendees: [OK] },
+      ]);
+
+      await adapter.updateEvent({ event_id, participants: [], recurrence: null }, true);
+      expect(lastEventSet().update).toEqual({ [event_id]: { participants: null, organizerCalendarAddress: null, recurrenceRule: null } });
+      ({ event } = await adapter.readEvent({ event_id }));
+      expect(event).toMatchObject({ participants: [], recurring: false, recurrence: null });
+      expect(fake.schedulingMessages(A).at(-1)).toEqual({ kind: "CANCEL", eventId: event_id, attendees: [OTHER] });
+      const [stored] = fake.eventsOf(A);
+      expect(stored).not.toHaveProperty("participants");
+      expect(stored).not.toHaveProperty("recurrenceRule");
+    });
+
+    it("answers not_found for an unknown id, another account's event and another account's calendar; nothing changes", async () => {
+      fake.addMailbox(A);
+      const theirs = fake.addEvent(B, { title: "Theirs", start: "2031-03-03T09:00:00" });
+      const theirCalendar = fake.addCalendar(B, "B's");
+      const adapter = await adapterFor(A);
+      const { event_id } = await adapter.createEvent({ title: "Mine", ...FUTURE }, false);
+      await expectMailError(adapter.updateEvent({ event_id: "ev999", title: "x" }, false), "not_found");
+      await expectMailError(adapter.updateEvent({ event_id: theirs.id, title: "Taken" }, false), "not_found");
+      const before = eventSets().length;
+      await expectMailError(adapter.updateEvent({ event_id, calendar_id: theirCalendar.id }, false), "not_found");
+      expect(eventSets()).toHaveLength(before);
+      expect(fake.eventsOf(B)[0]!.title).toBe("Theirs");
+      expect(Object.keys(fake.eventsOf(A)[0]!.calendarIds)).toEqual([fake.defaultCalendarId(A)]);
+    });
+
+    it("moves an event to another calendar of this account", async () => {
+      fake.addMailbox(A);
+      const other = fake.addCalendar(A, "Other");
+      const adapter = await adapterFor(A);
+      const { event_id } = await adapter.createEvent({ title: "Mine", ...FUTURE }, false);
+      await adapter.updateEvent({ event_id, calendar_id: other.id }, false);
+      expect((await adapter.readEvent({ event_id })).event.calendar_ids).toEqual([other.id]);
+    });
+
+    it("an unknown outcome of a notifying update is send_unconfirmed", async () => {
+      fake.addMailbox(A);
+      const adapter = await adapterFor(A);
+      const { event_id } = await adapter.createEvent({ title: "x", ...FUTURE, participants: [{ email: OK }] }, false);
+      fake.failNextEventWrite("accepted-then-503");
+      await expectMailError(adapter.updateEvent({ event_id, title: "y" }, true), "send_unconfirmed");
+      fake.failNextEventWrite("accepted-then-503");
+      await expectMailError(adapter.updateEvent({ event_id, title: "z" }, false), "upstream_unavailable");
+    });
+  });
+
+  describe("deleteEvents", () => {
+    it("destroys for good with one /set carrying the decision; duplicates count once, others are named", async () => {
+      const { accountId } = fake.addMailbox(A);
+      const theirs = fake.addEvent(B, { title: "Theirs", start: "2031-03-03T09:00:00" });
+      const adapter = await adapterFor(A);
+      const one = (await adapter.createEvent({ title: "One", ...FUTURE, participants: [{ email: OK }] }, false)).event_id;
+      const two = (await adapter.createEvent({ title: "Two", ...FUTURE }, false)).event_id;
+      expect(await adapter.deleteEvents([one, two, one, theirs.id, "ev999"], true)).toEqual({
+        deleted: [one, two],
+        notDeleted: [theirs.id, "ev999"],
+        unknownOnly: true,
+      });
+      expect(lastEventSet()).toEqual({ accountId, sendSchedulingMessages: true, destroy: [one, two, theirs.id, "ev999"] });
+      expect(fake.eventsOf(A)).toEqual([]);
+      expect(fake.eventsOf(B)).toHaveLength(1);
+      // Only the event with an attendee is cancelled.
+      expect(fake.schedulingMessages(A)).toEqual([{ kind: "CANCEL", eventId: one, attendees: [OK] }]);
+      expect(await adapter.deleteEvents([one], false)).toEqual({ deleted: [], notDeleted: [one], unknownOnly: true });
+    });
+
+    it("deleting an occurrence id leaves the series with one occurrence fewer", async () => {
+      fake.addMailbox(A);
+      const adapter = await adapterFor(A);
+      const { event_id } = await adapter.createEvent(
+        { title: "Daily", ...FUTURE, participants: [{ email: OK }], recurrence: { frequency: "daily", count: 5 } },
+        false,
+      );
+      const window = { after: "2031-03-01T00:00:00Z", before: "2031-03-31T00:00:00Z" };
+      const before = await searchIds(adapter, window);
+      expect(before).toHaveLength(5);
+      const third = before[2]!;
+      expect(await adapter.deleteEvents([third], true)).toEqual({ deleted: [third], notDeleted: [], unknownOnly: true });
+      expect(await searchIds(adapter, window)).toEqual(before.filter((id) => id !== third));
+      await expectMailError(adapter.readEvent({ event_id: third }), "not_found");
+      expect((await adapter.readEvent({ event_id })).event.title).toBe("Daily");
+      expect(fake.eventsOf(A)[0]!.recurrenceOverrides).toEqual({ "2031-03-05T09:00:00": { excluded: true } });
+      expect(fake.schedulingMessages(A)).toEqual([{ kind: "CANCEL", eventId: third, attendees: [OK] }]);
+    });
+  });
+
+  describe("eventAudiences", () => {
+    it("names whom the server would notify, when each event ends, and whether it recurs", async () => {
+      const { accountId } = fake.addMailbox(A);
+      fake.addMailbox(B);
+      const theirs = fake.addEvent(B, { start: "2031-03-03T09:00:00", participants: { p: { calendarAddress: `mailto:${OK}` } } });
+      const meeting = fake.addEvent(A, {
+        start: "2031-03-03T10:00:00",
+        timeZone: "Europe/Berlin",
+        duration: "PT1H",
+        organizerCalendarAddress: "mailto:boss@example.org",
+        participants: {
+          me: { calendarAddress: `mailto:${A.toUpperCase()}` },
+          p1: { calendarAddress: `mailto:${OK}` },
+          p2: { calendarAddress: "MAILTO:Other@Test.Example", email: "ignored@example.org" },
+          p3: { name: "Only sendTo", sendTo: { imip: "mailto:sendto@example.org" } },
+          p4: { name: "Only email", email: "email@example.org" },
+        },
+      }).id;
+      const allDay = fake.addEvent(A, { start: "2031-03-03T00:00:00", duration: "P1D", showWithoutTime: true }).id;
+      const series = fake.addEvent(A, { start: "2031-03-03T09:00:00", recurrenceRule: { frequency: "daily", count: 3 } }).id;
+      const adapter = await adapterFor(A);
+      const audiences = await adapter.eventAudiences([meeting, allDay, series, `${series}-20310304T090000`, theirs.id, "ev999", meeting]);
+      expect([...audiences.keys()].sort()).toEqual([allDay, meeting, series, `${series}-20310304T090000`].sort());
+      expect(audiences.get(meeting)).toEqual({
+        attendees: [OK, "other@test.example", "boss@example.org"],
+        end: Date.parse("2031-03-03T10:00:00Z"),
+        recurring: false,
+      });
+      // Floating: a day to spare.
+      expect(audiences.get(allDay)).toEqual({ attendees: [], end: Date.parse("2031-03-05T00:00:00Z"), recurring: false });
+      expect(audiences.get(series)).toMatchObject({ recurring: true });
+      expect(audiences.get(`${series}-20310304T090000`)).toMatchObject({ recurring: true });
+      const [request] = jmapRequests().slice(-1);
+      expect(calls(request!)).toEqual([
+        [
+          "CalendarEvent/get",
+          {
+            accountId,
+            ids: [meeting, allDay, series, `${series}-20310304T090000`, theirs.id, "ev999"],
+            properties: [
+              "id", "participants", "organizerCalendarAddress", "utcEnd", "timeZone", "showWithoutTime", "recurrenceId",
+              "recurrenceRule", "recurrenceRules",
+            ],
+            timeZone: "Etc/UTC",
+          },
+          "a",
+        ],
+      ]);
+    });
+  });
+
+  describe("isolation and permission", () => {
+    it("no event write carries B's account id, and B's calendar and events stay untouched", async () => {
+      const accountA = fake.addMailbox(A).accountId;
+      const accountB = fake.addMailbox(B).accountId;
+      const theirs = fake.addEvent(B, { title: "B's secret", start: "2031-03-03T09:00:00", participants: { p: { calendarAddress: `mailto:${OK}` } } });
+      const before = fake.eventsOf(B);
+      const adapter = await adapterFor(A);
+      await expectMailError(adapter.updateEvent({ event_id: theirs.id, title: "Taken", participants: [] }, true), "not_found");
+      await expectMailError(adapter.deleteEvents([theirs.id], true).then((o) => (o.deleted.length === 0 ? Promise.reject(new MailError("not_found")) : o)), "not_found");
+      await expectMailError(adapter.createEvent({ title: "x", ...FUTURE, calendar_id: fake.defaultCalendarId(B) }, false), "not_found");
+      expect((await adapter.eventAudiences([theirs.id])).size).toBe(0);
+      expect(fake.eventsOf(B)).toEqual(before);
+      expect(fake.schedulingMessages(B)).toEqual([]);
+      expect(fake.schedulingMessages(A)).toEqual([]);
+      for (const r of jmapRequests()) {
+        for (const [, args] of calls(r)) {
+          expect(args.accountId).toBe(accountA);
+          expect(args.accountId).not.toBe(accountB);
+        }
+      }
+    });
+
+    it("an unknownMethod answer to an event write means not_granted after all", async () => {
+      fake.addMailbox(A);
+      const { id } = fake.addEvent(A, { start: "2031-03-03T09:00:00" });
+      const adapter = await adapterFor(A);
+      fake.restrictToMail(A);
+      await expectMailError(adapter.createEvent({ title: "x", ...FUTURE }, false), "not_granted");
+      await expectMailError(adapter.updateEvent({ event_id: id, title: "y" }, false), "not_granted");
+      await expectMailError(adapter.deleteEvents([id], false), "not_granted");
+      await expectMailError(adapter.eventAudiences([id]), "not_granted");
+      expect(fake.eventsOf(A)).toHaveLength(1);
+    });
+  });
+
+  describe("the fake Stalwart's CalendarEvent/set", () => {
+    const setCall = async (args: Record<string, unknown>) => {
+      const { accessToken } = fake.tokensFor(A);
+      const session = await fetchSession(accessToken);
+      const [answer] = await jmapCall(session, accessToken, [["CalendarEvent/set", { accountId: session.accountId, ...args }, "s"]], {
+        using: [CORE, CALENDARS],
+      });
+      return answer!;
+    };
+    const event = (extra: Record<string, unknown> = {}) => ({
+      calendarIds: { [fake.defaultCalendarId(A)]: true },
+      start: "2031-03-03T09:00:00",
+      duration: "PT1H",
+      ...extra,
+    });
+    const attendee = (address: string) => ({ calendarAddress: `mailto:${address}`, roles: { required: true } });
+
+    it("keeps unknown property names as inert data: recurrenceRules does not recur, sendTo is no attendee", async () => {
+      fake.addMailbox(A);
+      const [, answer] = await setCall({
+        sendSchedulingMessages: true,
+        create: {
+          old: event({ recurrenceRules: [{ frequency: "daily", count: 3 }], replyTo: { imip: "mailto:boss@example.org" } }),
+          send: event({ participants: { p: { sendTo: { imip: `mailto:${OK}` }, email: OK } } }),
+        },
+      });
+      expect(Object.keys(answer.created as object)).toEqual(["old", "send"]);
+      const adapter = await adapterFor(A);
+      expect(await searchIds(adapter, { after: "2031-03-01T00:00:00Z", before: "2031-03-10T00:00:00Z" })).toEqual(
+        fake.eventsOf(A).map((e) => e.id),
+      );
+      expect(fake.eventsOf(A)[0]).toMatchObject({ recurrenceRules: [{ frequency: "daily", count: 3 }], uid: expect.any(String) });
+      expect(fake.schedulingMessages(A)).toEqual([]);
+    });
+
+    it("refuses what the server refuses: no calendar of this account, a bad start, server-set properties, more than 20 participants", async () => {
+      fake.addMailbox(A);
+      fake.addMailbox(B);
+      const many = Object.fromEntries(Array.from({ length: 21 }, (_, i) => [`p${i}`, attendee(`p${i}@example.org`)]));
+      const [, answer] = await setCall({
+        create: {
+          noCalendar: { start: "2031-03-03T09:00:00" },
+          foreign: event({ calendarIds: { [fake.defaultCalendarId(B)]: true } }),
+          badStart: event({ start: "2031-03-03T09:00:00Z" }),
+          origin: event({ isOrigin: true }),
+          utc: event({ utcStart: "2031-03-03T09:00:00Z" }),
+          crowd: event({ participants: many }),
+          fine: event(),
+        },
+      });
+      const failed = answer.notCreated as Record<string, { type: string; properties: string[] }>;
+      expect(Object.keys(failed).sort()).toEqual(["badStart", "crowd", "foreign", "noCalendar", "origin", "utc"]);
+      expect(failed.noCalendar!.properties).toEqual(["calendarIds"]);
+      expect(failed.badStart!.properties).toEqual(["start"]);
+      expect(failed.origin!.properties).toEqual(["isOrigin"]);
+      expect(failed.crowd!.properties).toEqual(["participants"]);
+      expect(Object.keys(answer.created as object)).toEqual(["fine"]);
+    });
+
+    it("schedules only with sendSchedulingMessages true, attendees, no draft and an end in the future", async () => {
+      fake.addMailbox(A);
+      const [, answer] = await setCall({
+        sendSchedulingMessages: true,
+        create: {
+          future: event({ participants: { p: attendee(OK) } }),
+          past: event({ start: "2020-03-03T09:00:00", participants: { p: attendee(OK) } }),
+          draft: event({ isDraft: true, participants: { p: attendee(OK) } }),
+          alone: event(),
+          endless: event({ start: "2020-03-03T09:00:00", recurrenceRule: { frequency: "weekly" }, participants: { p: attendee(OTHER) } }),
+        },
+      });
+      const created = answer.created as Record<string, { id: string }>;
+      expect(fake.schedulingMessages(A)).toEqual([
+        { kind: "REQUEST", eventId: created.future!.id, attendees: [OK] },
+        { kind: "REQUEST", eventId: created.endless!.id, attendees: [OTHER] },
+      ]);
+      // The server made the account the organizer of the events with attendees.
+      expect(fake.eventsOf(A).find((e) => e.id === created.future!.id)!.organizerCalendarAddress).toBe(`mailto:${A}`);
+      await setCall({ sendSchedulingMessages: false, destroy: [created.future!.id] });
+      await setCall({ destroy: [created.endless!.id] });
+      expect(fake.schedulingMessages(A)).toHaveLength(2);
+    });
+
+    it("refuses a series and one of its occurrences in the same destroy, for the occurrence", async () => {
+      fake.addMailbox(A);
+      const { id } = fake.addEvent(A, { start: "2031-03-03T09:00:00", recurrenceRule: { frequency: "daily", count: 3 } });
+      const occurrence = `${id}-20310304T090000`;
+      const [, answer] = await setCall({ destroy: [occurrence, id] });
+      expect(answer.destroyed).toEqual([id]);
+      expect(answer.notDestroyed).toEqual({ [occurrence]: { type: "invalidArguments" } });
+    });
+
+    it("updates one occurrence as an override and expands monthly and yearly rules", async () => {
+      fake.addMailbox(A);
+      const { id } = fake.addEvent(A, { title: "Daily", start: "2031-03-03T09:00:00", recurrenceRule: { frequency: "daily", count: 3 } });
+      const occurrence = `${id}-20310304T090000`;
+      const [, answer] = await setCall({ update: { [occurrence]: { title: "Moved" } } });
+      expect(answer.updated).toEqual({ [occurrence]: null });
+      const adapter = await adapterFor(A);
+      expect((await adapter.readEvent({ event_id: occurrence })).event.title).toBe("Moved");
+      expect((await adapter.readEvent({ event_id: `${id}-20310305T090000` })).event.title).toBe("Daily");
+      const monthly = fake.addEvent(A, { start: "2031-01-31T09:00:00", recurrenceRule: { frequency: "monthly", count: 4 } }).id;
+      const yearly = fake.addEvent(A, { start: "2032-02-29T09:00:00", recurrenceRule: { frequency: "yearly", count: 2 } }).id;
+      const ids = await searchIds(adapter, { after: "2031-01-01T00:00:00Z", before: "2031-06-30T00:00:00Z", limit: 50 });
+      // Months without a 31st have no occurrence (and use up none of the count).
+      expect(ids.filter((i) => i.startsWith(`${monthly}-`))).toEqual([
+        `${monthly}-20310131T090000`,
+        `${monthly}-20310331T090000`,
+        `${monthly}-20310531T090000`,
+      ]);
+      const leap = await searchIds(adapter, { after: "2032-01-01T00:00:00Z", before: "2032-06-30T00:00:00Z" });
+      expect(leap).toEqual([`${yearly}-20320229T090000`]);
+    });
+  });
+});
+
 describe("reading the answer of a /set", () => {
   it("created: the server id; a refusal is upstream_rejected, silence is upstream_unavailable", () => {
     expect(createdOrThrow({ created: { c: { id: "ct9" } } }, "c")).toBe("ct9");
@@ -1578,6 +2202,7 @@ afterAll(() => {
   // `/copy` or `/parse`, never a `/set` of an address book or a calendar.
   expect(sent.filter((n) => /\/(set|copy|parse)$/.test(n) && !["ContactCard/set", "CalendarEvent/set"].includes(n))).toEqual([]);
   expect(sent).toContain("ContactCard/set");
+  expect(sent).toContain("CalendarEvent/set");
   // Everything else is a read.
   expect(sent.filter((n) => !/\/(get|query|set)$/.test(n))).toEqual([]);
 });

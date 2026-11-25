@@ -9,6 +9,10 @@ import {
   COLLAB_LIMITS,
   type ContactDetail,
   type CreateContactInputT,
+  type CreateEventInputT,
+  type EventAudience,
+  type EventRecurrenceT,
+  type UpdateEventInputT,
   type UpdateContactInputT,
   type ContactSummary,
   type EventDetail,
@@ -335,6 +339,13 @@ export const JmapCalendar = z.object({
   myRights: z.object({ mayWriteAll: z.boolean().nullish(), mayWriteOwn: z.boolean().nullish() }).nullish(),
 });
 
+const Rule = z.object({
+  frequency: z.string().nullish(),
+  interval: z.number().int().nullish(),
+  count: z.number().int().nullish(),
+  until: z.string().nullish(),
+});
+
 export const JmapCalendarEvent = z.object({
   id: MailIdSchema,
   calendarIds: z.record(z.string(), z.boolean()).nullish(),
@@ -351,27 +362,22 @@ export const JmapCalendarEvent = z.object({
   freeBusyStatus: z.string().nullish(),
   privacy: z.string().nullish(),
   recurrenceId: z.string().nullish(),
-  recurrenceRules: z
-    .array(
-      z.object({
-        frequency: z.string().nullish(),
-        interval: z.number().int().nullish(),
-        count: z.number().int().nullish(),
-        until: z.string().nullish(),
-      }),
-    )
-    .nullish(),
+  recurrenceRule: Rule.nullish(),
+  /** The older JSCalendar name (an array); Stalwart uses `recurrenceRule`. Read as a fallback only. */
+  recurrenceRules: z.array(Rule).nullish(),
   locations: Entries(z.object({ name: z.string().nullish() })),
   virtualLocations: Entries(z.object({ uri: z.string().nullish(), name: z.string().nullish() })),
   participants: Entries(
     z.object({
       name: z.string().nullish(),
+      calendarAddress: z.string().nullish(),
       email: z.string().nullish(),
       sendTo: z.object({ imip: z.string().nullish() }).nullish(),
       roles: z.record(z.string(), z.boolean()).nullish(),
       participationStatus: z.string().nullish(),
     }),
   ),
+  organizerCalendarAddress: z.string().nullish(),
 });
 
 type CalendarEventObject = z.infer<typeof JmapCalendarEvent>;
@@ -382,7 +388,7 @@ export const CALENDAR_PROPERTIES = ["id", "name", "description", "color", "isDef
 // together with `utcStart`.
 const EVENT_SUMMARY_PROPERTIES = [
   "id", "calendarIds", "title", "start", "timeZone", "duration", "showWithoutTime", "utcStart", "utcEnd",
-  "status", "locations", "recurrenceId", "recurrenceRules",
+  "status", "locations", "recurrenceId", "recurrenceRule", "recurrenceRules",
 ] as const;
 export const EVENT_SUMMARY_REQUEST = EVENT_SUMMARY_PROPERTIES;
 export const EVENT_DETAIL_PROPERTIES = [
@@ -418,8 +424,11 @@ function locationNames(e: CalendarEventObject, max: number): string[] {
   return cleanedList(values(e.locations).map((l) => l.name), max, LINE);
 }
 
+/** The rule of a series: `recurrenceRule`, else the first of the older `recurrenceRules`. */
+const ruleOf = (e: CalendarEventObject) => e.recurrenceRule ?? (e.recurrenceRules ?? [])[0] ?? null;
+
 function isRecurring(e: CalendarEventObject): boolean {
-  return e.recurrenceId != null || (e.recurrenceRules ?? []).length > 0;
+  return e.recurrenceId != null || ruleOf(e) !== null;
 }
 
 /** The ids of a JMAP id map, as far as they are well-formed ids: nothing else is passed on. */
@@ -445,23 +454,37 @@ export function toEventSummary(e: CalendarEventObject): EventSummary {
   };
 }
 
-/** A short plain summary of the first rule, from its own fields only: `weekly, every 2, until 2027-01-01`. */
+/** A short plain summary of the rule, from its own fields only: `weekly, every 2, until 2027-01-01`. */
 function recurrenceSummary(e: CalendarEventObject): string | null {
-  const rule = (e.recurrenceRules ?? [])[0];
+  const rule = ruleOf(e);
   if (rule == null) return null;
   const parts = [optionalLine(rule.frequency, 32) ?? "recurring"];
   if (rule.interval != null && rule.interval > 1) parts.push(`every ${rule.interval}`);
   if (rule.count != null) parts.push(`${rule.count} times`);
   if (rule.until != null) {
     const until = clean(rule.until, 64).trim();
-    // A rule that ends at the start of a day reads as that date.
-    const day = /^(\d{4}-\d{2}-\d{2})T00:00:00(?:\.0+)?Z?$/.exec(until);
+    // A rule that ends at the start or the end of a day reads as that date.
+    const day = /^(\d{4}-\d{2}-\d{2})T(?:00:00:00|23:59:59)(?:\.0+)?Z?$/.exec(until);
     parts.push(`until ${day?.[1] ?? until}`);
   }
   return parts.join(", ");
 }
 
-const ROLES = ["chair", "owner", "attendee", "optional", "informational"] as const;
+/** Role names in the order they are reported; `required` (RFC 8984's name) is reported as `attendee`. */
+const ROLES = ["chair", "owner", "required", "attendee", "optional", "informational"] as const;
+
+function roleOf(roles: Record<string, boolean> | null | undefined): string | null {
+  const role = ROLES.find((r) => roles?.[r] === true);
+  return role === undefined ? null : role === "required" ? "attendee" : role;
+}
+
+const stripMailto = (uri: string): string => uri.replace(/^mailto:/i, "");
+
+/** A participant's address: `calendarAddress` (a `mailto:` URI), else `email`, else `sendTo.imip`. */
+function participantAddress(p: NonNullable<CalendarEventObject["participants"]>[string]): string | null | undefined {
+  if (p.calendarAddress != null) return stripMailto(p.calendarAddress);
+  return p.email ?? (p.sendTo?.imip == null ? null : stripMailto(p.sendTo.imip));
+}
 
 function onlineMeetings(e: CalendarEventObject): string[] {
   const out: string[] = [];
@@ -496,8 +519,8 @@ export function toEventDetail(e: CalendarEventObject): EventDetail {
     online_meetings: onlineMeetings(e),
     participants: people.slice(0, COLLAB_LIMITS.participantsMax).map((p) => ({
       name: optionalLine(p.name, LINE),
-      email: optionalLine(p.email ?? p.sendTo?.imip?.replace(/^mailto:/i, ""), 320),
-      role: ROLES.find((r) => p.roles?.[r] === true) ?? null,
+      email: optionalLine(participantAddress(p), 320),
+      role: roleOf(p.roles),
       status: optionalLine(p.participationStatus),
     })),
     participants_omitted: Math.max(0, people.length - COLLAB_LIMITS.participantsMax),
@@ -521,4 +544,183 @@ export function eventFilter(input: SearchEventsInputT): Record<string, unknown> 
   if (input.calendar_id !== undefined) f.inCalendar = input.calendar_id;
   if (input.text !== undefined) f.text = input.text;
   return f;
+}
+
+// ---- calendars: writing ----
+
+const DAY_MS = 86_400_000;
+
+/** The wall-clock time of `instant` in `zone` as a JMAP LocalDateTime (`YYYY-MM-DDTHH:MM:SS`). */
+function wallClock(instant: number, zone: string): string {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: zone,
+    hourCycle: "h23",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  }).formatToParts(new Date(instant));
+  const part = (type: string) => parts.find((p) => p.type === type)!.value;
+  return `${part("year").padStart(4, "0")}-${part("month")}-${part("day")}T${part("hour")}:${part("minute")}:${part("second")}`;
+}
+
+/** A LocalDateTime read as if it were UTC (ms): only for arithmetic on wall-clock times. */
+const asUtc = (local: string): number => Date.parse(`${local}Z`);
+
+/** The instant of a LocalDateTime in `zone` (both offsets around a DST change are tried). */
+function instantOf(local: string, zone: string): number {
+  const guess = asUtc(local);
+  const offset = (t: number) => asUtc(wallClock(t, zone)) - t;
+  const first = guess - offset(guess);
+  return guess - offset(first);
+}
+
+/**
+ * An ISO 8601 duration from `start` to `end` as JSCalendar reads it in `zone`: whole days are
+ * nominal (wall-clock days, as RFC 5545 counts them), the rest is exact time. No zero parts.
+ */
+function eventDuration(start: number, end: number, zone: string): string {
+  const startLocal = wallClock(start, zone);
+  let days = Math.floor((asUtc(wallClock(end, zone)) - asUtc(startLocal)) / DAY_MS);
+  let rest = end - instantOf(new Date(asUtc(startLocal) + days * DAY_MS).toISOString().slice(0, 19), zone);
+  while (rest < 0 && days > 0) {
+    days--;
+    rest = end - instantOf(new Date(asUtc(startLocal) + days * DAY_MS).toISOString().slice(0, 19), zone);
+  }
+  const seconds = Math.round(rest / 1000);
+  const [h, m, sec] = [Math.floor(seconds / 3600), Math.floor((seconds % 3600) / 60), seconds % 60];
+  const time = `${h > 0 ? `${h}H` : ""}${m > 0 ? `${m}M` : ""}${sec > 0 ? `${sec}S` : ""}`;
+  return `P${days > 0 ? `${days}D` : ""}${time === "" ? "" : `T${time}`}`;
+}
+
+type EventTime = Pick<CreateEventInputT, "start" | "end" | "time_zone" | "date" | "days">;
+
+/** The four time properties of an event, from the timed or the all-day form of the input. */
+function timeProperties(t: EventTime): Record<string, unknown> {
+  if (t.date !== undefined) {
+    return { start: `${t.date}T00:00:00`, timeZone: null, duration: `P${t.days ?? 1}D`, showWithoutTime: true };
+  }
+  const zone = t.time_zone ?? EVENT_TIME_ZONE;
+  const start = Date.parse(t.start!);
+  return {
+    start: wallClock(start, zone),
+    timeZone: zone,
+    duration: eventDuration(start, Date.parse(t.end!), zone),
+    showWithoutTime: false,
+  };
+}
+
+const mailto = (address: string): string => `mailto:${address}`;
+
+/**
+ * The participants of an event the mailbox organizes: the mailbox itself as owner, then each
+ * attendee as required and asked to reply. `calendarAddress` is what the server schedules by.
+ */
+function participantsProperty(owner: string, attendees: NonNullable<CreateEventInputT["participants"]>): Record<string, unknown> {
+  const out: Record<string, unknown> = {
+    o: {
+      "@type": "Participant",
+      calendarAddress: mailto(owner),
+      roles: { owner: true },
+      participationStatus: "accepted",
+    },
+  };
+  attendees.forEach((p, i) => {
+    out[`p${i + 1}`] = {
+      "@type": "Participant",
+      calendarAddress: mailto(p.email),
+      ...(p.name === undefined ? {} : { name: p.name }),
+      roles: { required: true },
+      participationStatus: "needs-action",
+      expectReply: true,
+    };
+  });
+  return out;
+}
+
+/** The JSCalendar `recurrenceRule`; `until` is the end of that day in the event's zone. */
+function recurrenceRuleProperty(rule: EventRecurrenceT): Record<string, unknown> {
+  return {
+    "@type": "RecurrenceRule",
+    frequency: rule.frequency,
+    interval: rule.interval ?? 1,
+    ...(rule.count === undefined ? {} : { count: rule.count }),
+    ...(rule.until === undefined ? {} : { until: `${rule.until}T23:59:59` }),
+    ...(rule.by_day === undefined ? {} : { byDay: rule.by_day.map((day) => ({ "@type": "NDay", day })) }),
+  };
+}
+
+/** True when `participants` names the mailbox's own address: it is the organizer, never an attendee. */
+export function namesOwner(participants: { email: string }[] | undefined, owner: string): boolean {
+  return (participants ?? []).some((p) => p.email.toLowerCase() === owner.toLowerCase());
+}
+
+/**
+ * A new JSCalendar Event (RFC 8984) in `calendarId`, with the property names Stalwart uses. No
+ * `uid`: the server makes one. With participants, the mailbox (`owner`) is the organizer.
+ */
+export function newCalendarEvent(input: CreateEventInputT, calendarId: string, owner: string): Record<string, unknown> {
+  const event: Record<string, unknown> = {
+    "@type": "Event",
+    calendarIds: { [calendarId]: true },
+    title: input.title,
+    ...timeProperties(input),
+  };
+  if (input.description !== undefined) event.description = input.description;
+  if (input.location !== undefined && input.location !== "") event.locations = { l1: { "@type": "Location", name: input.location } };
+  if ((input.participants ?? []).length > 0) {
+    event.organizerCalendarAddress = mailto(owner);
+    event.participants = participantsProperty(owner, input.participants!);
+  }
+  if (input.recurrence !== undefined) event.recurrenceRule = recurrenceRuleProperty(input.recurrence);
+  return event;
+}
+
+/** The PatchObject of an update: one top-level key per given field, each replacing the whole property. */
+export function eventPatch(input: UpdateEventInputT, owner: string): Record<string, unknown> {
+  const patch: Record<string, unknown> = {};
+  if (input.title !== undefined) patch.title = input.title;
+  if (input.start !== undefined || input.date !== undefined) Object.assign(patch, timeProperties(input));
+  if (input.description !== undefined) patch.description = input.description;
+  if (input.location !== undefined) {
+    patch.locations = input.location === "" ? null : { l1: { "@type": "Location", name: input.location } };
+  }
+  if (input.calendar_id !== undefined) patch.calendarIds = { [input.calendar_id]: true };
+  if (input.participants !== undefined) {
+    const none = input.participants.length === 0;
+    patch.participants = none ? null : participantsProperty(owner, input.participants);
+    patch.organizerCalendarAddress = none ? null : mailto(owner);
+  }
+  if (input.recurrence !== undefined) patch.recurrenceRule = input.recurrence === null ? null : recurrenceRuleProperty(input.recurrence);
+  return patch;
+}
+
+/** What `eventAudiences` reads of each event. */
+export const EVENT_AUDIENCE_PROPERTIES = [
+  "id", "participants", "organizerCalendarAddress", "utcEnd", "timeZone", "showWithoutTime", "recurrenceId",
+  "recurrenceRule", "recurrenceRules",
+] as const;
+
+/**
+ * Whom the server would notify about `e`: every participant with a calendar address, and the
+ * organizer, except the mailbox itself (`owner`); and when the event ends. A floating or all-day
+ * event's end is read with a day to spare, so it is never taken for past too early.
+ */
+export function toEventAudience(e: CalendarEventObject, owner: string): EventAudience {
+  const own = owner.toLowerCase();
+  const addresses = [
+    ...values(e.participants).map((p) => (p.calendarAddress == null ? null : stripMailto(p.calendarAddress))),
+    e.organizerCalendarAddress == null ? null : stripMailto(e.organizerCalendarAddress),
+  ]
+    .map((a) => (a ?? "").trim().toLowerCase())
+    .filter((a) => a !== "" && a !== own);
+  const end = e.utcEnd == null ? Number.NaN : Date.parse(e.utcEnd);
+  const floating = e.timeZone == null || e.showWithoutTime === true;
+  return {
+    attendees: [...new Set(addresses)],
+    end: Number.isNaN(end) ? null : end + (floating ? DAY_MS : 0),
+    recurring: isRecurring(e),
+  };
 }

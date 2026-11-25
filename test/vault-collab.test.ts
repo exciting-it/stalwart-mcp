@@ -224,6 +224,36 @@ describe("writing contacts and events through the vault", () => {
     await expectCode(box.readContact({ contact_id: created.contact_id }), "not_found");
   });
 
+  it("creates, changes and deletes an event in the mailbox's own calendar", async () => {
+    const { box } = await signIn(A);
+    fake.addMailbox(B);
+    const other = fake.addEvent(B, { title: "Bob's", start: "2027-03-01T09:00:00" });
+    const created = await box.createEvent({ title: "Standup", start: "2027-03-01T09:00:00Z", end: "2027-03-01T09:15:00Z", time_zone: "Europe/Berlin" });
+    expect(created).toEqual({ event_id: expect.any(String), calendar_id: fake.defaultCalendarId(A), invitations: 0, deduplicated: false });
+    expect(await box.updateEvent({ event_id: created.event_id, location: "Room 2", recurrence: { frequency: "weekly", count: 4 } })).toEqual({
+      event_id: created.event_id,
+      invitations: 0,
+    });
+    expect((await box.readEvent({ event_id: created.event_id })).event).toMatchObject({
+      title: "Standup",
+      local_start: "2027-03-01T10:00:00",
+      time_zone: "Europe/Berlin",
+      location: "Room 2",
+      recurring: true,
+      recurrence: "weekly, 4 times",
+    });
+    await expectCode(box.updateEvent({ event_id: other.id, title: "Mine now" }), "not_found");
+    await expectCode(box.deleteEvent({ event_ids: [other.id] }), "not_found");
+    expect(await box.deleteEvent({ event_ids: [created.event_id] })).toEqual({
+      deleted: 1,
+      not_deleted: [],
+      cancellations: 0,
+      cancelled_attendees: 0,
+    });
+    await expectCode(box.readEvent({ event_id: created.event_id }), "not_found");
+    expect(fake.eventsOf(B)).toHaveLength(1);
+  });
+
   it("counts every one of the six write operations against the per-mailbox call limit", async () => {
     const { box } = await signIn(A);
     for (let i = 0; i < MAIL_LIMITS.toolCallsPerMinute - 2; i++) await box.searchContacts({ limit: 1, offset: 0 });
@@ -321,6 +351,17 @@ describe("writing contacts and events through the vault", () => {
       });
       expect(fake.contactsOf(B)).toHaveLength(1);
       await expectCode(box.deleteContact({ contact_ids: [theirs.id] }), "not_found");
+    });
+
+    it("deletes up to 50 events without attendees in one silent request, after one read", async () => {
+      const { box } = await signIn(A);
+      const ids = Array.from({ length: 50 }, (_, i) => fake.addEvent(A, { start: `2027-03-01T09:${String(i).padStart(2, "0")}:00` }).id);
+      const before = jmapPosts().length;
+      expect(await box.deleteEvent({ event_ids: ids })).toEqual({ deleted: 50, not_deleted: [], cancellations: 0, cancelled_attendees: 0 });
+      const posts = jmapPosts().slice(before);
+      expect(posts.map((r) => r.body.methodCalls.map((c: [string]) => c[0]))).toEqual([["CalendarEvent/get"], ["CalendarEvent/set"]]);
+      expect(posts[1]!.body.methodCalls[0][1]).toMatchObject({ sendSchedulingMessages: false });
+      expect(fake.eventsOf(A)).toEqual([]);
     });
 
     it("has no daily limit on deletions", async () => {
