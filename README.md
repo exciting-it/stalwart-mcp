@@ -22,7 +22,7 @@ Why it is built this way, and what its security rests on: [docs/design.md](docs/
 
 | Tool | What it does |
 |---|---|
-| `list_mailboxes` | Folders with role and message counts |
+| `list_mailboxes` | Folders with role and message counts, and the address of the connected mailbox |
 | `search_mail` | Search by text, sender, recipient, subject, date, folder, unread, attachment |
 | `read_thread` | A whole conversation as plain text |
 | `create_draft` | Save a new mail or a reply in Drafts |
@@ -106,6 +106,17 @@ access to it, a Cloudflare account, and [Bun](https://bun.sh).
 Outside production both allow-lists are enforced in code. If a list is empty, nobody can
 connect and nothing is sent. This is what makes it safe to point staging at your one, real
 mail server.
+
+### Branding
+
+The pages a user sees in the browser (the approval page and its error pages) take their look
+from `src/oauth/theme.ts` and the files in `public/brand/`: wordmark, colours, two fonts, an
+icon and the artwork on the right half of wide screens. Both carry exciting IT's branding as
+shipped; change the values and replace the files for your own deployment. The fonts are under
+the SIL Open Font License (texts next to the files). The pages run no script and load nothing
+from another origin, which their Content-Security-Policy enforces.
+
+The sign-in page itself is Stalwart's own and is not part of this worker.
 
 ### Where the data lives
 

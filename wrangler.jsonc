@@ -8,6 +8,10 @@
   // Invocation logs record request URLs, i.e. `/callback?code=…&state=…` and `/approve?h=…`:
   // off. The worker's own `console` output (fixed markers only) stays on.
   "observability": { "enabled": true, "logs": { "invocation_logs": false } },
+  // Fonts, artwork and icon of the approval page (`public/brand`, see src/oauth/theme.ts).
+  // Cloudflare serves these files itself, before the worker runs: they are public, hold no
+  // data, and stay reachable when the worker is switched off.
+  "assets": { "directory": "./public" },
   // DEPLOYING YOUR OWN: change `routes` and the three addresses and names in `vars`, here and
   // in `env.staging` below. Everything else can stay as it is.
   "routes": [{ "pattern": "mail-mcp.exciting-it.com", "custom_domain": true }],

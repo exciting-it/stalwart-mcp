@@ -90,7 +90,7 @@ async function atApproval(email: string, opts: { clientName?: string } = {}): Pr
 }
 
 const HTML_HEADERS = {
-  "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'",
+  "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; img-src 'self'; font-src 'self'; frame-ancestors 'none'; base-uri 'none'",
   "x-frame-options": "DENY",
   "cache-control": "no-store",
   "referrer-policy": "no-referrer",

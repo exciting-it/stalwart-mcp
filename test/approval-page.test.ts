@@ -13,7 +13,10 @@ describe("approval page", () => {
       email: "a\"@test.example",
       handle: `h"><script>`,
     }).text();
-    expect(html).not.toContain("<img");
+    // The only image is the page's own artwork; the client-supplied one stays text.
+    expect(html.match(/<img/g)).toHaveLength(1);
+    expect(html).not.toContain("<img src=x");
+    expect(html).not.toContain("onerror=1>");
     expect(html).not.toContain("<b>");
     expect(html).not.toContain("<script");
     expect(html).toContain("&lt;img");
@@ -29,8 +32,10 @@ describe("approval page", () => {
     ];
     for (const res of pages) {
       expect(res.headers.get("content-security-policy")).toBe(
-        "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'",
+        "default-src 'none'; style-src 'unsafe-inline'; img-src 'self'; font-src 'self'; frame-ancestors 'none'; base-uri 'none'",
       );
+      // No script may run, and nothing loads from another origin.
+      expect(res.headers.get("content-security-policy")).not.toMatch(/script-src|https?:|\*|data:/);
       expect(res.headers.get("content-security-policy")).toContain("frame-ancestors 'none'");
       expect(res.headers.get("x-frame-options")).toBe("DENY");
       expect(res.headers.get("cache-control")).toBe("no-store");
@@ -43,7 +48,8 @@ describe("approval page", () => {
   it("names the mailbox and the tool in German and in English", async () => {
     const en = await renderApprovalPage({ lang: "en", ...base }).text();
     expect(en).toContain("Connect your mailbox");
-    expect(en).toContain("Claude (claude.ai) wants to read, search and send email for a@test.example.");
+    expect(en).toContain("Claude (claude.ai) wants to access this mailbox:");
+    expect(en).toContain('<p class="mailbox">a@test.example</p>');
     expect(en).toContain(
       "It will be able to read and search your mail, save drafts and send mail in your name (at most 50 messages per day). It cannot delete mail.",
     );
@@ -55,12 +61,13 @@ describe("approval page", () => {
 
     const de = await renderApprovalPage({ lang: "de", ...base }).text();
     expect(de).toContain("Postfach verbinden");
-    expect(de).toContain("Claude (claude.ai) möchte für a@test.example E-Mails lesen, durchsuchen und senden.");
+    expect(de).toContain("Claude (claude.ai) möchte auf dieses Postfach zugreifen:");
+    expect(de).toContain('<p class="mailbox">a@test.example</p>');
     expect(de).toContain(
-      "Die Anwendung kann Ihre E-Mails lesen und durchsuchen, Entwürfe speichern und in Ihrem Namen senden (höchstens 50 Nachrichten pro Tag). Löschen kann sie nichts.",
+      "Die Anwendung kann deine E-Mails lesen und durchsuchen, Entwürfe speichern und in deinem Namen senden (höchstens 50 Nachrichten pro Tag). Löschen kann sie nichts.",
     );
-    expect(de).toContain("Nicht a@test.example? Wählen Sie „Ablehnen“, melden Sie sich im Postfach ab und versuchen Sie es erneut.");
-    expect(de).toContain("Erlauben Sie das nur, wenn Sie die Verbindung gerade selbst gestartet haben.");
+    expect(de).toContain("Nicht a@test.example? Wähle „Ablehnen“, melde dich im Postfach ab und versuche es erneut.");
+    expect(de).toContain("Erlaube das nur, wenn du die Verbindung gerade selbst gestartet hast.");
     expect(de).toMatch(/<button[^>]*value="allow"[^>]*>Erlauben<\/button>/);
     expect(de).toMatch(/<button[^>]*value="deny"[^>]*>Ablehnen<\/button>/);
     expect(de).toContain('<html lang="de">');
@@ -80,6 +87,47 @@ describe("approval page", () => {
   });
 });
 
+describe("page design", () => {
+  const pages = () => [
+    renderApprovalPage({ lang: "de", ...base }),
+    renderMessagePage({ lang: "en", kind: "expired", status: 410 }),
+  ];
+
+  it("runs no script and loads only this origin's own files", async () => {
+    for (const res of pages()) {
+      const html = await res.text();
+      expect(html).not.toMatch(/<script|javascript:|\son[a-z]+=/i);
+      // Every address in the page (fonts, image, icon, form) is a path on this origin.
+      const addresses = [...html.matchAll(/(?:src|href|action)="([^"]*)"|url\("([^"]*)"\)/g)].map((m) => m[1] ?? m[2]!);
+      expect(addresses.length).toBeGreaterThanOrEqual(4);
+      for (const address of addresses) expect(address).toMatch(/^\/(?!\/)/);
+      expect(html).not.toMatch(/https?:\/\//);
+    }
+  });
+
+  it("shows the wordmark, the title with its dot and the artwork with an empty alt text", async () => {
+    for (const res of pages()) {
+      const html = await res.text();
+      expect(html).toContain('<p class="brand">exciting&nbsp;IT<span class="dot">.</span></p>');
+      expect(html).toMatch(/<h1>[^<]+<span class="dot">\.<\/span><\/h1>/);
+      expect(html).toContain('<img src="/brand/artwork.jpg" alt="" aria-hidden="true">');
+    }
+  });
+
+  it("references exactly the four brand files kept in public/brand", async () => {
+    const html = await renderApprovalPage({ lang: "de", ...base }).text();
+    const files = [...html.matchAll(/"(\/brand\/[^"]+)"/g)].map((m) => m[1]!);
+    expect(new Set(files)).toEqual(
+      new Set([
+        "/brand/fonts/bricolage-grotesque.woff2",
+        "/brand/fonts/instrument-sans.woff2",
+        "/brand/favicon.svg",
+        "/brand/artwork.jpg",
+      ]),
+    );
+  });
+});
+
 describe("message pages", () => {
   it.each([
     ["refused", 403, "This mailbox cannot be connected.", "Dieses Postfach kann nicht verbunden werden."],
@@ -87,13 +135,13 @@ describe("message pages", () => {
       "failed",
       400,
       "The connection could not be completed. Please start again from your AI tool.",
-      "Die Verbindung konnte nicht abgeschlossen werden. Bitte starten Sie erneut in Ihrem KI-Werkzeug.",
+      "Die Verbindung konnte nicht abgeschlossen werden. Bitte starte erneut in deinem KI-Werkzeug.",
     ],
     [
       "expired",
       410,
       "This request has expired. Please start again from your AI tool.",
-      "Diese Anfrage ist abgelaufen. Bitte starten Sie erneut in Ihrem KI-Werkzeug.",
+      "Diese Anfrage ist abgelaufen. Bitte starte erneut in deinem KI-Werkzeug.",
     ],
   ] as const)("%s has its fixed copy and status", async (kind, status, en, de) => {
     const resEn = renderMessagePage({ lang: "en", kind, status });
