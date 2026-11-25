@@ -12,7 +12,7 @@ import type { CreateEventInputT, EventAudience } from "../src/collab";
 import type { Env } from "../src/env";
 import { STALWART } from "../src/stalwart/endpoints";
 import { createNotice, deleteNotice, updateNotice } from "../src/vault/event-notices";
-import { eventWriteFingerprint, takeSend } from "../src/vault/limits";
+import { eventWriteFingerprint, sendFingerprint, takeSend } from "../src/vault/limits";
 import { type MailboxVault, vaultFor, WITH_ACCESS_TOKEN } from "../src/vault/mailbox-vault";
 import { MailboxOperations } from "../src/vault/operations";
 import { VaultMailbox } from "../src/vault/vault-mailbox";
@@ -441,7 +441,15 @@ describe("events that ended in the past", () => {
 });
 
 describe("the notice decision", () => {
-  const audience = (a: Partial<EventAudience> = {}): EventAudience => ({ attendees: [OK], end: T0 + DAY, recurring: false, ...a });
+  const audience = (a: Partial<EventAudience> = {}): EventAudience => ({
+    attendees: [OK],
+    end: T0 + DAY,
+    recurring: false,
+    organizedByMailbox: true,
+    timeZone: "Etc/UTC",
+    participants: [{ email: OK, name: null, status: "needs-action" }],
+    ...a,
+  });
 
   it("create: participants and an end not in the past; a rule is never past; whole days get a day to spare", () => {
     expect(createNotice({ ...invite }, T0)).toEqual({ addresses: [OK], notify: true });
@@ -481,6 +489,16 @@ describe("the notice decision", () => {
     expect(deleteNotice(audience({ end: T0 - 1, recurring: true }), T0).notify).toBe(true);
   });
 
+  it("the fingerprint of an event write never equals the one of a mail with the same field values", async () => {
+    const fields = { to: [OK], cc: [], bcc: [], subject: "Planning", body: "Agenda", in_reply_to: undefined };
+    const mailFp = await sendFingerprint(fields);
+    expect(mailFp).toMatch(/^[0-9a-f]{64}$/);
+    expect(await eventWriteFingerprint("create_event", fields)).not.toBe(mailFp);
+    expect(await eventWriteFingerprint("update_event", fields)).not.toBe(mailFp);
+    const message: OutgoingMessage = { to: [OK], cc: [], bcc: [], subject: invite.title, body: "" };
+    expect(await eventWriteFingerprint("create_event", invite)).not.toBe(await sendFingerprint(message));
+  });
+
   it("the fingerprint: the operation and the input, participants in any order and case, never a mail's", async () => {
     const two = { ...invite, participants: [{ email: OK }, { email: STRANGER }] };
     const fp = await eventWriteFingerprint("create_event", two);
@@ -491,5 +509,308 @@ describe("the notice decision", () => {
     expect(await eventWriteFingerprint("update_event", two)).not.toBe(fp);
     expect(await eventWriteFingerprint("create_event", { ...two, participants: [{ email: OK, name: "Named" }, { email: STRANGER }] })).not.toBe(fp);
     expect(fp).toMatch(/^[0-9a-f]{64}$/);
+  });
+});
+
+// ---- review fixes: one event write at a time, someone else's meetings, time zones, counting ----
+
+const BOSS = "boss@test.example";
+
+/** Only the CalendarEvent methods of the JMAP requests so far, in order. */
+const eventMethods = () =>
+  fake.requests.flatMap((r) => methodCalls(r).map((c) => c[0]).filter((n) => n.startsWith("CalendarEvent/")));
+
+/** Every `CalendarEvent/set` answer goes through `change` before the vault sees it (the write itself happens). */
+function rewriteEventSetAnswers(change: (answer: Record<string, unknown>) => void): void {
+  vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+    const res = await fake.fetch(input, init);
+    const text = init?.body === undefined ? "" : String(init.body);
+    if (!text.includes("CalendarEvent/set")) return res;
+    const body = (await res.json()) as { methodResponses: [string, Record<string, unknown>, string][] };
+    for (const r of body.methodResponses) if (r[0] === "CalendarEvent/set") change(r[1]);
+    return new Response(JSON.stringify(body), { status: res.status, headers: res.headers });
+  });
+}
+
+/** An event organized by someone else (`BOSS`) that lists the mailbox and a stranger. */
+const theirMeeting = (start = "2027-03-01T09:00:00") =>
+  fake.addEvent(A, {
+    title: "Their meeting",
+    start,
+    organizerCalendarAddress: `mailto:${BOSS}`,
+    participants: {
+      b: { calendarAddress: `mailto:${BOSS}`, roles: { owner: true }, participationStatus: "accepted" },
+      me: { calendarAddress: `mailto:${A}`, roles: { required: true }, participationStatus: "accepted" },
+      s: { calendarAddress: `mailto:${STRANGER}`, roles: { required: true } },
+    },
+  }).id;
+
+describe("event writes of one mailbox run one after the other", () => {
+  for (const order of ["adding first", "moving first"] as const) {
+    it(`two updates of the same event never interleave (${order}): nobody outside the allow-list is notified`, async () => {
+      const { stub, box } = await signIn(A);
+      // Ended in the past, with OK as attendee: a change that keeps it in the past notifies nobody.
+      const id = invited("2026-12-01T09:00:00");
+      slowUpstream();
+      const before = eventMethods().length;
+      const add = () =>
+        box.updateEvent({
+          event_id: id,
+          participants: [{ email: OK }, { email: STRANGER }],
+          start: "2026-12-01T10:00:00Z",
+          end: "2026-12-01T11:00:00Z",
+        });
+      const move = () => box.updateEvent({ event_id: id, ...FUTURE });
+      const runs = order === "adding first" ? [add(), move()] : [move(), add()];
+      const results = await Promise.allSettled(runs);
+
+      expect(fake.schedulingMessages(A).flatMap((m) => m.attendees)).not.toContain(STRANGER);
+      // Read, write; read, write (or a refusal after the second read): never two reads first.
+      const methods = eventMethods().slice(before);
+      expect([
+        ["CalendarEvent/get", "CalendarEvent/set", "CalendarEvent/get", "CalendarEvent/set"],
+        ["CalendarEvent/get", "CalendarEvent/set", "CalendarEvent/get"],
+      ]).toContainEqual(methods);
+      if (order === "adding first") {
+        // The move came second, saw the stranger and was refused before anything was written.
+        expect(results[1]).toMatchObject({ status: "rejected", reason: expect.objectContaining({ code: "recipient_not_allowed" }) });
+        expect(await sendsCounted(stub)).toBe(0);
+      } else {
+        expect(results.map((r) => r.status)).toEqual(["fulfilled", "fulfilled"]);
+        expect(fake.schedulingMessages(A)).toEqual([{ kind: "REQUEST", eventId: id, attendees: [OK] }]);
+      }
+      // The queue is free again after a refusal: the next event write goes through.
+      vi.stubGlobal("fetch", fake.fetch);
+      expect(await box.updateEvent({ event_id: id, title: "Still mine" })).toMatchObject({ event_id: id });
+    });
+  }
+
+  it("a write that throws releases the queue", async () => {
+    const { box } = await signIn(A);
+    await expectCode(box.updateEvent({ event_id: "ev99999", title: "x" }), "not_found");
+    await expectCode(box.deleteEvent({ event_ids: ["ev99999"] }), "not_found");
+    const id = fake.addEvent(A, { title: "Alone", start: "2027-03-01T09:00:00" }).id;
+    expect(await box.updateEvent({ event_id: id, title: "Renamed" })).toEqual({ event_id: id, invitations: 0 });
+  });
+});
+
+describe("a meeting someone else organized", () => {
+  it("participants or recurrence in an update are invalid_input, and nothing is written", async () => {
+    const { stub, box } = await signIn(A);
+    const id = theirMeeting();
+    for (const change of [{ participants: [{ email: OK }] }, { participants: [] }, { recurrence: { frequency: "daily" as const } }, { recurrence: null }]) {
+      await expectCode(box.updateEvent({ event_id: id, title: "Mine now", ...change }), "invalid_input");
+    }
+    expect(eventSets()).toEqual([]);
+    expect(fake.eventsOf(A)[0]).toMatchObject({ title: "Their meeting", organizerCalendarAddress: `mailto:${BOSS}` });
+    expect(await sendsCounted(stub)).toBe(0);
+  });
+
+  it("a change and a deletion only touch the mailbox's own copy: no scheduling message, no send", async () => {
+    const { stub, box } = await signIn(A);
+    const id = theirMeeting();
+    const other = theirMeeting("2027-03-02T09:00:00");
+    // Staging: the stranger and the organizer are not on the allow-list, and nobody is notified anyway.
+    expect(await box.updateEvent({ event_id: id, title: "Renamed for me", ...FUTURE })).toEqual({ event_id: id, invitations: 0 });
+    expect(await box.deleteEvent({ event_ids: [id, other] })).toEqual({
+      deleted: 2,
+      not_deleted: [],
+      cancellations: 0,
+      cancelled_attendees: 0,
+    });
+    expect(eventSets().map((set) => set.sendSchedulingMessages)).toEqual([false, false]);
+    // Nothing in the update makes the mailbox the organizer.
+    expect(Object.keys((eventSets()[0]!.update as Record<string, Record<string, unknown>>)[id]!)).not.toContain("organizerCalendarAddress");
+    expect(fake.schedulingMessages(A)).toEqual([]);
+    expect(await sendsCounted(stub)).toBe(0);
+  });
+
+  it("an event without organizer, and one the mailbox organizes (any case), still notify", async () => {
+    const { stub, box } = await signIn(A);
+    const none = fake.addEvent(A, { title: "No organizer", start: "2027-03-01T09:00:00", participants: { p: { calendarAddress: `mailto:${OK}` } } }).id;
+    const mine = fake.addEvent(A, {
+      title: "Mine",
+      start: "2027-03-02T09:00:00",
+      organizerCalendarAddress: `MAILTO:${A.toUpperCase()}`,
+      participants: { p: { calendarAddress: `mailto:${OK}` } },
+    }).id;
+    expect(await box.updateEvent({ event_id: none, title: "x" })).toEqual({ event_id: none, invitations: 1 });
+    expect(await box.updateEvent({ event_id: mine, title: "y", participants: [{ email: OK }] })).toEqual({ event_id: mine, invitations: 1 });
+    expect(await box.deleteEvent({ event_ids: [none, mine] })).toMatchObject({ deleted: 2, cancellations: 2 });
+    expect(fake.schedulingMessages(A).map((m) => m.kind)).toEqual(["REQUEST", "REQUEST", "CANCEL", "CANCEL"]);
+    expect(await sendsCounted(stub)).toBe(4);
+  });
+});
+
+describe("an update of the time keeps the event's own time zone", () => {
+  it("a weekly 09:00 Europe/Berlin event moved to 10:00+01:00 without time_zone stays in Europe/Berlin", async () => {
+    const { box } = await signIn(A);
+    const id = fake.addEvent(A, {
+      title: "Weekly",
+      start: "2027-02-01T09:00:00",
+      timeZone: "Europe/Berlin",
+      duration: "PT1H",
+      recurrenceRule: { "@type": "RecurrenceRule", frequency: "weekly", interval: 1 },
+    }).id;
+    await box.updateEvent({ event_id: id, start: "2027-02-01T10:00:00+01:00", end: "2027-02-01T11:00:00+01:00" });
+    expect(fake.eventsOf(A).find((e) => e.id === id)).toMatchObject({ start: "2027-02-01T10:00:00", timeZone: "Europe/Berlin", duration: "PT1H" });
+    // With time_zone the input wins; an event without a zone (floating) gets UTC.
+    await box.updateEvent({ event_id: id, start: "2027-02-01T10:00:00+01:00", end: "2027-02-01T11:00:00+01:00", time_zone: "asia/dubai" });
+    expect(fake.eventsOf(A).find((e) => e.id === id)).toMatchObject({ start: "2027-02-01T13:00:00", timeZone: "Asia/Dubai" });
+    const floating = fake.addEvent(A, { title: "Floating", start: "2027-02-01T09:00:00" }).id;
+    await box.updateEvent({ event_id: floating, start: "2027-02-01T10:00:00+01:00", end: "2027-02-01T11:00:00+01:00" });
+    expect(fake.eventsOf(A).find((e) => e.id === floating)).toMatchObject({ start: "2027-02-01T09:00:00", timeZone: "Etc/UTC" });
+  });
+});
+
+describe("replacing participants keeps what kept attendees answered", () => {
+  it("a kept attendee keeps its answer and name; a new one starts as needs-action, asked to reply", async () => {
+    const { stub, accountId } = await signIn(A);
+    const id = fake.addEvent(A, {
+      title: "Answered",
+      start: "2027-03-01T09:00:00",
+      organizerCalendarAddress: `mailto:${A}`,
+      participants: {
+        o: { calendarAddress: `mailto:${A}`, roles: { owner: true }, participationStatus: "accepted" },
+        p: { calendarAddress: `mailto:${OK}`, name: "Ok Person", roles: { required: true }, participationStatus: "accepted" },
+        t: { calendarAddress: `mailto:${BOSS}`, roles: { required: true }, participationStatus: "tentative" },
+      },
+    }).id;
+    const input = { event_id: id, participants: [{ email: "OK@test.example" }, { email: BOSS, name: "Boss" }, { email: STRANGER }] };
+    expect(
+      await opsWith(stub, { ENVIRONMENT: "production" }, (ops) => ops.collab({ accountId, email: A }, { op: "update_event", input })),
+    ).toEqual({ ok: true, value: { event_id: id, invitations: 3 } });
+    const people = Object.values(fake.eventsOf(A)[0]!.participants as Record<string, Record<string, unknown>>);
+    expect(people.find((p) => p.calendarAddress === "mailto:OK@test.example")).toEqual({
+      "@type": "Participant",
+      calendarAddress: "mailto:OK@test.example",
+      name: "Ok Person",
+      roles: { required: true },
+      participationStatus: "accepted",
+    });
+    expect(people.find((p) => p.calendarAddress === `mailto:${BOSS}`)).toMatchObject({ name: "Boss", participationStatus: "tentative" });
+    expect(people.find((p) => p.calendarAddress === `mailto:${BOSS}`)).not.toHaveProperty("expectReply");
+    expect(people.find((p) => p.calendarAddress === `mailto:${STRANGER}`)).toMatchObject({
+      participationStatus: "needs-action",
+      expectReply: true,
+    });
+  });
+});
+
+describe("one counted send covers at most 10 addresses", () => {
+  const crowd = (start = "2027-03-01T09:00:00") =>
+    fake.addEvent(A, {
+      title: "Crowd",
+      start,
+      organizerCalendarAddress: `mailto:${A}`,
+      participants: Object.fromEntries(Array.from({ length: 15 }, (_, i) => [`p${i}`, { calendarAddress: `mailto:p${i}@test.example` }])),
+    }).id;
+  const production = { ENVIRONMENT: "production" } as const;
+
+  it("an update of an event with 15 attendees costs 2; with 1 send left it is refused and nothing is written", async () => {
+    const { stub, accountId } = await signIn(A);
+    const id = crowd();
+    const caller = { accountId, email: A };
+    expect(await opsWith(stub, production, (ops) => ops.collab(caller, { op: "update_event", input: { event_id: id, title: "Moved" } }))).toEqual({
+      ok: true,
+      value: { event_id: id, invitations: 15 },
+    });
+    expect(await sendsCounted(stub)).toBe(2);
+    await countSends(stub, MAIL_LIMITS.sendsPerDay - 3);
+    const sets = eventSets().length;
+    expect(await opsWith(stub, production, (ops) => ops.collab(caller, { op: "update_event", input: { event_id: id, title: "Again" } }))).toEqual({
+      ok: false,
+      code: "send_limit_reached",
+    });
+    expect(await opsWith(stub, production, (ops) => ops.collab(caller, { op: "delete_event", input: { event_ids: [id] } }))).toEqual({
+      ok: false,
+      code: "send_limit_reached",
+    });
+    expect(eventSets()).toHaveLength(sets);
+    expect(fake.eventsOf(A)[0]!.title).toBe("Moved");
+    expect(await sendsCounted(stub)).toBe(MAIL_LIMITS.sendsPerDay - 1);
+    // An event with one attendee still fits.
+    const one = invited("2027-03-02T09:00:00");
+    expect(await opsWith(stub, production, (ops) => ops.collab(caller, { op: "delete_event", input: { event_ids: [one] } }))).toMatchObject({ ok: true });
+  });
+
+  it("a delete of an event with 15 attendees costs 2", async () => {
+    const { stub, accountId } = await signIn(A);
+    const id = crowd();
+    expect(
+      await opsWith(stub, production, (ops) => ops.collab({ accountId, email: A }, { op: "delete_event", input: { event_ids: [id] } })),
+    ).toMatchObject({ ok: true, value: { deleted: 1, cancellations: 1, cancelled_attendees: 15 } });
+    expect(await sendsCounted(stub)).toBe(2);
+  });
+});
+
+describe("an unknown outcome of a notifying update or delete stays counted", () => {
+  it("an update answer that names the event in neither map is send_unconfirmed, counted, and blocks the identical retry", async () => {
+    const { stub, box } = await signIn(A);
+    const id = invited();
+    rewriteEventSetAnswers((answer) => {
+      answer.updated = null;
+    });
+    await expectCode(box.updateEvent({ event_id: id, title: "Moved" }), "send_unconfirmed");
+    expect(await sendsCounted(stub)).toBe(1);
+    expect(await recentSends(stub)).toEqual([expect.objectContaining({ state: "unconfirmed" })]);
+    vi.stubGlobal("fetch", fake.fetch);
+    await expectCode(box.updateEvent({ event_id: id, title: "Moved" }), "send_unconfirmed");
+    expect(eventSets()).toHaveLength(1);
+  });
+
+  it("an update answer that cannot be read is send_unconfirmed too; a silent update keeps not_found", async () => {
+    const { stub, box } = await signIn(A);
+    const id = invited();
+    const quiet = fake.addEvent(A, { title: "Alone", start: "2027-03-01T09:00:00" }).id;
+    rewriteEventSetAnswers((answer) => {
+      answer.updated = 5;
+    });
+    await expectCode(box.updateEvent({ event_id: id, title: "Moved" }), "send_unconfirmed");
+    expect(await sendsCounted(stub)).toBe(1);
+    rewriteEventSetAnswers((answer) => {
+      answer.updated = null;
+    });
+    await expectCode(box.updateEvent({ event_id: quiet, title: "Renamed" }), "not_found");
+    expect(await sendsCounted(stub)).toBe(1);
+  });
+
+  it("a delete answer that names an event in neither list is send_unconfirmed and keeps the sends", async () => {
+    const { stub, box } = await signIn(A);
+    const one = invited();
+    const two = invited("2027-03-02T09:00:00");
+    rewriteEventSetAnswers((answer) => {
+      answer.destroyed = [one];
+    });
+    await expectCode(box.deleteEvent({ event_ids: [one, two] }), "send_unconfirmed");
+    expect(await sendsCounted(stub)).toBe(2);
+    rewriteEventSetAnswers((answer) => {
+      answer.destroyed = "garbage";
+    });
+    await expectCode(box.deleteEvent({ event_ids: [invited("2027-03-03T09:00:00")] }), "send_unconfirmed");
+    expect(await sendsCounted(stub)).toBe(3);
+  });
+});
+
+describe("a delete that fails half-way", () => {
+  it("reports the cancellations that went out, and names the events of the failed second request", async () => {
+    const { stub, box } = await signIn(A);
+    const meeting = invited();
+    const alone = fake.addEvent(A, { title: "Alone", start: "2027-03-01T09:00:00" }).id;
+    let sets = 0;
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+      const text = init?.body === undefined ? "" : String(init.body);
+      if (text.includes("CalendarEvent/set") && ++sets === 2) throw new TypeError("network down");
+      return fake.fetch(input, init);
+    });
+    expect(await box.deleteEvent({ event_ids: [meeting, alone] })).toEqual({
+      deleted: 1,
+      not_deleted: [alone],
+      cancellations: 1,
+      cancelled_attendees: 1,
+    });
+    expect(fake.schedulingMessages(A)).toEqual([{ kind: "CANCEL", eventId: meeting, attendees: [OK] }]);
+    expect(await sendsCounted(stub)).toBe(1);
+    expect(fake.eventsOf(A).map((e) => e.id)).toEqual([alone]);
   });
 });

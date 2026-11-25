@@ -40,6 +40,15 @@ export async function handleAuthorize(request: Request, env: Env, api: OAuthHelp
     return renderMessagePage({ lang, kind: "failed", status: invalid ? 400 : 500 });
   }
 
+  // How the page names the tool, looked up before the flow is saved: a failing lookup leaves no
+  // transaction behind.
+  let label: { clientName: string; redirectHost: string };
+  try {
+    label = await clientLabel(api, authRequest);
+  } catch {
+    return renderMessagePage({ lang, kind: "failed", status: 500 });
+  }
+
   const { verifier, challenge } = await pkcePair();
   const data: UpstreamData = { codeVerifier: verifier };
   const { state, headers } = await api.beginUpstream(authRequest, { data });
@@ -56,12 +65,6 @@ export async function handleAuthorize(request: Request, env: Env, api: OAuthHelp
   // The page instead of a redirect: users land on a sign-in page they may not know, so it first
   // says whose it is and which login is meant. The cookie that binds the flow to this browser
   // is set here; the link carries exactly what the redirect carried before.
-  let label: { clientName: string; redirectHost: string };
-  try {
-    label = await clientLabel(api, authRequest);
-  } catch {
-    return renderMessagePage({ lang, kind: "failed", status: 500 });
-  }
   const page = renderIntroPage({ lang, ...label, mailHost: new URL(STALWART.origin).host, continueUrl: to.toString() });
   // The flow cookie(s) go onto the page; any other header the library set is taken only where
   // the page has none of its own (both say `no-store`).

@@ -25,6 +25,9 @@ import {
   UpdateContactResult,
   UpdateEventInput,
   UpdateEventResult,
+  canonicalTimeZone,
+  isCleanLine,
+  isCleanText,
 } from "../src/collab";
 import { MAIL_LIMITS } from "../src/mail";
 
@@ -260,7 +263,7 @@ describe("create_contact input", () => {
       phones: [{ number: "+49 30 1234", label: "work" }],
       organization: "Analytical Engines",
       job_title: "Programmer",
-      notes: "Line one\nLine two\r\nLine three",
+      notes: "Line one\nLine two\n\tLine three",
       birthday: "1815-12-10",
       address_book_id: "ab1",
     });
@@ -468,6 +471,34 @@ describe("create_event input", () => {
     }
   });
 
+  it("takes only IANA names (Area/Location or UTC), never an offset or abbreviation, and writes the canonical spelling", () => {
+    for (const time_zone of ["+01:00", "-0530", "GMT", "EST", "CET", "Z", "UTC+1", "utc", "Europe/", "/Berlin", "Europe//Berlin", "Europe/Ber lin"]) {
+      refused(CreateEventInput, { ...timed, time_zone });
+      refused(UpdateEventInput, { event_id: "ev1", start: timed.start, end: timed.end, time_zone });
+    }
+    const zone = (time_zone: string) => {
+      const parsed = CreateEventInput.safeParse({ ...timed, time_zone });
+      return parsed.success ? parsed.data.time_zone : null;
+    };
+    expect(zone("europe/berlin")).toBe("Europe/Berlin");
+    expect(zone("AMERICA/NEW_YORK")).toBe("America/New_York");
+    expect(zone("UTC")).toBe("Etc/UTC");
+    expect(zone("Etc/UTC")).toBe("Etc/UTC");
+    // A name of three parts is an IANA name too; the runtime may resolve it to its canonical link.
+    expect(zone("America/Argentina/Buenos_Aires")).toMatch(/^America\/(Argentina\/)?Buenos_Aires$/);
+    expect(canonicalTimeZone("Europe/Berlin")).toBe("Europe/Berlin");
+    expect(canonicalTimeZone("Mars/Olympus")).toBeNull();
+    expect(canonicalTimeZone("+01:00")).toBeNull();
+  });
+
+  it("needs a year from 1000 to 9999 for a timed event, so no zone turns it into a three-digit or BC year", () => {
+    refused(CreateEventInput, { title: "x", start: "0999-06-01T09:00:00Z", end: "0999-06-01T10:00:00Z" });
+    refused(CreateEventInput, { title: "x", start: "0001-06-01T09:00:00Z", end: "0001-06-01T10:00:00Z" });
+    refused(UpdateEventInput, { event_id: "ev1", start: "0500-06-01T09:00:00Z", end: "0500-06-01T10:00:00Z" });
+    ok(CreateEventInput, { title: "x", start: "1000-06-01T09:00:00Z", end: "1000-06-01T10:00:00Z" });
+    ok(CreateEventInput, { title: "x", start: "9999-06-01T09:00:00Z", end: "9999-06-01T10:00:00Z" });
+  });
+
   it("needs real dates, offsets on instants and a four-digit year", () => {
     for (const date of ["2026-02-30", "2026-13-01", "2026-1-1", "27.11.2026", "2026-11-27T00:00:00Z", "0000-01-01", ""]) {
       refused(CreateEventInput, { title: "x", date });
@@ -554,6 +585,66 @@ describe("create_event input", () => {
       refused(CreateEventInput, { ...timed, recurrence: bad });
     }
     refused(CreateEventInput, { ...timed, recurrence: null });
+  });
+});
+
+describe("clean text in every write input", () => {
+  // Each refused kind: a control character, a line or paragraph separator, a bidi control.
+  const UNSAFE = ["\u0000", "\u0007", "\u001b", "\u007f", "\u0085", "\u2028", "\u2029", "\u202a", "\u202e", "\u2066", "\u2069"];
+
+  it("the rule: single-line text refuses all of them; multi-line text allows line breaks and tabs only", () => {
+    expect(isCleanLine("Ada Lovelace \u00e9\u4e2d")).toBe(true);
+    expect(isCleanText("Line one\nLine two\n\tIndented")).toBe(true);
+    for (const c of [...UNSAFE, "\n", "\r", "\t"]) expect(isCleanLine(`a${c}b`), JSON.stringify(c)).toBe(false);
+    for (const c of [...UNSAFE, "\r", "\u000b", "\u000c"]) expect(isCleanText(`a${c}b`), JSON.stringify(c)).toBe(false);
+  });
+
+  it("contacts: names, organization, job title and phone numbers are single-line, notes multi-line", () => {
+    const fields: Record<string, (v: string) => Record<string, unknown>> = {
+      name: (v) => ({ name: v }),
+      given_name: (v) => ({ name: "x", given_name: v }),
+      surname: (v) => ({ name: "x", surname: v }),
+      organization: (v) => ({ name: "x", organization: v }),
+      job_title: (v) => ({ name: "x", job_title: v }),
+      phone: (v) => ({ name: "x", phones: [{ number: v }] }),
+    };
+    for (const [field, input] of Object.entries(fields)) {
+      ok(CreateContactInput, input("Ada \u00e9"));
+      ok(UpdateContactInput, { contact_id: "ct1", ...input("Ada \u00e9") });
+      for (const c of [...UNSAFE, "\t"]) {
+        expect(CreateContactInput.safeParse(input(`a${c}b`)).success, `${field} ${JSON.stringify(c)}`).toBe(false);
+        expect(UpdateContactInput.safeParse({ contact_id: "ct1", ...input(`a${c}b`) }).success, `${field} ${JSON.stringify(c)}`).toBe(false);
+      }
+    }
+    ok(CreateContactInput, { name: "x", notes: "One\n\tTwo" });
+    ok(UpdateContactInput, { contact_id: "ct1", notes: "One\n\tTwo" });
+    for (const c of [...UNSAFE, "\r"]) {
+      refused(CreateContactInput, { name: "x", notes: `a${c}b` });
+      refused(UpdateContactInput, { contact_id: "ct1", notes: `a${c}b` });
+    }
+  });
+
+  it("events: title, location and participant names are single-line, description multi-line", () => {
+    const timed = { start: "2026-11-27T09:00:00Z", end: "2026-11-27T10:00:00Z" };
+    const fields: Record<string, (v: string) => Record<string, unknown>> = {
+      title: (v) => ({ title: v }),
+      location: (v) => ({ location: v }),
+      participant: (v) => ({ participants: [{ email: "ada@example.org", name: v }] }),
+    };
+    for (const [field, input] of Object.entries(fields)) {
+      ok(CreateEventInput, { title: "x", ...timed, ...input("Room \u00e9") });
+      ok(UpdateEventInput, { event_id: "ev1", ...input("Room \u00e9") });
+      for (const c of [...UNSAFE, "\t"]) {
+        expect(CreateEventInput.safeParse({ title: "x", ...timed, ...input(`a${c}b`) }).success, `${field} ${JSON.stringify(c)}`).toBe(false);
+        expect(UpdateEventInput.safeParse({ event_id: "ev1", ...input(`a${c}b`) }).success, `${field} ${JSON.stringify(c)}`).toBe(false);
+      }
+    }
+    ok(CreateEventInput, { title: "x", ...timed, description: "Agenda\n\t1. Item" });
+    ok(UpdateEventInput, { event_id: "ev1", description: "Agenda\n\t1. Item" });
+    for (const c of [...UNSAFE, "\r"]) {
+      refused(CreateEventInput, { title: "x", ...timed, description: `a${c}b` });
+      refused(UpdateEventInput, { event_id: "ev1", description: `a${c}b` });
+    }
   });
 });
 

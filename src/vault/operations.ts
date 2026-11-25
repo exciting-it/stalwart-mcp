@@ -9,6 +9,10 @@
  * is a send too: the same allow-list, the same daily counter (one per notified event) and, for a
  * create or update, the same dedupe. Whether it notifies is decided here (`event-notices.ts`); the
  * adapter only reads the event and writes with that decision.
+ *
+ * The event writes of one mailbox run one after the other (`#oneEventWriteAtATime`): an update
+ * reads the event, decides and writes, and no other event write may change the event in between,
+ * or a write decided as "notifies only allow-listed people" could notify someone else.
  */
 import {
   type CollabUpstream,
@@ -41,7 +45,7 @@ import { JmapCollabAdapter } from "../jmap/jmap-collab-adapter";
 import { JmapMailboxAdapter } from "../jmap/jmap-mailbox-adapter";
 import { batchResult } from "../jmap/map";
 import { recipientsAllowed } from "../policy/environment";
-import { createNotice, deleteNotice, updateNotice } from "./event-notices";
+import { createNotice, deleteNotice, sendsFor, updateNotice } from "./event-notices";
 import {
   confirmSend,
   dropSend,
@@ -122,6 +126,8 @@ export class MailboxOperations {
   readonly #slots = new Slots(MAIL_LIMITS.upstreamConcurrency);
   /** Sends (and notifying event writes) on their way upstream, by fingerprint: an identical one awaits it. */
   readonly #sendsInFlight = new Map<string, Promise<unknown>>();
+  /** Settles when the event write before the latest one is done: the tail of the event-write queue. */
+  #eventWriteQueue: Promise<void> = Promise.resolve();
 
   constructor(opts: { sql: SqlStorage; env: Env; withAccessToken: WithAccessToken }) {
     this.#sql = opts.sql;
@@ -173,11 +179,11 @@ export class MailboxOperations {
     }, (req): Promise<CollabValue> => {
       switch (req.op) {
         case "create_event":
-          return this.#createEvent(accountId, req.input);
+          return this.#sharedOrQueued("create_event", req.input, () => this.#createEvent(accountId, req.input));
         case "update_event":
-          return this.#updateEvent(accountId, req.input);
+          return this.#sharedOrQueued("update_event", req.input, () => this.#updateEvent(accountId, req.input));
         case "delete_event":
-          return this.#deleteEvent(accountId, req.input);
+          return this.#oneEventWriteAtATime(() => this.#deleteEvent(accountId, req.input));
       }
       return this.#collabUpstream(accountId, (a): Promise<CollabValue> => {
         switch (req.op) {
@@ -206,13 +212,48 @@ export class MailboxOperations {
     const { accountId } = caller;
     return this.#operation("sendMail", caller, () => parse(SendMailInput, input), async (message) => {
       this.#requireAllowed([...message.to, ...message.cc, ...message.bcc]);
-      return this.#exactlyOnce<SendResult>(await sendFingerprint(message), {
+      return this.#exactlyOnce<SendResult>(await sendFingerprint(message), 1, {
         send: () => this.#upstream(accountId, (a) => a.sendMail(message)),
         record: (sent) => ({ message_id: sent.message_id, recipients: sent.recipients }),
         again: (sent) => ({ ...sent, deduplicated: true }),
         recorded: (sent) => ({ ...sent, deduplicated: true }),
       });
     });
+  }
+
+  /**
+   * Runs `task` once every event write queued before it is done (also when one of them failed),
+   * and holds the next one back until `task` is done: read, decide and write of one event write
+   * never interleave with another's.
+   */
+  async #oneEventWriteAtATime<T>(task: () => Promise<T>): Promise<T> {
+    const before = this.#eventWriteQueue;
+    let done!: () => void;
+    this.#eventWriteQueue = new Promise<void>((resolve) => (done = resolve));
+    try {
+      await before;
+      return await task();
+    } finally {
+      done();
+    }
+  }
+
+  /**
+   * A create or update identical to a notifying one on its way upstream shares that one's result,
+   * as an identical send does; any other waits for its turn in the event-write queue.
+   */
+  async #sharedOrQueued<T>(
+    op: "create_event" | "update_event",
+    input: CreateEventInputT | UpdateEventInputT,
+    task: () => Promise<T>,
+  ): Promise<T> {
+    const fingerprint = await eventWriteFingerprint(op, input);
+    const inFlight = this.#sendsInFlight.get(fingerprint) as Promise<T> | undefined;
+    if (inFlight) {
+      const first = await inFlight;
+      return (op === "create_event" ? { ...first, deduplicated: true } : first) as T;
+    }
+    return this.#oneEventWriteAtATime(task);
   }
 
   /** A notifying create is a send: allow-listed attendees only, counted, deduplicated. */
@@ -224,7 +265,7 @@ export class MailboxOperations {
     }
     this.#requireAllowed(notice.addresses);
     const invitations = notice.addresses.length;
-    return this.#exactlyOnce<CreateEventResultT>(await eventWriteFingerprint("create_event", input), {
+    return this.#exactlyOnce<CreateEventResultT>(await eventWriteFingerprint("create_event", input), sendsFor(notice), {
       send: async () => ({
         ...(await this.#collabUpstream(accountId, (a) => a.createEvent(input, true))),
         invitations,
@@ -241,20 +282,25 @@ export class MailboxOperations {
 
   /**
    * The event is read first: its attendees before the update, and when it ends. An update that
-   * notifies is a send like a create; one that does not is passed on as it is.
+   * notifies is a send like a create; one that does not is passed on as it is. A meeting someone
+   * else organized is only changed in the mailbox's own copy, never notifying, and its
+   * participants and recurrence cannot be changed (`invalid_input`, nothing written).
    */
   async #updateEvent(accountId: string, input: UpdateEventInputT): Promise<UpdateEventResultT> {
     const audience = (await this.#collabUpstream(accountId, (a) => a.eventAudiences([input.event_id]))).get(input.event_id);
     if (audience === undefined) throw new MailError("not_found");
+    if (!audience.organizedByMailbox && (input.participants !== undefined || input.recurrence !== undefined)) {
+      throw new MailError("invalid_input");
+    }
     const notice = updateNotice(input, audience, clock.now());
     if (!notice.notify) {
-      const updated = await this.#collabUpstream(accountId, (a) => a.updateEvent(input, false));
+      const updated = await this.#collabUpstream(accountId, (a) => a.updateEvent(input, false, audience));
       return { ...updated, invitations: 0 };
     }
     this.#requireAllowed(notice.addresses);
     const invitations = notice.addresses.length;
-    return this.#exactlyOnce<UpdateEventResultT>(await eventWriteFingerprint("update_event", input), {
-      send: async () => ({ ...(await this.#collabUpstream(accountId, (a) => a.updateEvent(input, true))), invitations }),
+    return this.#exactlyOnce<UpdateEventResultT>(await eventWriteFingerprint("update_event", input), sendsFor(notice), {
+      send: async () => ({ ...(await this.#collabUpstream(accountId, (a) => a.updateEvent(input, true, audience))), invitations }),
       record: (r) => ({ message_id: r.event_id, recipients: r.invitations }),
       again: (r) => r,
       recorded: (sent) => ({ event_id: sent.message_id, invitations: sent.recipients }),
@@ -262,11 +308,13 @@ export class MailboxOperations {
   }
 
   /**
-   * The events are read first. Every event that notifies costs one send, reserved all at once
-   * before anything is deleted: when fewer are left, nothing is deleted. Those events go in one
-   * `/set` with `sendSchedulingMessages: true`, the others in a second one with `false`. Sends of
-   * events that were definitely not deleted are given back; after an unknown outcome they stay.
-   * No dedupe: a repeated call finds nothing left to delete, so it notifies nobody.
+   * The events are read first. Every event that notifies costs one send (one per started ten
+   * addresses), reserved all at once before anything is deleted: when fewer are left, nothing is
+   * deleted. Those events go in one `/set` with `sendSchedulingMessages: true`, the others in a
+   * second one with `false`. Sends of events that were definitely not deleted are given back; after
+   * an unknown outcome they stay. When the second request fails after the first went through, the
+   * result still reports the first (its cancellations went out) and names the others as not
+   * deleted. No dedupe: a repeated call finds nothing left to delete, so it notifies nobody.
    */
   async #deleteEvent(accountId: string, input: DeleteEventInputT): Promise<DeleteEventResultT> {
     const ids = [...new Set(input.event_ids)];
@@ -279,21 +327,31 @@ export class MailboxOperations {
     let cancelled: string[] = [];
     if (notifying.length > 0) {
       this.#requireAllowed(notifying.flatMap((id) => notices.get(id)!.addresses));
-      const day = takeSends(this.#sql, now, notifying.length);
+      const cost = (list: string[]) => list.reduce((n, id) => n + sendsFor(notices.get(id)!), 0);
+      const day = takeSends(this.#sql, now, cost(notifying));
       if (day === null) throw new MailError("send_limit_reached");
       let outcome: DestroyOutcome;
       try {
         outcome = await this.#collabUpstream(accountId, (a) => a.deleteEvents(notifying, true));
       } catch (e) {
         // Definite (refused, or never sent): nothing went out. Otherwise it may have: kept.
-        if (e instanceof MailError && e.code !== "send_unconfirmed") releaseSends(this.#sql, day, notifying.length);
+        if (e instanceof MailError && e.code !== "send_unconfirmed") releaseSends(this.#sql, day, cost(notifying));
         throw e;
       }
-      releaseSends(this.#sql, day, outcome.notDeleted.length);
+      releaseSends(this.#sql, day, cost(outcome.notDeleted));
       cancelled = outcome.deleted;
       outcomes.push(outcome);
     }
-    if (silent.length > 0) outcomes.push(await this.#collabUpstream(accountId, (a) => a.deleteEvents(silent, false)));
+    if (silent.length > 0) {
+      try {
+        outcomes.push(await this.#collabUpstream(accountId, (a) => a.deleteEvents(silent, false)));
+      } catch (e) {
+        // Nothing went out before: the error is the answer. Otherwise cancellations did, and the
+        // result must say so; the silent events count as not deleted.
+        if (outcomes.length === 0) throw e;
+        outcomes.push({ deleted: [], notDeleted: silent, unknownOnly: false });
+      }
+    }
     return {
       ...batchResult(outcomes),
       cancellations: cancelled.length,
@@ -308,11 +366,12 @@ export class MailboxOperations {
 
   /**
    * Runs `send` at most once per fingerprint within the dedupe window, counted against the daily
-   * send limit. An identical call in flight awaits it (`again`); one already confirmed answers
+   * send limit as `sends` sends. An identical call in flight awaits it (`again`); one already confirmed answers
    * from its row (`recorded`); one whose outcome is unknown is `send_unconfirmed`.
    */
   async #exactlyOnce<T>(
     fingerprint: string,
+    sends: number,
     o: {
       send: () => Promise<T>;
       record: (result: T) => RecordedSend;
@@ -329,10 +388,10 @@ export class MailboxOperations {
     if (recent?.state === "sent") return o.recorded(recent.sent);
     // Unconfirmed, or pending with no twin in this instance (the object restarted mid-send).
     if (recent) throw new MailError("send_unconfirmed");
-    const day = reserveSend(this.#sql, fingerprint, now);
+    const day = reserveSend(this.#sql, fingerprint, now, sends);
     if (day === null) throw new MailError("send_limit_reached");
 
-    const sending = this.#submit(fingerprint, day, o.send, o.record);
+    const sending = this.#submit(fingerprint, day, sends, o.send, o.record);
     this.#sendsInFlight.set(fingerprint, sending);
     try {
       return await sending;
@@ -342,7 +401,13 @@ export class MailboxOperations {
   }
 
   /** The send itself, with its day reserved and its `pending` row written. */
-  async #submit<T>(fingerprint: string, day: number, send: () => Promise<T>, record: (result: T) => RecordedSend): Promise<T> {
+  async #submit<T>(
+    fingerprint: string,
+    day: number,
+    sends: number,
+    send: () => Promise<T>,
+    record: (result: T) => RecordedSend,
+  ): Promise<T> {
     let sent: T;
     try {
       sent = await send();
@@ -351,7 +416,7 @@ export class MailboxOperations {
       // never left (`withAccessToken` repeats the call only after a 401, when nothing was
       // processed). Anything else is not understood, so it is kept as unknown, like
       // `send_unconfirmed`: counted, and an identical send is refused for the dedupe window.
-      if (e instanceof MailError && e.code !== "send_unconfirmed") dropSend(this.#sql, fingerprint, day);
+      if (e instanceof MailError && e.code !== "send_unconfirmed") dropSend(this.#sql, fingerprint, day, sends);
       else markSendUnconfirmed(this.#sql, fingerprint);
       throw e;
     }

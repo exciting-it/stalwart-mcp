@@ -4,7 +4,7 @@ import { COLLAB_LIMITS, type CollabUpstream } from "../src/collab";
 import { fetchSession, jmapCall } from "../src/jmap/jmap-client";
 import { chooseTarget } from "../src/jmap/collab-map";
 import { JmapCollabAdapter } from "../src/jmap/jmap-collab-adapter";
-import { createdOrThrow, destroyResult, requireUpdated } from "../src/jmap/map";
+import { createdOrThrow, destroyOutcome, destroyResult, requireUpdated } from "../src/jmap/map";
 import { STALWART } from "../src/stalwart/endpoints";
 import { createFakeStalwart, type FakeStalwart, type RecordedRequest } from "./fake-stalwart";
 
@@ -1653,6 +1653,54 @@ describe("writing events", () => {
       ]);
     });
 
+    it("reads a wall-clock time that occurs twice as its first occurrence, in the duration and in the fake", async () => {
+      fake.addMailbox(A);
+      const adapter = await adapterFor(A);
+      // 02:30 on 25 October 2026 occurs twice in Berlin (CEST, then CET). The end is the second
+      // 02:45 (CET); the day boundary of the duration lands on the FIRST 02:30 (CEST), so 1h15m
+      // remain, not 15 minutes (which would end the event an hour early).
+      const { event_id } = await adapter.createEvent(
+        { title: "t", start: "2026-10-24T02:30:00+02:00", end: "2026-10-25T02:45:00+01:00", time_zone: "Europe/Berlin" },
+        false,
+      );
+      expect((lastEventSet().create as { e: Record<string, unknown> }).e).toMatchObject({
+        start: "2026-10-24T02:30:00",
+        timeZone: "Europe/Berlin",
+        duration: "P1DT1H15M",
+      });
+      // The fake reads the repeated 02:30 as its first occurrence too: the event ends where the input did.
+      expect((await adapter.readEvent({ event_id })).event).toMatchObject({ start: "2026-10-24T00:30:00Z", end: "2026-10-25T01:45:00Z" });
+      // A time that starts in the repeated hour is its first occurrence as well.
+      const second = await adapter.createEvent(
+        { title: "t", start: "2026-10-25T02:30:00+02:00", end: "2026-10-25T02:40:00+02:00", time_zone: "Europe/Berlin" },
+        false,
+      );
+      expect((lastEventSet().create as { e: Record<string, unknown> }).e).toMatchObject({ start: "2026-10-25T02:30:00", duration: "PT10M" });
+      expect((await adapter.readEvent({ event_id: second.event_id })).event).toMatchObject({
+        start: "2026-10-25T00:30:00Z",
+        end: "2026-10-25T00:40:00Z",
+      });
+    });
+
+    it("refuses an instant whose wall-clock year in the zone is not a four-digit year of the common era", async () => {
+      fake.addMailbox(A);
+      const adapter = await adapterFor(A);
+      const sets = eventSets().length;
+      // Late on 31 December 9999 in UTC is already the year 10000 in Tokyo.
+      await expectMailError(
+        adapter.createEvent({ title: "t", start: "9999-12-31T20:00:00Z", end: "9999-12-31T21:00:00Z", time_zone: "Asia/Tokyo" }, false),
+        "invalid_input",
+      );
+      // Early on 1 January 1000 in UTC is still the year 999 in Los Angeles.
+      await expectMailError(
+        adapter.createEvent({ title: "t", start: "1000-01-01T01:00:00Z", end: "1000-01-01T02:00:00Z", time_zone: "America/Los_Angeles" }, false),
+        "invalid_input",
+      );
+      expect(eventSets()).toHaveLength(sets);
+      await adapter.createEvent({ title: "t", start: "1000-01-02T09:00:00Z", end: "1000-01-02T10:00:00Z", time_zone: "Europe/Berlin" }, false);
+      expect((lastEventSet().create as { e: Record<string, unknown> }).e.start).toMatch(/^1000-01-02T/);
+    });
+
     it("with participants and a rule: the server's property names, the mailbox as organizer, and invitations when asked", async () => {
       const { accountId } = fake.addMailbox(A);
       const adapter = await adapterFor(A);
@@ -1949,9 +1997,22 @@ describe("writing events", () => {
         attendees: [OK, "other@test.example", "boss@example.org"],
         end: Date.parse("2031-03-03T10:00:00Z"),
         recurring: false,
+        organizedByMailbox: false,
+        timeZone: "Europe/Berlin",
+        participants: [
+          { email: OK, name: null, status: null },
+          { email: "other@test.example", name: null, status: null },
+        ],
       });
       // Floating: a day to spare.
-      expect(audiences.get(allDay)).toEqual({ attendees: [], end: Date.parse("2031-03-05T00:00:00Z"), recurring: false });
+      expect(audiences.get(allDay)).toEqual({
+        attendees: [],
+        end: Date.parse("2031-03-05T00:00:00Z"),
+        recurring: false,
+        organizedByMailbox: true,
+        timeZone: null,
+        participants: [],
+      });
       expect(audiences.get(series)).toMatchObject({ recurring: true });
       expect(audiences.get(`${series}-20310304T090000`)).toMatchObject({ recurring: true });
       const [request] = jmapRequests().slice(-1);
@@ -2024,6 +2085,33 @@ describe("writing events", () => {
       ...extra,
     });
     const attendee = (address: string) => ({ calendarAddress: `mailto:${address}`, roles: { required: true } });
+
+    it("answers the organizer (REPLY) for someone else's meeting when asked to schedule, never its attendees", async () => {
+      fake.addMailbox(A);
+      const adapter = await adapterFor(A);
+      const theirs = () =>
+        fake.addEvent(A, {
+          start: "2031-03-03T09:00:00",
+          organizerCalendarAddress: "mailto:Boss@Example.org",
+          participants: {
+            b: { calendarAddress: "mailto:boss@example.org", roles: { owner: true } },
+            me: attendee(A),
+            o: attendee(OK),
+          },
+        }).id;
+      const one = theirs();
+      const two = theirs();
+      await adapter.updateEvent({ event_id: one, title: "Mine" }, true);
+      expect(await adapter.deleteEvents([two], true)).toMatchObject({ deleted: [two] });
+      expect(fake.schedulingMessages(A)).toEqual([
+        { kind: "REPLY", eventId: one, attendees: ["boss@example.org"] },
+        { kind: "REPLY", eventId: two, attendees: ["boss@example.org"] },
+      ]);
+      // Without sendSchedulingMessages nothing is sent.
+      await adapter.updateEvent({ event_id: one, title: "Quiet" }, false);
+      expect(await adapter.deleteEvents([one], false)).toMatchObject({ deleted: [one] });
+      expect(fake.schedulingMessages(A)).toHaveLength(2);
+    });
 
     it("keeps unknown property names as inert data: recurrenceRules does not recur, sendTo is no attendee", async () => {
       fake.addMailbox(A);
@@ -2151,6 +2239,37 @@ describe("reading the answer of a /set", () => {
     expect(code(() => requireUpdated({}, "x"))).toBe("not_found");
     expect(code(() => requireUpdated({ updated: { y: null } }, "x"))).toBe("not_found");
     expect(code(() => requireUpdated({ updated: 5 }, "x"))).toBe("upstream_rejected");
+  });
+
+  it("a notifying update or destroy whose answer shows nothing is send_unconfirmed; a silent one keeps its mapping", () => {
+    const code = (fn: () => unknown) => {
+      try {
+        fn();
+      } catch (e) {
+        return (e as MailError).code;
+      }
+      return "done";
+    };
+    // Notifying: the server may have sent mail.
+    expect(code(() => requireUpdated({}, "x", true))).toBe("send_unconfirmed");
+    expect(code(() => requireUpdated({ updated: { y: null } }, "x", true))).toBe("send_unconfirmed");
+    expect(code(() => requireUpdated({ updated: 5 }, "x", true))).toBe("send_unconfirmed");
+    expect(code(() => requireUpdated({ updated: { x: null } }, "x", true))).toBe("done");
+    expect(code(() => requireUpdated({ notUpdated: { x: { type: "notFound" } } }, "x", true))).toBe("not_found");
+    expect(code(() => requireUpdated({ notUpdated: { x: { type: "forbidden" } } }, "x", true))).toBe("upstream_rejected");
+    expect(code(() => destroyOutcome({ destroyed: ["x"] }, ["x", "y"], true))).toBe("send_unconfirmed");
+    expect(code(() => destroyOutcome({}, ["x"], true))).toBe("send_unconfirmed");
+    expect(code(() => destroyOutcome({ destroyed: "x" }, ["x"], true))).toBe("send_unconfirmed");
+    expect(destroyOutcome({ destroyed: ["x"], notDestroyed: { y: { type: "notFound" } } }, ["x", "y"], true)).toEqual({
+      deleted: ["x"],
+      notDeleted: ["y"],
+      unknownOnly: true,
+    });
+    // Silent: as before.
+    expect(code(() => requireUpdated({}, "x", false))).toBe("not_found");
+    expect(code(() => requireUpdated({ updated: 5 }, "x", false))).toBe("upstream_rejected");
+    expect(destroyOutcome({ destroyed: ["x"] }, ["x", "y"], false)).toEqual({ deleted: ["x"], notDeleted: ["y"], unknownOnly: true });
+    expect(code(() => destroyOutcome({ destroyed: "x" }, ["x"], false))).toBe("upstream_rejected");
   });
 
   it("destroy: destroyed ids are deleted and the others named; none deleted is not_found only if every refusal is", () => {

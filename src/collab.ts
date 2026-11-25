@@ -89,6 +89,16 @@ export const SearchEventsInputBase = z
 const fourDigitYear = (instant: string): boolean =>
   !Number.isNaN(Date.parse(instant)) && /^\d{4}-/.test(new Date(instant).toISOString());
 
+/**
+ * The time of an event write is written as a wall-clock time with a four-digit year in its zone;
+ * an instant before the year 1000 (in UTC) is refused, so no zone can turn it into a year of
+ * three digits or one before the common era.
+ */
+const writableYear = (instant: string): boolean => {
+  const year = new Date(instant).getUTCFullYear();
+  return !Number.isNaN(Date.parse(instant)) && year >= 1000 && year <= 9999;
+};
+
 export const SearchEventsInput = SearchEventsInputBase.superRefine((m, ctx) => {
   for (const key of ["after", "before"] as const) {
     if (!fourDigitYear(m[key])) {
@@ -112,10 +122,30 @@ export const ReadEventInput = z.object({ event_id: MailIdSchema }).strict();
 
 // ---- write inputs ----
 
+/**
+ * The one rule for text the write tools accept. Single-line text (names, title, location,
+ * organization, job title, phone number) carries no control character (`\p{Cc}`, line breaks
+ * included), no line or paragraph separator (U+2028, U+2029) and no bidi control (U+202A to
+ * U+202E, U+2066 to U+2069): none of them can smuggle a second property into a card or event, or
+ * make a name read differently than it is stored. Multi-line text (`notes`, `description`) may
+ * also carry `\n` and `\t`, nothing else of that list.
+ */
+const UNSAFE_IN_LINE = /[\p{Cc}\u2028\u2029\u202A-\u202E\u2066-\u2069]/u;
+const UNSAFE_IN_TEXT = /[^\P{Cc}\n\t]|[\u2028\u2029\u202A-\u202E\u2066-\u2069]/u;
+
+/** True when `value` is clean single-line text (see `UNSAFE_IN_LINE`). */
+export const isCleanLine = (value: string): boolean => !UNSAFE_IN_LINE.test(value);
+/** True when `value` is clean multi-line text: line breaks (`\n`) and tabs allowed. */
+export const isCleanText = (value: string): boolean => !UNSAFE_IN_TEXT.test(value);
+
+const CLEAN_LINE = "No control, separator or bidi characters.";
+
 /** Single-line text: no line break, so it cannot smuggle a second property into a card or event. */
-const singleLine = (max: number) => z.string().min(1).max(max).regex(/^[^\r\n]*$/);
+const singleLine = (max: number) => z.string().min(1).max(max).regex(/^[^\r\n]*$/).refine(isCleanLine, CLEAN_LINE);
 /** Like `singleLine`, but an empty string is allowed: in an update it clears the property. */
-const clearableLine = (max: number) => z.string().max(max).regex(/^[^\r\n]*$/);
+const clearableLine = (max: number) => z.string().max(max).regex(/^[^\r\n]*$/).refine(isCleanLine, CLEAN_LINE);
+/** Multi-line text (`notes`, `description`): line breaks and tabs, nothing else of the unsafe list. */
+const multiLine = (max: number) => z.string().max(max).refine(isCleanText, CLEAN_LINE);
 
 const Label = z.enum(["work", "private"]);
 
@@ -152,7 +182,7 @@ const ContactFieldsShape = {
     .optional(),
   organization: clearableLine(COLLAB_LIMITS.lineChars).optional(),
   job_title: clearableLine(COLLAB_LIMITS.lineChars).optional(),
-  notes: z.string().max(COLLAB_LIMITS.notesChars).optional(),
+  notes: multiLine(COLLAB_LIMITS.notesChars).optional(),
   birthday: Birthday.optional(),
 };
 
@@ -189,19 +219,40 @@ const DeleteIds = <K extends string>(key: K) =>
 
 export const DeleteContactInput = DeleteIds("contact_ids");
 
-/** A time zone is valid when the runtime's `Intl` knows it. */
+/** An IANA name: `Area/Location` (one or more `/` parts) or `UTC`; never an offset or an abbreviation. */
+const IANA_ZONE = /^(?:UTC|[A-Za-z0-9_+-]+(?:\/[A-Za-z0-9_+-]+)+)$/;
+
+/** The zone written for UTC: `Etc/UTC`, whichever spelling the runtime resolves UTC to. */
+export const UTC_ZONE = "Etc/UTC";
+
+/**
+ * The canonical spelling of an IANA time zone name (`europe/berlin` is `Europe/Berlin`), or null
+ * when `zone` is not of the IANA form or the runtime's `Intl` does not know it. UTC is `Etc/UTC`.
+ */
+export function canonicalTimeZone(zone: string): string | null {
+  if (!IANA_ZONE.test(zone)) return null;
+  let resolved: string;
+  try {
+    resolved = new Intl.DateTimeFormat("en-US", { timeZone: zone }).resolvedOptions().timeZone;
+  } catch {
+    return null;
+  }
+  return resolved === "UTC" || resolved === UTC_ZONE ? UTC_ZONE : resolved;
+}
+
+/** A time zone: an IANA name the runtime knows, written in its canonical spelling. */
 const TimeZone = z
   .string()
   .min(1)
   .max(COLLAB_LIMITS.lineChars)
-  .refine((zone) => {
-    try {
-      new Intl.DateTimeFormat("en-US", { timeZone: zone });
-      return true;
-    } catch {
-      return false;
+  .transform((zone, ctx) => {
+    const canonical = canonicalTimeZone(zone);
+    if (canonical === null) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Not an IANA time zone name." });
+      return z.NEVER;
     }
-  }, "Not a time zone.");
+    return canonical;
+  });
 
 /** Someone an event invites: the mail server sends them the invitation, updates and the cancellation. */
 export const EventParticipant = z
@@ -229,7 +280,7 @@ const EventFieldsShape = {
   date: CalendarDate.optional(),
   days: z.number().int().min(1).max(COLLAB_LIMITS.eventDaysMax).optional(),
   location: clearableLine(COLLAB_LIMITS.lineChars).optional(),
-  description: z.string().max(COLLAB_LIMITS.descriptionChars).optional(),
+  description: multiLine(COLLAB_LIMITS.descriptionChars).optional(),
   participants: z.array(EventParticipant).max(COLLAB_LIMITS.eventParticipantsMax).optional(),
 };
 
@@ -254,7 +305,7 @@ function refineEventTime(m: EventTimeFields, ctx: z.RefinementCtx): void {
   if (m.time_zone !== undefined && !timed) return issue(ctx, "time_zone", "time_zone is only for a timed event (with start and end).");
   if (m.start !== undefined && m.end !== undefined) {
     for (const key of ["start", "end"] as const) {
-      if (!fourDigitYear(m[key]!)) return issue(ctx, key, "The year must be between 0000 and 9999.");
+      if (!writableYear(m[key]!)) return issue(ctx, key, "The year must be between 1000 and 9999.");
     }
     const span = Date.parse(m.end) - Date.parse(m.start);
     if (!(span > 0)) return issue(ctx, "end", "end must be later than start.");
@@ -509,6 +560,22 @@ export interface EventAudience {
   end: number | null;
   /** A series, or one occurrence of one. */
   recurring: boolean;
+  /**
+   * True when the mailbox organizes the event: its organizer is the mailbox's own address, or it
+   * names no organizer. Otherwise someone else's meeting: a write only changes the mailbox's copy.
+   */
+  organizedByMailbox: boolean;
+  /** The event's own time zone; null for a floating or all-day event. */
+  timeZone: string | null;
+  /** The stored participants with a calendar address other than the mailbox's, with what they answered. */
+  participants: StoredParticipant[];
+}
+
+/** A participant as the event stores it: lower-cased address, name and answer (`participationStatus`). */
+export interface StoredParticipant {
+  email: string;
+  name: string | null;
+  status: string | null;
 }
 
 /**
@@ -519,7 +586,12 @@ export interface CalendarEventWriter {
   /** The audience of each id that names an event (or occurrence) of this account; unknown ids are missing. */
   eventAudiences(ids: string[]): Promise<Map<string, EventAudience>>;
   createEvent(input: CreateEventInputT, notify: boolean): Promise<{ event_id: string; calendar_id: string }>;
-  updateEvent(input: UpdateEventInputT, notify: boolean): Promise<{ event_id: string }>;
+  /**
+   * `current` is what the vault read of the event (`eventAudiences`): its time zone is kept for a
+   * new time without `time_zone`, and kept participants keep their answers. Without it, a new
+   * time is in UTC and every participant starts as not yet answered.
+   */
+  updateEvent(input: UpdateEventInputT, notify: boolean, current?: EventAudience): Promise<{ event_id: string }>;
   /** One `/set` destroying `ids`; never throws for ids that were not deleted. */
   deleteEvents(ids: string[], notify: boolean): Promise<DestroyOutcome>;
 }

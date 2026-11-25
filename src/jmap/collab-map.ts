@@ -12,6 +12,7 @@ import {
   type CreateEventInputT,
   type EventAudience,
   type EventRecurrenceT,
+  type StoredParticipant,
   type UpdateEventInputT,
   type UpdateContactInputT,
   type ContactSummary,
@@ -550,29 +551,50 @@ export function eventFilter(input: SearchEventsInputT): Record<string, unknown> 
 
 const DAY_MS = 86_400_000;
 
-/** The wall-clock time of `instant` in `zone` as a JMAP LocalDateTime (`YYYY-MM-DDTHH:MM:SS`). */
+/**
+ * The wall-clock time of `instant` in `zone` as a JMAP LocalDateTime (`YYYY-MM-DDTHH:MM:SS`). Only
+ * a year of the common era from 1000 to 9999 has the four digits a LocalDateTime needs; any other
+ * (and a zone the runtime does not know) is `invalid_input`, never a wrong year.
+ */
 function wallClock(instant: number, zone: string): string {
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone: zone,
-    hourCycle: "h23",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-  }).formatToParts(new Date(instant));
-  const part = (type: string) => parts.find((p) => p.type === type)!.value;
-  return `${part("year").padStart(4, "0")}-${part("month")}-${part("day")}T${part("hour")}:${part("minute")}:${part("second")}`;
+  let parts: Intl.DateTimeFormatPart[];
+  try {
+    parts = new Intl.DateTimeFormat("en-US", {
+      timeZone: zone,
+      hourCycle: "h23",
+      era: "short",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+    }).formatToParts(new Date(instant));
+  } catch {
+    throw new MailError("invalid_input");
+  }
+  const part = (type: string) => parts.find((p) => p.type === type)?.value ?? "";
+  const year = Number(part("year"));
+  if (part("era") !== "AD" || !Number.isInteger(year) || year < 1000 || year > 9999) throw new MailError("invalid_input");
+  return `${part("year")}-${part("month")}-${part("day")}T${part("hour")}:${part("minute")}:${part("second")}`;
 }
 
 /** A LocalDateTime read as if it were UTC (ms): only for arithmetic on wall-clock times. */
 const asUtc = (local: string): number => Date.parse(`${local}Z`);
 
-/** The instant of a LocalDateTime in `zone` (both offsets around a DST change are tried). */
+/**
+ * The instant of a LocalDateTime in `zone`. A wall-clock time that occurs twice (the hour the
+ * clocks go back) is its FIRST occurrence, as RFC 5545 and RFC 8984 read it. One that does not
+ * occur (the hour the clocks skip) is read with the offset before the change, so an hour later.
+ */
 function instantOf(local: string, zone: string): number {
   const guess = asUtc(local);
   const offset = (t: number) => asUtc(wallClock(t, zone)) - t;
+  // The offsets in force within a day of `local`: each that maps back to `local` is a reading of it.
+  const readings = [...new Set([offset(guess - DAY_MS), offset(guess), offset(guess + DAY_MS)])]
+    .map((o) => guess - o)
+    .filter((t) => wallClock(t, zone) === local);
+  if (readings.length > 0) return Math.min(...readings);
   const first = guess - offset(guess);
   return guess - offset(first);
 }
@@ -597,12 +619,15 @@ function eventDuration(start: number, end: number, zone: string): string {
 
 type EventTime = Pick<CreateEventInputT, "start" | "end" | "time_zone" | "date" | "days">;
 
-/** The four time properties of an event, from the timed or the all-day form of the input. */
-function timeProperties(t: EventTime): Record<string, unknown> {
+/**
+ * The four time properties of an event, from the timed or the all-day form of the input. A time
+ * without `time_zone` is in `defaultZone`: UTC for a new event, the event's own zone for an update.
+ */
+function timeProperties(t: EventTime, defaultZone: string = EVENT_TIME_ZONE): Record<string, unknown> {
   if (t.date !== undefined) {
     return { start: `${t.date}T00:00:00`, timeZone: null, duration: `P${t.days ?? 1}D`, showWithoutTime: true };
   }
-  const zone = t.time_zone ?? EVENT_TIME_ZONE;
+  const zone = t.time_zone ?? defaultZone;
   const start = Date.parse(t.start!);
   return {
     start: wallClock(start, zone),
@@ -616,9 +641,16 @@ const mailto = (address: string): string => `mailto:${address}`;
 
 /**
  * The participants of an event the mailbox organizes: the mailbox itself as owner, then each
- * attendee as required and asked to reply. `calendarAddress` is what the server schedules by.
+ * attendee as required. `calendarAddress` is what the server schedules by. An attendee already on
+ * the event (`kept`, by address) keeps the answer it gave, and its name when none is given; a new
+ * one starts as not yet answered and asked to reply.
  */
-function participantsProperty(owner: string, attendees: NonNullable<CreateEventInputT["participants"]>): Record<string, unknown> {
+function participantsProperty(
+  owner: string,
+  attendees: NonNullable<CreateEventInputT["participants"]>,
+  kept: StoredParticipant[] = [],
+): Record<string, unknown> {
+  const stored = new Map(kept.map((p) => [p.email.toLowerCase(), p]));
   const out: Record<string, unknown> = {
     o: {
       "@type": "Participant",
@@ -628,13 +660,16 @@ function participantsProperty(owner: string, attendees: NonNullable<CreateEventI
     },
   };
   attendees.forEach((p, i) => {
+    const before = stored.get(p.email.toLowerCase());
+    const name = p.name ?? before?.name ?? undefined;
+    const status = before?.status ?? "needs-action";
     out[`p${i + 1}`] = {
       "@type": "Participant",
       calendarAddress: mailto(p.email),
-      ...(p.name === undefined ? {} : { name: p.name }),
+      ...(name === undefined ? {} : { name }),
       roles: { required: true },
-      participationStatus: "needs-action",
-      expectReply: true,
+      participationStatus: status,
+      ...(status === "needs-action" ? { expectReply: true } : {}),
     };
   });
   return out;
@@ -678,11 +713,18 @@ export function newCalendarEvent(input: CreateEventInputT, calendarId: string, o
   return event;
 }
 
-/** The PatchObject of an update: one top-level key per given field, each replacing the whole property. */
-export function eventPatch(input: UpdateEventInputT, owner: string): Record<string, unknown> {
+/**
+ * The PatchObject of an update: one top-level key per given field, each replacing the whole
+ * property. `current` is the stored event as `toEventAudience` read it: a new time without
+ * `time_zone` stays in the event's own zone (UTC only for a floating event), and attendees that
+ * stay keep their answers.
+ */
+export function eventPatch(input: UpdateEventInputT, owner: string, current?: EventAudience): Record<string, unknown> {
   const patch: Record<string, unknown> = {};
   if (input.title !== undefined) patch.title = input.title;
-  if (input.start !== undefined || input.date !== undefined) Object.assign(patch, timeProperties(input));
+  if (input.start !== undefined || input.date !== undefined) {
+    Object.assign(patch, timeProperties(input, current?.timeZone ?? EVENT_TIME_ZONE));
+  }
   if (input.description !== undefined) patch.description = input.description;
   if (input.location !== undefined) {
     patch.locations = input.location === "" ? null : { l1: { "@type": "Location", name: input.location } };
@@ -690,7 +732,7 @@ export function eventPatch(input: UpdateEventInputT, owner: string): Record<stri
   if (input.calendar_id !== undefined) patch.calendarIds = { [input.calendar_id]: true };
   if (input.participants !== undefined) {
     const none = input.participants.length === 0;
-    patch.participants = none ? null : participantsProperty(owner, input.participants);
+    patch.participants = none ? null : participantsProperty(owner, input.participants, current?.participants);
     patch.organizerCalendarAddress = none ? null : mailto(owner);
   }
   if (input.recurrence !== undefined) patch.recurrenceRule = input.recurrence === null ? null : recurrenceRuleProperty(input.recurrence);
@@ -703,24 +745,32 @@ export const EVENT_AUDIENCE_PROPERTIES = [
   "recurrenceRule", "recurrenceRules",
 ] as const;
 
+const addressOf = (uri: string | null | undefined): string => (uri == null ? "" : stripMailto(uri).trim().toLowerCase());
+
 /**
  * Whom the server would notify about `e`: every participant with a calendar address, and the
  * organizer, except the mailbox itself (`owner`); and when the event ends. A floating or all-day
- * event's end is read with a day to spare, so it is never taken for past too early.
+ * event's end is read with a day to spare, so it is never taken for past too early. The mailbox
+ * organizes the event when the organizer is its own address or there is none.
  */
 export function toEventAudience(e: CalendarEventObject, owner: string): EventAudience {
   const own = owner.toLowerCase();
-  const addresses = [
-    ...values(e.participants).map((p) => (p.calendarAddress == null ? null : stripMailto(p.calendarAddress))),
-    e.organizerCalendarAddress == null ? null : stripMailto(e.organizerCalendarAddress),
-  ]
-    .map((a) => (a ?? "").trim().toLowerCase())
-    .filter((a) => a !== "" && a !== own);
+  const organizer = addressOf(e.organizerCalendarAddress);
+  const people = values(e.participants).map((p) => ({ p, email: addressOf(p.calendarAddress) }));
+  const addresses = [...people.map((x) => x.email), organizer].filter((a) => a !== "" && a !== own);
   const end = e.utcEnd == null ? Number.NaN : Date.parse(e.utcEnd);
   const floating = e.timeZone == null || e.showWithoutTime === true;
+  const participants = new Map<string, StoredParticipant>();
+  for (const { p, email } of people) {
+    if (email === "" || email === own || participants.has(email)) continue;
+    participants.set(email, { email, name: p.name ?? null, status: p.participationStatus ?? null });
+  }
   return {
     attendees: [...new Set(addresses)],
     end: Number.isNaN(end) ? null : end + (floating ? DAY_MS : 0),
     recurring: isRecurring(e),
+    organizedByMailbox: organizer === "" || organizer === own,
+    timeZone: floating ? null : (e.timeZone ?? null),
+    participants: [...participants.values()],
   };
 }

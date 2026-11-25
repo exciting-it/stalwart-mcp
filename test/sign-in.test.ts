@@ -11,6 +11,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as audit from "../src/audit";
 import { clock } from "../src/clock";
 import worker from "../src/index";
+import { handleAuthorize } from "../src/oauth/authorize";
 import { grantDirectory, oauthApi } from "../src/oauth/options";
 import { takePending } from "../src/oauth/pending";
 import { STALWART } from "../src/stalwart/endpoints";
@@ -131,6 +132,42 @@ describe("sign-in through Stalwart", () => {
     // The fake binds the code to that challenge, so a full sign-in proves the verifier matches it.
     const c = await connect(fake, A);
     expect(c.accessToken).toBeTruthy();
+  });
+
+  it("the intro page sets exactly one cookie, the flow cookie, with Path=/, Secure, HttpOnly, SameSite=Lax and a Max-Age", async () => {
+    const flow = await beginFlow();
+    const cookies = flow.responses[0]!.headers.getSetCookie();
+    expect(cookies).toHaveLength(1);
+    const [nameValue, ...attributes] = cookies[0]!.split(";").map((part) => part.trim());
+    expect(nameValue).toMatch(/^__Host-oauth-upstream[^=]*=.+/);
+    const lower = attributes.map((a) => a.toLowerCase());
+    expect(lower).toContain("path=/");
+    expect(lower).toContain("secure");
+    expect(lower).toContain("httponly");
+    expect(lower).toContain("samesite=lax");
+    expect(attributes.some((a) => /^max-age=\d+$/i.test(a))).toBe(true);
+  });
+
+  it("looks the client label up before it saves the flow: a failing lookup leaves no transaction behind", async () => {
+    const clientId = await registerClient("Test Tool", "198.51.100.77");
+    const { challenge } = await pkce();
+    const api = oauthApi(env, ORIGIN);
+    // The request itself is valid (parsing looks the client up too); only the lookup for the page fails.
+    const parse = api.parseAuthRequest.bind(api);
+    const lookup = api.lookupClient.bind(api);
+    let parsed = false;
+    vi.spyOn(api, "parseAuthRequest").mockImplementation(async (request) => {
+      const result = await parse(request);
+      parsed = true;
+      return result;
+    });
+    vi.spyOn(api, "lookupClient").mockImplementation((id) => (parsed ? Promise.reject(new Error("lookup failed")) : lookup(id)));
+    const begin = vi.spyOn(api, "beginUpstream");
+    const res = await handleAuthorize(new Request(authorizeUrl(clientId, challenge)), env, api, ORIGIN);
+    expect(res.status).toBe(500);
+    expect(parsed).toBe(true);
+    expect(begin).not.toHaveBeenCalled();
+    expect(res.headers.getSetCookie()).toEqual([]);
   });
 
   it("issues a Worker token after Allow, and that token is not a Stalwart token", async () => {

@@ -99,10 +99,11 @@ export type FakeEvent = Record<string, unknown> & {
 
 /**
  * One iTIP message the fake "sent" for a `CalendarEvent/set` with `sendSchedulingMessages: true`:
- * an invitation or update (`REQUEST`) or a cancellation (`CANCEL`), with the attendees it went to.
+ * an invitation or update (`REQUEST`) or a cancellation (`CANCEL`), with the attendees it went to,
+ * or the answer to the organizer of someone else's meeting (`REPLY`).
  */
 export interface SchedulingMessage {
-  kind: "REQUEST" | "CANCEL";
+  kind: "REQUEST" | "CANCEL" | "REPLY";
   eventId: string;
   attendees: string[];
 }

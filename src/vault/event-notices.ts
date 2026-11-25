@@ -6,8 +6,14 @@
  * the past" is judged here as simply as is safe: a recurring event (or an occurrence of one) never
  * ends in the past, a floating or all-day end gets a day to spare, and an unknown end is not past.
  * When unsure, the write counts as notifying: it costs a send it may not need, never the reverse.
+ *
+ * A meeting someone else organized (`organizedByMailbox` false) is never notified about: a change
+ * or deletion only affects the mailbox's own copy, and is written without scheduling messages.
+ *
+ * One counted send covers at most `eventParticipantsMax` addresses, like one sent message: a write
+ * that involves more (an existing event created elsewhere) counts one send per started ten.
  */
-import type { CreateEventInputT, EventAudience, UpdateEventInputT } from "../collab";
+import { COLLAB_LIMITS, type CreateEventInputT, type EventAudience, type UpdateEventInputT } from "../collab";
 
 const DAY_MS = 86_400_000;
 
@@ -15,6 +21,11 @@ const DAY_MS = 86_400_000;
 export interface Notice {
   addresses: string[];
   notify: boolean;
+}
+
+/** The sends a notifying write of `notice` counts: one per started `eventParticipantsMax` addresses. */
+export function sendsFor(notice: Notice): number {
+  return Math.max(1, Math.ceil(notice.addresses.length / COLLAB_LIMITS.eventParticipantsMax));
 }
 
 type EventTime = Pick<CreateEventInputT, "end" | "date" | "days">;
@@ -41,18 +52,22 @@ export function createNotice(input: CreateEventInputT, now: number): Notice {
 
 /**
  * An update notifies the attendees before and after it (added ones get the invitation, removed
- * ones a cancellation, the others an update), unless the event ends in the past afterwards.
+ * ones a cancellation, the others an update), unless the event ends in the past afterwards or
+ * someone else organizes it.
  */
 export function updateNotice(input: UpdateEventInputT, before: EventAudience, now: number): Notice {
   const after = input.participants === undefined ? before.attendees : input.participants.map((p) => p.email);
   const addresses = lowerUnique([...before.attendees, ...after]);
   const recurring = input.recurrence !== undefined ? input.recurrence !== null : before.recurring;
   const end = recurring ? null : (inputEnd(input) ?? before.end);
-  return { addresses, notify: addresses.length > 0 && !endsInPast(end, now) };
+  return { addresses, notify: before.organizedByMailbox && addresses.length > 0 && !endsInPast(end, now) };
 }
 
-/** A deletion cancels the event for its attendees, unless it ended in the past. */
+/** A deletion cancels the event for its attendees, unless it ended in the past or someone else organizes it. */
 export function deleteNotice(audience: EventAudience, now: number): Notice {
   const end = audience.recurring ? null : audience.end;
-  return { addresses: audience.attendees, notify: audience.attendees.length > 0 && !endsInPast(end, now) };
+  return {
+    addresses: audience.attendees,
+    notify: audience.organizedByMailbox && audience.attendees.length > 0 && !endsInPast(end, now),
+  };
 }

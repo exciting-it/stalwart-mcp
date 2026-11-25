@@ -96,11 +96,12 @@ export function findRecentSend(sql: SqlStorage, fingerprint: string, now: number
 }
 
 /**
- * Reserves one send in the UTC day of `now` and records it as `pending`, in one synchronous step.
- * Returns that day (to release the reservation with) or null when the day's sends are used up.
+ * Reserves `sends` sends (one, unless a notifying event write involves more than ten people) in the
+ * UTC day of `now` and records them as `pending`, in one synchronous step. Returns that day (to
+ * release the reservation with) or null when fewer are left.
  */
-export function reserveSend(sql: SqlStorage, fingerprint: string, now: number): number | null {
-  const day = takeSend(sql, now);
+export function reserveSend(sql: SqlStorage, fingerprint: string, now: number, sends = 1): number | null {
+  const day = takeSends(sql, now, sends);
   if (day === null) return null;
   sql.exec(
     "INSERT OR REPLACE INTO recent_sends (fingerprint, sent_at, state, message_id, recipients) VALUES (?, ?, 'pending', NULL, NULL)",
@@ -125,10 +126,10 @@ export function markSendUnconfirmed(sql: SqlStorage, fingerprint: string): void 
   sql.exec("UPDATE recent_sends SET state = 'unconfirmed' WHERE fingerprint = ?", fingerprint);
 }
 
-/** The send definitely did not go out: forget it and give its reservation back. */
-export function dropSend(sql: SqlStorage, fingerprint: string, day: number): void {
+/** The send definitely did not go out: forget it and give its reservation (`sends`) back. */
+export function dropSend(sql: SqlStorage, fingerprint: string, day: number, sends = 1): void {
   sql.exec("DELETE FROM recent_sends WHERE fingerprint = ?", fingerprint);
-  releaseSend(sql, day);
+  releaseSends(sql, day, sends);
 }
 
 /** Reserves one send in the UTC day of `now`; null when the day's sends are used up. */
@@ -150,11 +151,6 @@ export function takeSends(sql: SqlStorage, now: number, n: number): number | nul
 export function releaseSends(sql: SqlStorage, day: number, n: number): void {
   if (n <= 0) return;
   sql.exec("UPDATE usage_counter SET count = MAX(count - ?, 0) WHERE name = 'send' AND period = ?", n, day);
-}
-
-/** Gives back a send reserved for `day` that did not go out. */
-function releaseSend(sql: SqlStorage, day: number): void {
-  releaseSends(sql, day, 1);
 }
 
 const normalized = (list: string[]): string[] => list.map((a) => a.toLowerCase()).sort();

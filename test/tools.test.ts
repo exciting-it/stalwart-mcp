@@ -632,6 +632,17 @@ describe("tools", () => {
       expect(remove).toContain("up to 50 per call");
       expect(remove).toContain("deletes that occurrence only");
       expect(remove).toContain("cancellation");
+      // Who gets mail, and what a change or deletion of someone else's meeting does.
+      const update = byName("update_event").spec.description;
+      expect(update).toContain("Unless the event has already ended");
+      expect(update).toContain("an identical change repeated within 10 minutes is not sent again");
+      expect(update).toContain("without time_zone stay in the event's own time zone (UTC for an event without one)");
+      expect(update).toContain("attendees who stay keep their answers");
+      expect(update).toContain(
+        "For a meeting someone else organized, a change only affects your own copy: the organizer is not informed, and participants and recurrence cannot be changed.",
+      );
+      expect(remove).toContain("For a deleted event the mailbox organizes that has not ended");
+      expect(remove).toContain("For a meeting someone else organized, deleting only removes your own copy: the organizer is not informed.");
     });
 
     it("delete_event takes a list of 1 to 50 ids and nothing else", async () => {

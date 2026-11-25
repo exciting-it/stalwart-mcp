@@ -12,12 +12,14 @@
  * fake stores any other property name as inert data: `recurrenceRules`, `sendTo` and `replyTo` have
  * no effect (an event with `recurrenceRules` does not recur; a participant with only `sendTo` is
  * not an attendee). With `sendSchedulingMessages: true` it records the iTIP messages the server
- * would send (`account.scheduling`).
+ * would send (`account.scheduling`). For an event organized by someone else that lists the account
+ * as a participant, an update or destroy with `sendSchedulingMessages: true` sends a `REPLY` to that
+ * organizer, never invitations or cancellations to the other attendees.
  *
  * Everything is scoped to the request's account: another account's ids are `notFound`.
  */
 import { clock } from "../src/clock";
-import type { FakeAccount, FakeContact, FakeEvent } from "./fake-stalwart-state";
+import type { FakeAccount, FakeContact, FakeEvent, SchedulingMessage } from "./fake-stalwart-state";
 import {
   type Args,
   contains,
@@ -272,10 +274,18 @@ function zoneOffsetMs(zone: string, utcMs: number): number {
   return Date.UTC(n("year"), n("month") - 1, n("day"), n("hour"), n("minute"), n("second")) - utcMs;
 }
 
-/** The instant (UTC milliseconds) of a LocalDateTime in `zone` (null: UTC). Zones come from `Intl`. */
+/**
+ * The instant (UTC milliseconds) of a LocalDateTime in `zone` (null: UTC). Zones come from `Intl`.
+ * A wall-clock time shown twice (clocks going back) is its first occurrence, as RFC 5545 says; one
+ * never shown (clocks going forward) is read with the offset before the change.
+ */
 function localToUtc(local: unknown, zone: string | null): number {
   const t = localMs(local);
   const z = zone ?? "Etc/UTC";
+  const shown = [zoneOffsetMs(z, t - DAY), zoneOffsetMs(z, t + DAY)]
+    .map((offset) => t - offset)
+    .filter((utc) => utc + zoneOffsetMs(z, utc) === t);
+  if (shown.length > 0) return Math.min(...shown);
   const first = zoneOffsetMs(z, t);
   const second = zoneOffsetMs(z, t - first);
   return t - (second === first ? first : second);
@@ -757,7 +767,33 @@ const endsInPast = (e: FakeEvent): boolean => eventEnd(e) < clock.now();
 
 /** True when a write with `sendSchedulingMessages: true` makes the server send for `e`. */
 function schedules(e: FakeEvent, account: FakeAccount): boolean {
-  return attendeesOf(e, account).length > 0 && e.isDraft !== true && !endsInPast(e);
+  return foreignOrganizer(e, account) === null && attendeesOf(e, account).length > 0 && e.isDraft !== true && !endsInPast(e);
+}
+
+/** The organizer of `e` when that is someone other than the account, else null. */
+function foreignOrganizer(e: Args, account: FakeAccount): string | null {
+  const organizer = stripMailto(e.organizerCalendarAddress);
+  return organizer !== null && organizer !== account.email.toLowerCase() ? organizer : null;
+}
+
+/**
+ * Whom the account answers when it changes or removes its copy of someone else's meeting with
+ * `sendSchedulingMessages: true`: the organizer, if the account is a participant and the event is
+ * not a draft and has not ended. Else null.
+ */
+function replyTo(e: FakeEvent, account: FakeAccount): string | null {
+  const organizer = foreignOrganizer(e, account);
+  const own = account.email.toLowerCase();
+  const listed = values(e.participants).some((p) => stripMailto(p.calendarAddress) === own);
+  return organizer !== null && listed && e.isDraft !== true && !endsInPast(e) ? organizer : null;
+}
+
+/** For someone else's meeting: the REPLY a notifying write sends, and true (nothing else is sent). */
+function replied(ctx: Ctx, notify: boolean, eventId: string, before: FakeEvent, after: FakeEvent | null): boolean {
+  if (foreignOrganizer(before, ctx.account) === null) return false;
+  const to = notify ? ((after === null ? null : replyTo(after, ctx.account)) ?? replyTo(before, ctx.account)) : null;
+  if (to !== null) record(ctx, "REPLY", eventId, [to]);
+  return true;
 }
 
 function invalidEventProperties(e: Record<string, unknown>, account: FakeAccount): string[] {
@@ -783,7 +819,7 @@ function invalidEventProperties(e: Record<string, unknown>, account: FakeAccount
   return [...new Set(bad)];
 }
 
-function record(ctx: Ctx, kind: "REQUEST" | "CANCEL", eventId: string, attendees: string[]): void {
+function record(ctx: Ctx, kind: SchedulingMessage["kind"], eventId: string, attendees: string[]): void {
   if (attendees.length > 0) ctx.account.scheduling.push({ kind, eventId, attendees: [...attendees] });
 }
 
@@ -820,6 +856,7 @@ function applyToOccurrences(args: Args, ctx: Ctx, notify: boolean): { rest: Args
     found.event.recurrenceOverrides = { ...overrides, [found.occurrence.start]: { ...(isObject(overrides[found.occurrence.start]) ? overrides[found.occurrence.start] as Args : {}), ...structuredClone(patch) } };
     const after = occurrenceView(found.event, found.occurrence);
     updated[id] = null;
+    if (replied(ctx, notify, id, before, after)) continue;
     if (notify && (schedules(before, account) || schedules(after, account))) {
       record(ctx, "REQUEST", id, attendeesOf(after, account));
       record(ctx, "CANCEL", id, attendeesOf(before, account).filter((a) => !attendeesOf(after, account).includes(a)));
@@ -841,6 +878,7 @@ function applyToOccurrences(args: Args, ctx: Ctx, notify: boolean): { rest: Args
     const overrides = isObject(found.event.recurrenceOverrides) ? found.event.recurrenceOverrides : {};
     found.event.recurrenceOverrides = { ...overrides, [found.occurrence.start]: { excluded: true } };
     destroyed.push(id);
+    if (replied(ctx, notify, id, view, null)) continue;
     if (notify && schedules(view, account)) record(ctx, "CANCEL", id, attendeesOf(view, account));
   }
   return {
@@ -892,6 +930,7 @@ const calendarEventSet: Handler = (args, ctx) => {
       if (notify && schedules(object as FakeEvent, c.account)) record(c, "REQUEST", object.id, attendeesOf(object, c.account));
     },
     updated: (before, after, c) => {
+      if (replied(c, notify, after.id, before as FakeEvent, after as FakeEvent)) return;
       if (!notify || !(schedules(before as FakeEvent, c.account) || schedules(after as FakeEvent, c.account))) return;
       if (endsInPast(after as FakeEvent) || after.isDraft === true) return;
       const now = attendeesOf(after, c.account);
@@ -899,6 +938,7 @@ const calendarEventSet: Handler = (args, ctx) => {
       record(c, "CANCEL", after.id, attendeesOf(before, c.account).filter((a) => !now.includes(a)));
     },
     destroyed: (object, c) => {
+      if (replied(c, notify, object.id, object as FakeEvent, null)) return;
       if (notify && schedules(object as FakeEvent, c.account)) record(c, "CANCEL", object.id, attendeesOf(object, c.account));
     },
   };

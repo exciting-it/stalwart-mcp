@@ -148,26 +148,44 @@ export function createdOrThrow(
 }
 
 /**
- * Requires that a `/set` answer shows `id` as updated: `notFound` or an id in neither map is
- * `not_found`, any other refusal is `upstream_rejected`.
+ * Requires that a `/set` answer shows `id` as updated: `notFound` is `not_found`, any other refusal
+ * `upstream_rejected`. An id in neither map, or an answer that cannot be read, shows nothing about
+ * what the server did: `not_found` and `upstream_rejected` for a write that sends no mail, but for
+ * one that makes the server send mail (`notify`) the mail may have gone out: `send_unconfirmed`.
  */
-export function requireUpdated(args: unknown, id: string): void {
-  const { updated, refused } = updateResult(args);
+export function requireUpdated(args: unknown, id: string, notify = false): void {
+  const { updated, refused } = notify ? unconfirmedUnlessRead(() => updateResult(args)) : updateResult(args);
   if (updated.has(id)) return;
   const type = refused.get(id);
+  if (type === undefined && notify) throw new MailError("send_unconfirmed");
   throw new MailError(type === undefined || type === "notFound" ? "not_found" : "upstream_rejected");
 }
 
-/** What a `/set` with `destroy: ids` did, per id: deleted, or not (and whether only for unknown ids). */
-export function destroyOutcome(args: unknown, ids: string[]): DestroyOutcome {
-  const parsed = parseUpstream(
-    z.object({
-      destroyed: z.array(z.string()).nullish(),
-      notDestroyed: z.record(z.string(), z.object({ type: z.string() })).nullish(),
-    }),
-    args,
-  );
+/** Runs `read` over an upstream answer; an answer it cannot read is an unconfirmed send. */
+function unconfirmedUnlessRead<T>(read: () => T): T {
+  try {
+    return read();
+  } catch {
+    throw new MailError("send_unconfirmed");
+  }
+}
+
+const DestroyAnswer = z.object({
+  destroyed: z.array(z.string()).nullish(),
+  notDestroyed: z.record(z.string(), z.object({ type: z.string() })).nullish(),
+});
+
+/**
+ * What a `/set` with `destroy: ids` did, per id: deleted, or not (and whether only for unknown
+ * ids). For a destroy that makes the server send mail (`notify`), an answer that cannot be read or
+ * that names an id in neither list is `send_unconfirmed`: cancellations may have gone out.
+ */
+export function destroyOutcome(args: unknown, ids: string[], notify = false): DestroyOutcome {
+  const parsed = notify ? unconfirmedUnlessRead(() => parseUpstream(DestroyAnswer, args)) : parseUpstream(DestroyAnswer, args);
   const destroyed = new Set(parsed.destroyed ?? []);
+  if (notify && ids.some((id) => !destroyed.has(id) && parsed.notDestroyed?.[id] === undefined)) {
+    throw new MailError("send_unconfirmed");
+  }
   const notDeleted = ids.filter((id) => !destroyed.has(id));
   return {
     deleted: ids.filter((id) => destroyed.has(id)),

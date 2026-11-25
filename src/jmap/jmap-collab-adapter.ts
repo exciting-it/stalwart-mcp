@@ -346,8 +346,11 @@ export class JmapCollabAdapter implements CollabUpstream {
     return { event_id: createdOrThrow(set, "e", unknownOutcome(notify)), calendar_id: target };
   }
 
-  /** A calendar id from the input is checked first: one that is not this account's is `not_found`. */
-  async updateEvent(input: UpdateEventInputT, notify: boolean): Promise<{ event_id: string }> {
+  /**
+   * A calendar id from the input is checked first: one that is not this account's is `not_found`.
+   * `current` (the vault's read of the event) keeps its time zone and its attendees' answers.
+   */
+  async updateEvent(input: UpdateEventInputT, notify: boolean, current?: EventAudience): Promise<{ event_id: string }> {
     this.#require("calendars");
     const owner = this.#session.username;
     if (namesOwner(input.participants, owner)) throw new MailError("invalid_input");
@@ -357,10 +360,10 @@ export class JmapCollabAdapter implements CollabUpstream {
     }
     const responses = await this.#call(
       "calendars",
-      [["CalendarEvent/set", { update: { [input.event_id]: eventPatch(input, owner) }, sendSchedulingMessages: notify }, "s"]],
+      [["CalendarEvent/set", { update: { [input.event_id]: eventPatch(input, owner, current) }, sendSchedulingMessages: notify }, "s"]],
       { write: true, notify },
     );
-    requireUpdated(this.#writeResult(responses, "s", "CalendarEvent/set", { idsFromInput: true, notify }), input.event_id);
+    requireUpdated(this.#writeResult(responses, "s", "CalendarEvent/set", { idsFromInput: true, notify }), input.event_id, notify);
     return { event_id: input.event_id };
   }
 
@@ -373,6 +376,6 @@ export class JmapCollabAdapter implements CollabUpstream {
       [["CalendarEvent/set", { destroy: unique, sendSchedulingMessages: notify }, "s"]],
       { write: true, notify },
     );
-    return destroyOutcome(this.#writeResult(responses, "s", "CalendarEvent/set", { idsFromInput: true, notify }), unique);
+    return destroyOutcome(this.#writeResult(responses, "s", "CalendarEvent/set", { idsFromInput: true, notify }), unique, notify);
   }
 }
