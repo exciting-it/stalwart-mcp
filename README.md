@@ -104,6 +104,8 @@ access to it, a Cloudflare account, and [Bun](https://bun.sh).
    - `PUBLIC_ORIGIN`: the address the connector is served under in production, written the
      same way. It must match `routes`; production answers under no other host.
    - `CONNECTOR_NAME`: the name AI tools show (optional, default "Stalwart Mail").
+   - `FEATURES`: what the connector offers beyond mail (optional); see "Contacts and
+     calendars" below before you set it.
 2. **OAuth client on Stalwart**, one per environment: confidential, grant types authorization
    code and refresh, scope mail (plus the scopes of the areas you switch on, see
    [Contacts and calendars](#contacts-and-calendars)), exactly one redirect URI
@@ -126,7 +128,6 @@ access to it, a Cloudflare account, and [Bun](https://bun.sh).
    - `STALWART_OAUTH_CLIENT_ID`: the client id from step 2.
    - `SIGNIN_ALLOWLIST`: comma-separated mailbox addresses that may connect (staging).
    - `SEND_ALLOWLIST`: comma-separated addresses `send_mail` may deliver to (staging).
-   - `FEATURES` (optional): `contacts`, `calendars` or `contacts,calendars`; see below.
    - `MAIL_MCP_ENABLED`: set to `true` last. Anything else makes every endpoint answer 503.
 7. Check that the Durable Object migration `v1` was applied (the `MailboxVault` class exists
    with SQLite storage), then work through the live checks below with a test mailbox.
@@ -141,8 +142,9 @@ mail server.
 
 ### Contacts and calendars
 
-Mail is always offered. Contacts and calendars are off until you name them in the dashboard
-variable `FEATURES`: `contacts`, `calendars` or `contacts,calendars` (spaces are ignored; empty
+Mail is always offered. Contacts and calendars are off until you name them in `FEATURES`, in the
+`vars` block of `wrangler.jsonc` next to the addresses (it is fixed per deployment, not tuned
+while it runs): `contacts`, `calendars` or `contacts,calendars` (spaces are ignored; empty
 or unset means mail only). Any other name closes the worker with 503 and
 `config_error FEATURES` in its logs, so a typo never quietly asks Stalwart for more or less.
 

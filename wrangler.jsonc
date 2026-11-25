@@ -20,6 +20,10 @@
   //   STALWART_ORIGIN  the Stalwart server, an https origin
   //   PUBLIC_ORIGIN    this worker's own https origin (production only; must match `routes`)
   //   CONNECTOR_NAME   the name AI tools show for the connector (optional)
+  //   FEATURES         what the connector offers beyond mail: "contacts", "calendars" or
+  //                    "contacts,calendars" (optional; without it only mail). Each area makes
+  //                    the worker ask Stalwart for one more scope, so the OAuth client there
+  //                    must allow it BEFORE this is deployed, or every sign-in fails.
   //   DATA_JURISDICTION  restricts where the mailbox vaults run and store data: "eu", "us" or
   //                    "fedramp" (optional). Choose it BEFORE the first sign-in: vault ids
   //                    depend on it, so a later change orphans every stored connection.
@@ -37,6 +41,7 @@
     "STALWART_ORIGIN": "https://mail.exciting-it.com",
     "PUBLIC_ORIGIN": "https://mail-mcp.exciting-it.com",
     "CONNECTOR_NAME": "exciting IT Mail",
+    "FEATURES": "contacts,calendars",
     "DATA_JURISDICTION": "eu"
   },
   // Production's KV and D1 do not exist yet and carry no ids. Create them once (README,
@@ -71,6 +76,7 @@
         "ENVIRONMENT": "staging",
         "STALWART_ORIGIN": "https://mail.exciting-it.com",
         "CONNECTOR_NAME": "exciting IT Mail (staging)",
+        "FEATURES": "contacts,calendars",
         "DATA_JURISDICTION": "eu"
       },
       // Both created with `--jurisdiction eu` (it can only be set at creation).
