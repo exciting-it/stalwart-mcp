@@ -177,8 +177,8 @@ mailbox's own account, like mail.
   match, validation, call limit), and refuses an operation whose area is not in `FEATURES`.
   `MailboxAdapter` is not extended; the tool layer works with `MailboxAdapter & CollabAdapter`.
 - **Permission of a connection.** Each area has its own OAuth scope at Stalwart, asked only when
-  the area is in `FEATURES`. The JMAP session lists the capability of an area for the token
-  only when the scope was granted. Every adapter method first checks that capability in the
+  the area is in `FEATURES`. Stalwart's documentation says the JMAP session lists the capability of an
+  area for the token only when the scope was granted (a live check; see below). Every adapter method first checks that capability in the
   session and otherwise answers `not_granted` without any request; a method error
   `unknownMethod` from Stalwart is mapped to `not_granted` too. A mailbox connected before the
   area was switched on has a token without the scope and has to connect again. The approval page
@@ -205,8 +205,9 @@ mailbox's own account, like mail.
   reading of the JMAP Contacts (RFC 9610) and the JMAP Calendars draft as the code, so they
   cannot show that Stalwart agrees. The unknowns are listed as live checks in the README: the
   draft revision, the capability names and `primaryAccounts` keys, `utcStart` / `utcEnd`,
-  `expandRecurrences`, the `inCalendar` key, the format of occurrence ids, and how the string
-  filters of `ContactCard/query` match.
+  `expandRecurrences`, the `inCalendar` key, the format of occurrence ids, how the string
+  filters of `ContactCard/query` match, the two scope names, and that a session omits the
+  capability of an area whose scope the token lacks.
 
 ## Mail content is untrusted input
 

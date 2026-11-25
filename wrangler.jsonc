@@ -41,7 +41,8 @@
     "STALWART_ORIGIN": "https://mail.exciting-it.com",
     "PUBLIC_ORIGIN": "https://mail-mcp.exciting-it.com",
     "CONNECTOR_NAME": "exciting IT Mail",
-    "FEATURES": "contacts,calendars",
+    // FEATURES is not set for production yet: contacts and calendars go on here once the live
+    // checks have passed on staging and production's OAuth client allows the two scopes.
     "DATA_JURISDICTION": "eu"
   },
   // Production's KV and D1 do not exist yet and carry no ids. Create them once (README,

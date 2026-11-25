@@ -82,6 +82,12 @@ describe("search_events input", () => {
     expect(SearchEventsInput.safeParse({ after: "2026-11-01T00:00:00+01:00", before: BEFORE }).success).toBe(true);
   });
 
+  it("refuses a bound whose year cannot be written with four digits once in UTC", () => {
+    // 9999-12-31T23:59:59-12:00 is in year 10000 in UTC.
+    expect(SearchEventsInput.safeParse({ after: "9999-12-30T00:00:00Z", before: "9999-12-31T23:59:59-12:00" }).success).toBe(false);
+    expect(SearchEventsInput.safeParse({ after: "9999-12-30T00:00:00Z", before: "9999-12-31T23:59:59Z" }).success).toBe(true);
+  });
+
   it("requires before to be later than after, at most 180 days apart", () => {
     const day = 86_400_000;
     const at = (ms: number) => new Date(ms).toISOString();

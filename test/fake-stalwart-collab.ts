@@ -136,6 +136,10 @@ function matches(c: FakeContact, filter: unknown): boolean {
 }
 
 const contactQuery: Handler = (args, { account, callId, out }) => {
+  // An address book that is not this account's is an error here, not an empty result: the adapter
+  // must have looked the id up itself before it answers an empty page.
+  const book = isObject(args.filter) ? args.filter.inAddressBook : undefined;
+  if (typeof book === "string" && !account.addressBooks.has(book)) throw new MethodError("invalidArguments");
   const sort = args.sort ?? [];
   if (!Array.isArray(sort)) throw new MethodError("invalidArguments");
   let ascending = true;
@@ -381,6 +385,9 @@ function expansionWindow(filter: unknown): { beforeLocal: string } {
 }
 
 const calendarEventQuery: Handler = (args, { account, callId, out }) => {
+  // The same for a calendar that is not this account's.
+  const calendar = isObject(args.filter) ? args.filter.inCalendar : undefined;
+  if (typeof calendar === "string" && !account.calendars.has(calendar)) throw new MethodError("invalidArguments");
   const sort = args.sort ?? [];
   if (!Array.isArray(sort)) throw new MethodError("invalidArguments");
   let ascending = true;

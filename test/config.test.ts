@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { connectorName, dataJurisdiction, features, httpsOrigin, parseFeatures, stalwartOrigin } from "../src/config";
-import { STALWART } from "../src/stalwart/endpoints";
+import { scopeFor, STALWART } from "../src/stalwart/endpoints";
 
 describe("httpsOrigin", () => {
   it.each([
@@ -57,6 +57,23 @@ describe("parseFeatures", () => {
     "%j is refused, not ignored",
     (value) => expect(parseFeatures(value)).toBeNull(),
   );
+});
+
+describe("scopeFor", () => {
+  const MAIL = "urn:ietf:params:oauth:scope:mail";
+  const CONTACTS = "urn:ietf:params:oauth:scope:contacts";
+  const CALENDARS = "urn:ietf:params:oauth:scope:calendars";
+
+  it("asks for mail alone when no area is switched on", () => expect(scopeFor(new Set())).toBe(MAIL));
+
+  it("adds exactly the scope of each enabled area and never another", () => {
+    expect(scopeFor(new Set(["contacts"]))).toBe(`${MAIL} ${CONTACTS}`);
+    expect(scopeFor(new Set(["calendars"]))).toBe(`${MAIL} ${CALENDARS}`);
+    expect(scopeFor(new Set(["calendars", "contacts"]))).toBe(`${MAIL} ${CONTACTS} ${CALENDARS}`);
+    for (const areas of [[], ["contacts"], ["calendars"], ["contacts", "calendars"]] as const) {
+      expect(scopeFor(new Set(areas))).not.toMatch(/files|full|security|settings|openid|offline_access/);
+    }
+  });
 });
 
 describe("deployment settings (vitest.config.ts)", () => {

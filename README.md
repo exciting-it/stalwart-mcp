@@ -159,8 +159,8 @@ or unset means mail only). Any other name closes the worker with 503 and
   the mailbox again." (`not_granted`, audited as `refused`), and send nothing to Stalwart.
   Mail keeps working.
 - **Reach of the token.** As with mail, which also opens IMAP and SMTP, the scopes are Stalwart's,
-  not the connector's: a vault token with the contacts or calendars scope also reaches
-  CardDAV and CalDAV for that account. The connector only ever sends JMAP `/get` and `/query`
+  not the connector's: according to Stalwart's documentation a vault token with the contacts or
+  calendars scope also reaches CardDAV and CalDAV for that account. The connector only ever sends JMAP `/get` and `/query`
   requests; the tests assert that no request contains a `/set`, `/copy` or `/parse` method.
 - **What the tools return.** Every result leads with a fixed `content_notice` saying that names,
   titles, descriptions, notes, locations and addresses may come from third parties (for example
@@ -229,6 +229,8 @@ These need the OAuth client and a test mailbox on your server:
 If `FEATURES` is set, also these (the tests cannot tell, because the stand-in is written from the
 same assumptions as the code):
 
+- [ ] Stalwart accepts the two extra scope names at sign-in (`urn:ietf:params:oauth:scope:contacts`, `urn:ietf:params:oauth:scope:calendars`), its consent page names them, and the OAuth client is allowed to grant them. Until this passes on staging, leave `FEATURES` out of production: a scope the client may not grant fails every sign-in, mail included.
+- [ ] A token without the contacts or calendars scope gets a session that does not list that capability (the connector's permission check rests on this).
 - [ ] The JMAP session lists `urn:ietf:params:jmap:contacts` and `urn:ietf:params:jmap:calendars`
   as capabilities, and the keys of `primaryAccounts` for them are those same URNs. The connector
   reads the capabilities of the token from `primaryAccounts`; a different key means the tools
@@ -324,6 +326,11 @@ request under a host other than `PUBLIC_ORIGIN` answers 404.
 - `delete_mail` moves messages to Trash and the connector never empties it. Whether Trash is
   emptied after some time is your server's setting (Stalwart's auto-expunge), not the
   connector's: with it switched on, a deleted message does disappear later.
+- A contacts or calendar tool that answers "This connection does not include that permission"
+  right after a fresh connect does not need another reconnect: the server either does not list
+  the capability for that token or does not implement the method (for example another draft of
+  JMAP for Calendars). The connector cannot tell these apart from a connection made before the
+  area was switched on.
 - The tool-call limit counts per clock minute, not a sliding minute: up to 120 calls can land
   within a few seconds around a minute boundary.
 - `/token` and `/register` are limited per source address. AI vendors call them from shared

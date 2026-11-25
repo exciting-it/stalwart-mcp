@@ -792,6 +792,8 @@ describe("readEvent", () => {
     const participants = Object.fromEntries(Array.from({ length: 60 }, (_, i) => [`p${i}`, { name: `P${i}`, email: `p${i}@example.org` }]));
     const locations = Object.fromEntries(Array.from({ length: 8 }, (_, i) => [`l${i}`, { name: `Place ${i}` }]));
     const virtualLocations = {
+      v0: { uri: "https://meet.example.org@evil.example/join" },
+      v00: { uri: "https://user:pw@evil.example/join" },
       v1: { uri: "javascript:alert(1)" },
       v2: { uri: "https://one.example.org/a" },
       v3: { uri: "data:text/html,x" },
@@ -946,8 +948,13 @@ describe("calendar permission", () => {
 });
 
 describe("read only", () => {
-  it("no request of these tests contains a /set, /copy or /parse method", () => {
-    expect(allRequests.length).toBeGreaterThan(0);
+  // Runs last in this file: every request the tests above sent is in `allRequests` by now.
+  it("no request of the tests above contains a /set, /copy or /parse method", () => {
+    const names = allRequests.flatMap((r) =>
+      Array.isArray(r.body?.methodCalls) ? (r.body.methodCalls as [string][]).map((c) => c[0]) : [],
+    );
+    expect(names.length).toBeGreaterThan(20);
+    expect(names.filter((n) => !/\/(get|query)$/.test(n))).toEqual([]);
   });
 });
 

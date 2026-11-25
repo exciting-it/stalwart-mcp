@@ -70,7 +70,16 @@ export const SearchEventsInputBase = z
   })
   .strict();
 
+/** A JMAP LocalDateTime has a four-digit year; an instant outside 0000-9999 (in UTC) cannot be one. */
+const fourDigitYear = (instant: string): boolean => /^\d{4}-/.test(new Date(instant).toISOString());
+
 export const SearchEventsInput = SearchEventsInputBase.superRefine((m, ctx) => {
+  for (const key of ["after", "before"] as const) {
+    if (!fourDigitYear(m[key])) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: [key], message: "The year must be between 0000 and 9999." });
+      return;
+    }
+  }
   const span = Date.parse(m.before) - Date.parse(m.after);
   if (!(span > 0)) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["before"], message: "before must be later than after." });

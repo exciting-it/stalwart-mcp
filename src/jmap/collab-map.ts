@@ -219,7 +219,7 @@ export function toContactDetail(card: Card): ContactDetail {
     birthday: birthday(card),
     notes: notes.text,
     notes_truncated: notes.truncated,
-    address_book_ids: trueKeys(card.addressBookIds).slice(0, DETAIL_MAX),
+    address_book_ids: idKeys(card.addressBookIds),
     updated: card.updated == null ? null : clean(card.updated, 64),
   };
 }
@@ -336,10 +336,17 @@ function isRecurring(e: CalendarEventObject): boolean {
   return e.recurrenceId != null || (e.recurrenceRules ?? []).length > 0;
 }
 
+/** The ids of a JMAP id map, as far as they are well-formed ids: nothing else is passed on. */
+function idKeys(map: Parameters<typeof trueKeys>[0]): string[] {
+  return trueKeys(map)
+    .filter((id) => MailIdSchema.safeParse(id).success)
+    .slice(0, DETAIL_MAX);
+}
+
 export function toEventSummary(e: CalendarEventObject): EventSummary {
   return {
     id: e.id,
-    calendar_ids: trueKeys(e.calendarIds).slice(0, DETAIL_MAX),
+    calendar_ids: idKeys(e.calendarIds),
     title: e.title == null ? "" : clean(e.title, LINE).trim(),
     start: optionalLine(e.utcStart),
     end: optionalLine(e.utcEnd),
@@ -378,8 +385,9 @@ function onlineMeetings(e: CalendarEventObject): string[] {
     const uri = clean(v.uri, COLLAB_LIMITS.urlChars + 1).trim();
     if (uri === "" || uri.length > COLLAB_LIMITS.urlChars || /\s/.test(uri)) continue;
     try {
-      const { protocol } = new URL(uri);
-      if (protocol === "http:" || protocol === "https:") out.push(uri);
+      const { protocol, username, password } = new URL(uri);
+      // No `user@host` links: `https://meet.example@evil.example/` shows one host and opens another.
+      if ((protocol === "http:" || protocol === "https:") && username === "" && password === "") out.push(uri);
     } catch {
       // not a URL: dropped
     }
