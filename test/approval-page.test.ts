@@ -4,6 +4,10 @@ import { pageLanguage, renderApprovalPage, renderMessagePage } from "../src/oaut
 
 const base = { clientName: "Claude", redirectHost: "claude.ai", email: "a@test.example", handle: "h-123" };
 
+/** The texts of the permission list, in page order. */
+const permissions = (html: string): string[] =>
+  [...html.matchAll(/<li><span class="tick" aria-hidden="true"><\/span><span>([^<]*)<\/span><\/li>/g)].map((m) => m[1]!);
+
 describe("approval page", () => {
   it("escapes client name, host and address", async () => {
     const html = await renderApprovalPage({
@@ -50,9 +54,13 @@ describe("approval page", () => {
     expect(en).toContain("Connect your mailbox");
     expect(en).toContain("Claude (claude.ai) wants to access this mailbox:");
     expect(en).toContain('<p class="mailbox">a@test.example</p>');
-    expect(en).toContain(
-      "It will be able to read and search your mail, save drafts, send mail in your name (at most 50 messages per day) and move messages to other folders or to the trash. It never empties the trash.",
-    );
+    expect(permissions(en)).toEqual([
+      "Read and search your email",
+      "Save drafts",
+      "Send email in your name (at most 50 messages per day)",
+      "Move messages to other folders and to the trash",
+    ]);
+    expect(en).toContain('<p class="never">It never empties the trash.</p>');
     expect(en).toContain("Not a@test.example? Choose Deny, sign out of your mailbox and try again.");
     expect(en).toContain("Only allow this if you started the connection yourself just now.");
     expect(en).toMatch(/<button[^>]*value="allow"[^>]*>Allow<\/button>/);
@@ -63,9 +71,13 @@ describe("approval page", () => {
     expect(de).toContain("Postfach verbinden");
     expect(de).toContain("Claude (claude.ai) möchte auf dieses Postfach zugreifen:");
     expect(de).toContain('<p class="mailbox">a@test.example</p>');
-    expect(de).toContain(
-      "Die Anwendung kann deine E-Mails lesen und durchsuchen, Entwürfe speichern, in deinem Namen senden (höchstens 50 Nachrichten pro Tag) und Nachrichten in andere Ordner oder in den Papierkorb verschieben. Den Papierkorb leert sie nie.",
-    );
+    expect(permissions(de)).toEqual([
+      "E-Mails lesen und durchsuchen",
+      "Entwürfe speichern",
+      "E-Mails in deinem Namen senden (höchstens 50 Nachrichten pro Tag)",
+      "Nachrichten in andere Ordner und in den Papierkorb verschieben",
+    ]);
+    expect(de).toContain('<p class="never">Den Papierkorb leert sie nie.</p>');
     expect(de).toContain("Nicht a@test.example? Wähle „Ablehnen“, melde dich im Postfach ab und versuche es erneut.");
     expect(de).toContain("Erlaube das nur, wenn du die Verbindung gerade selbst gestartet hast.");
     expect(de).toMatch(/<button[^>]*value="allow"[^>]*>Erlauben<\/button>/);
@@ -94,18 +106,34 @@ describe("areas beyond mail on the approval page", () => {
   it("says nothing about calendars or contacts when the deployment offers only mail", async () => {
     for (const html of [await page("en"), await page("en", []), await page("de", [])]) {
       expect(html).not.toMatch(/calendar|address book|Kalender|Adressbuch/i);
+      expect(permissions(html)).toHaveLength(4);
     }
   });
 
-  it("names exactly the areas that are switched on", async () => {
-    expect(await page("en", ["contacts"])).toContain("It can also read your address book.");
+  it("adds one list entry for exactly each area that is switched on, after the mail entries", async () => {
+    expect(permissions(await page("en", ["contacts"])).slice(4)).toEqual(["Read your address book"]);
     expect(await page("en", ["contacts"])).not.toMatch(/calendar/i);
-    expect(await page("en", ["calendars"])).toContain("It can also read your calendars.");
+    expect(permissions(await page("en", ["calendars"])).slice(4)).toEqual(["Read your calendars and events"]);
     expect(await page("en", ["calendars"])).not.toMatch(/address book/i);
-    expect(await page("en", ["contacts", "calendars"])).toContain("It can also read your calendars and your address book.");
-    expect(await page("de", ["contacts", "calendars"])).toContain("Außerdem kann sie deine Kalender und dein Adressbuch lesen.");
-    expect(await page("de", ["contacts"])).toContain("Außerdem kann sie dein Adressbuch lesen.");
-    expect(await page("de", ["calendars"])).toContain("Außerdem kann sie deine Kalender lesen.");
+    expect(permissions(await page("en", ["calendars", "contacts"])).slice(4)).toEqual([
+      "Read your address book",
+      "Read your calendars and events",
+    ]);
+    expect(permissions(await page("de", ["contacts", "calendars"])).slice(4)).toEqual([
+      "Dein Adressbuch lesen",
+      "Deine Kalender und Termine lesen",
+    ]);
+  });
+
+  it("shows the permissions as a labelled list and not as form fields", async () => {
+    const html = await page("de", ["contacts", "calendars"]);
+    expect(html).toContain('<p class="may" id="may">Die Anwendung darf:</p>');
+    expect(html).toContain('<ul class="perms" aria-labelledby="may">');
+    // The ticks are drawn, not inputs: the only fields of the form are the handle and the two buttons,
+    // so no permission can be unticked or submitted.
+    expect(html.match(/<input/g)).toHaveLength(1);
+    expect(html).not.toMatch(/type="checkbox"/);
+    expect(html.match(/<button/g)).toHaveLength(2);
   });
 });
 

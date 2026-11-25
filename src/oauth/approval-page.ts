@@ -35,14 +35,17 @@ const APPROVAL_COPY = {
   en: {
     title: "Connect your mailbox",
     lead: (client: string, host: string) => `${client} (${host}) wants to access this mailbox:`,
-    scope:
-      "It will be able to read and search your mail, save drafts, send mail in your name (at most 50 messages per day) and move messages to other folders or to the trash. It never empties the trash.",
-    wrongMailbox: (email: string) => `Not ${email}? Choose Deny, sign out of your mailbox and try again.`,
-    also: {
-      contacts: "It can also read your address book.",
-      calendars: "It can also read your calendars.",
-      both: "It can also read your calendars and your address book.",
+    may: "The application may:",
+    permissions: {
+      read: "Read and search your email",
+      drafts: "Save drafts",
+      send: "Send email in your name (at most 50 messages per day)",
+      move: "Move messages to other folders and to the trash",
+      contacts: "Read your address book",
+      calendars: "Read your calendars and events",
     },
+    never: "It never empties the trash.",
+    wrongMailbox: (email: string) => `Not ${email}? Choose Deny, sign out of your mailbox and try again.`,
     caution: "Only allow this if you started the connection yourself just now.",
     allow: "Allow",
     deny: "Deny",
@@ -50,20 +53,27 @@ const APPROVAL_COPY = {
   de: {
     title: "Postfach verbinden",
     lead: (client: string, host: string) => `${client} (${host}) möchte auf dieses Postfach zugreifen:`,
-    scope:
-      "Die Anwendung kann deine E-Mails lesen und durchsuchen, Entwürfe speichern, in deinem Namen senden (höchstens 50 Nachrichten pro Tag) und Nachrichten in andere Ordner oder in den Papierkorb verschieben. Den Papierkorb leert sie nie.",
+    may: "Die Anwendung darf:",
+    permissions: {
+      read: "E-Mails lesen und durchsuchen",
+      drafts: "Entwürfe speichern",
+      send: "E-Mails in deinem Namen senden (höchstens 50 Nachrichten pro Tag)",
+      move: "Nachrichten in andere Ordner und in den Papierkorb verschieben",
+      contacts: "Dein Adressbuch lesen",
+      calendars: "Deine Kalender und Termine lesen",
+    },
+    never: "Den Papierkorb leert sie nie.",
     wrongMailbox: (email: string) =>
       `Nicht ${email}? Wähle „Ablehnen“, melde dich im Postfach ab und versuche es erneut.`,
-    also: {
-      contacts: "Außerdem kann sie dein Adressbuch lesen.",
-      calendars: "Außerdem kann sie deine Kalender lesen.",
-      both: "Außerdem kann sie deine Kalender und dein Adressbuch lesen.",
-    },
     caution: "Erlaube das nur, wenn du die Verbindung gerade selbst gestartet hast.",
     allow: "Erlauben",
     deny: "Ablehnen",
   },
 } as const;
+
+/** What every connection may do, in the order shown; the areas of the deployment follow. */
+const MAIL_PERMISSIONS = ["read", "drafts", "send", "move"] as const;
+const AREA_PERMISSIONS = ["contacts", "calendars"] as const;
 
 const MESSAGE_COPY: Record<MessageKind, Record<PageLanguage, string>> = {
   refused: {
@@ -104,6 +114,15 @@ const STYLE = [
   `.sub{margin:.5rem 0 0;font-size:.875rem;color:${C.muted}}`,
   `.mailbox{margin:1.5rem 0 0;padding:.75rem 1rem;border:1px solid ${C.border};border-radius:1rem;background:${C.surface};font-weight:600;overflow-wrap:anywhere;box-shadow:0 8px 32px -8px rgba(14,70,35,.18)}`,
   ".text{margin:1rem 0 0;font-size:.875rem}",
+  // The permissions: a list, drawn as ticked boxes that cannot be changed. They are not form
+  // fields, so nothing here is ever submitted or could be unticked by a script-free page.
+  `.may{margin:1.5rem 0 0;font-size:.75rem;font-weight:600;letter-spacing:.04em;text-transform:uppercase;color:${C.muted}}`,
+  `.perms{list-style:none;margin:.5rem 0 0;padding:.25rem 1rem;border:1px solid ${C.border};border-radius:1rem;background:${C.surface}}`,
+  ".perms li{display:flex;align-items:flex-start;gap:.75rem;padding:.625rem 0;font-size:.875rem;line-height:1.35}",
+  `.perms li+li{border-top:1px solid ${C.border}}`,
+  `.tick{flex:none;position:relative;width:1.125rem;height:1.125rem;margin-top:.0625rem;border-radius:.3125rem;background:${C.primary};opacity:.8}`,
+  `.tick::after{content:"";position:absolute;left:.375rem;top:.1875rem;width:.3125rem;height:.5625rem;border:solid ${C.onPrimary};border-width:0 2px 2px 0;transform:rotate(45deg)}`,
+  `.never{margin:.625rem 0 0;font-size:.75rem;color:${C.muted}}`,
   ".caution{margin:1rem 0 0;font-size:.875rem;font-weight:600}",
   "form{display:flex;gap:.75rem;margin:2rem 0 0}",
   `button{font:inherit;font-size:.875rem;font-weight:500;height:2.5rem;padding:0 1.25rem;border-radius:.875rem;border:1px solid ${C.border};background:${C.background};color:${C.ink};cursor:pointer;transition:background-color .15s ease}`,
@@ -179,15 +198,20 @@ export function renderApprovalPage(p: {
   areas?: ReadonlySet<Area>;
 }): Response {
   const t = APPROVAL_COPY[p.lang];
-  const contacts = p.areas?.has("contacts") ?? false;
-  const calendars = p.areas?.has("calendars") ?? false;
-  const also = contacts && calendars ? t.also.both : contacts ? t.also.contacts : calendars ? t.also.calendars : null;
+  const granted = [...MAIL_PERMISSIONS, ...AREA_PERMISSIONS.filter((area) => p.areas?.has(area) ?? false)];
+  const permissions = granted
+    .map((key) => `<li><span class="tick" aria-hidden="true"></span><span>${escapeHtml(t.permissions[key])}</span></li>`)
+    .join("\n");
   const client = escapeHtml(p.clientName);
   const host = escapeHtml(p.redirectHost);
   const email = escapeHtml(p.email);
   const body = `<p class="sub">${t.lead(client, host)}</p>
 <p class="mailbox">${email}</p>
-<p class="text">${escapeHtml(t.scope)}</p>${also === null ? "" : `\n<p class="text">${escapeHtml(also)}</p>`}
+<p class="may" id="may">${escapeHtml(t.may)}</p>
+<ul class="perms" aria-labelledby="may">
+${permissions}
+</ul>
+<p class="never">${escapeHtml(t.never)}</p>
 <p class="caution">${escapeHtml(t.caution)}</p>
 <form method="post" action="/approve">
 <input type="hidden" name="h" value="${escapeHtml(p.handle)}">
