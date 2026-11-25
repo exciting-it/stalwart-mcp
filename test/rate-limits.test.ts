@@ -67,9 +67,18 @@ describe("rate limits", () => {
     ["/callback", 30],
     ["/approve", 30],
   ])("%s answers 429 to request %i + 1 per minute from one address", async (path, limit) => {
-    const ip = nextIp();
-    const statuses: number[] = [];
-    for (let i = 0; i <= limit; i++) statuses.push((await fetchWith(path, env, ip)).status);
+    const burst = async (): Promise<number[]> => {
+      const ip = nextIp();
+      const statuses: number[] = [];
+      for (let i = 0; i <= limit; i++) statuses.push((await fetchWith(path, env, ip)).status);
+      return statuses;
+    };
+    let statuses = await burst();
+    // The limiter counts per clock window. A burst that starts just before a window ends is
+    // split over two windows and is never refused; that happened once in CI at hh:mm:59.9.
+    // One more burst from a fresh address then lies inside one window, so a limiter that
+    // really does not limit still fails here.
+    if (statuses[limit] !== 429) statuses = await burst();
     expect(statuses.slice(0, limit).includes(429)).toBe(false);
     expect(statuses[limit]).toBe(429);
   });
