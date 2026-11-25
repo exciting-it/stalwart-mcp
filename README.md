@@ -41,13 +41,15 @@ Why it is built this way, and what its security rests on: [docs/design.md](docs/
 | `delete_contact` | Delete up to 50 contacts **for good** (needs `contacts`) |
 | `create_event` | Create an event: timed or all-day, location, description, up to 10 participants, a recurrence rule; participants get an invitation by email (needs `calendars`) |
 | `update_event` | Change an event or one occurrence; participants get an update by email (needs `calendars`) |
-| `delete_event` | Delete up to 50 events or occurrences **for good**; participants get a cancellation by email (needs `calendars`) |
+| `delete_event` | Delete up to 50 events or occurrences **for good**; participants of the mailbox's own events get a cancellation by email (needs `calendars`) |
 
 The contacts and calendar tools exist only when the deployment names their area in `FEATURES`
 (see [Contacts and calendars](#contacts-and-calendars)). Deleting a contact or an event is
 permanent: JMAP has no trash for them. An event write that involves participants makes the mail
 server send them mail (invitations, updates, cancellations), and each such write counts as one
-of the mailbox's 50 sends per day. The connector never answers an invitation.
+of the mailbox's 50 sends per day (one per started ten addresses). The connector never answers
+an invitation: a change or deletion of a meeting someone else organized only touches the
+mailbox's own copy.
 
 It cannot remove mail for good, flag mail, manage folders, touch filters, or send from another
 address. Deleting always means moving to Trash, and `move_mail` brings a message back. The
@@ -186,7 +188,10 @@ or unset means mail only). Any other name closes the worker with 503 and
   contacts and events, and the tool descriptions and the approval page say so. Up to 50 ids per
   delete call, no daily limit on deleting. A create whose outcome is unknown (timeout, network
   error, 5xx) is never retried: it answers a temporary error (or, when it would notify people,
-  `send_unconfirmed`), and the tool description says to look before creating again.
+  `send_unconfirmed`), and the tool description says to look before creating again. Single-line
+  text (names, title, location, organization, job title, phone number) may carry no control,
+  line or paragraph separator or bidi control character; `notes` and `description` may also
+  carry line breaks and tabs.
 - **Invitations are mail.** An event with participants is created with the mailbox as organizer,
   and the request asks the mail server to schedule (`sendSchedulingMessages: true`): Stalwart
   itself then sends invitations, updates and cancellations (iTIP) by email from the mailbox. The
@@ -194,14 +199,28 @@ or unset means mail only). Any other name closes the worker with 503 and
   event that has attendees before or after it, a deletion of an event with attendees, each only
   when the event does not end in the past (a recurring event never counts as past; when unsure,
   it counts as notifying). Every other write asks the server not to schedule. A notifying write
-  counts as one send against the mailbox's 50 per day, shared with `send_mail` (a deletion of
-  several such events needs that many, or nothing is deleted); a notifying create or update is
-  deduplicated like a send (the same request within 10 minutes returns the first result and
-  sends nothing; an unknown outcome is `send_unconfirmed` and blocks the same request for the
-  window). **Outside production only addresses on `SEND_ALLOWLIST` may be notified**, checked for
-  every address involved before anything is written, also for an existing event's attendees
-  when it is changed or deleted. Audit rows of the event writes carry how many addresses were
-  notified (`recipient_count`), never an address.
+  counts as one send against the mailbox's 50 per day, shared with `send_mail`, or one per
+  started ten addresses when it involves more than 10 (an existing event created elsewhere); if
+  that many are not left, it is refused with `send_limit_reached` and nothing is written (a
+  deletion of several such events needs the sum, or nothing is deleted). A notifying create or
+  update is deduplicated like a send (the same request within 10 minutes returns the first
+  result and sends nothing). An unknown outcome of a notifying create, update or delete (no
+  readable answer, or an answer that names the event nowhere) is `send_unconfirmed`: the sends
+  stay counted and, for a create or update, the same request is blocked for the window.
+  **Outside production only addresses on `SEND_ALLOWLIST` may be notified**, checked for every
+  address involved before anything is written, also for an existing event's attendees when it
+  is changed or deleted. The connector's event writes of one mailbox run one after the other, so
+  none of them can change an event between another's check and its write. Audit rows of the event writes
+  carry how many addresses were notified (`recipient_count`), never an address.
+- **Someone else's meetings.** The mailbox organizes an event when its organizer
+  (`organizerCalendarAddress`) is the mailbox's own address (any case, without `mailto:`) or it
+  has none. For an event organized by someone else, `update_event` with `participants` or
+  `recurrence` is refused (`invalid_input`, nothing written); any other change and a deletion
+  only affect the mailbox's own copy: written with `sendSchedulingMessages: false`, no send
+  counted, `invitations: 0` / `cancellations: 0`, and the organizer is not informed.
+- **Replacing participants.** `participants` in `update_event` replaces the list; an attendee
+  whose address is already on the event keeps the answer it gave (`participationStatus`) and its
+  name when the input gives none. Only new addresses start as `needs-action`, asked to reply.
 - **Property names.** Stalwart 1.x implements the newer JSCalendar names and silently stores
   any unknown property as inert data, so a wrong name never fails, it just does nothing. The
   connector writes `calendarAddress` (`mailto:` URI) for participants, `organizerCalendarAddress`,
@@ -210,9 +229,15 @@ or unset means mail only). Any other name closes the worker with 503 and
   `isOrigin`, `sendTo`, `replyTo` or `recurrenceRules`. When reading it still accepts
   `recurrenceRules`, a participant's `email` and `sendTo.imip` as fallbacks.
 - **Event time.** A timed event is stored as the wall-clock `start` of the input instant in its
-  `time_zone` (default `Etc/UTC`) and a `duration` whose days are wall-clock days in that zone and
-  whose rest is exact time (so an event across a daylight-saving change ends at the given
-  instant). An all-day event is a floating `start` at midnight with `P<days>D` and
+  `time_zone` and a `duration` whose days are wall-clock days in that zone and whose rest is
+  exact time (so an event across a daylight-saving change ends at the given instant). Without
+  `time_zone`, `create_event` uses `Etc/UTC`; `update_event` keeps the event's stored zone (so a
+  weekly Europe/Berlin meeting stays at its local time after the next daylight-saving change),
+  and only an event without one (floating) gets `Etc/UTC`. `time_zone` must be an IANA name
+  (`Area/Location`, or `UTC`); offsets and abbreviations (`+01:00`, `GMT`, `EST`) are refused,
+  and the canonical spelling is written (`europe/berlin` becomes `Europe/Berlin`, `UTC` becomes
+  `Etc/UTC`). A wall-clock time that occurs twice (when the clocks go back) means its first
+  occurrence, as RFC 5545 and RFC 8984 say. Timed events take years 1000 to 9999. An all-day event is a floating `start` at midnight with `P<days>D` and
   `showWithoutTime: true`. An occurrence id (as `search_events` lists it) changes or deletes
   that occurrence only.
 - **What the tools return.** Every result leads with a fixed `content_notice` saying that names,
@@ -328,7 +353,8 @@ same assumptions as the code):
 - [ ] What the server does when it cannot send an invitation: `noSupportedScheduleMethods`
   (the tool answers a fixed refusal), or saving the event silently without sending.
 - [ ] An update or a deletion of an event the mailbox was invited to (organized by someone
-  else): what the server sends to the organizer.
+  else), which the connector sends with `sendSchedulingMessages: false`: the server sends nothing
+  to the organizer or the other attendees, and changes only the mailbox's copy.
 
 Repeat them after a Stalwart upgrade.
 
@@ -383,8 +409,9 @@ request under a host other than `PUBLIC_ORIGIN` answers 404.
   OAuth client.
 - Contacts and calendars cover the mailbox's own account: no shared address books or calendars
   of other accounts, no free/busy lookups, no answering invitations. Deleting a contact or an
-  event cannot be undone. An event update with `participants` makes the mailbox the organizer
-  and replaces the whole list; a contact update rebuilds the name from the parts given. A
+  event cannot be undone. An event update with `participants` replaces the whole list (kept
+  attendees keep their answers) and is refused for a meeting someone else organized; a contact
+  update rebuilds the name from the parts given. A
   recurring event is
   expanded by the server for the requested window only; `search_events` pages by `offset`, so a
   change between two pages can shift the entries.

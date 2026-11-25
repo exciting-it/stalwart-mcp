@@ -192,9 +192,13 @@ like mail: reading, creating, changing and deleting.
   daily limit on deleting.
 - **A write is never repeated blindly.** The vault repeats a request only after a 401 (the
   server refused it unprocessed). Any other answer that does not show what the server did
-  (network error, timeout, 5xx, an unreadable answer, a `/set` answer that names the object
-  nowhere, a `serverFail`) is `upstream_unavailable`, or `send_unconfirmed` for a write that
-  notifies people, and the caller decides.
+  (network error, timeout, 5xx, no answer to the `/set`, a `serverFail`, a create answer that
+  names the object nowhere) is `upstream_unavailable`, or `send_unconfirmed` for a write that
+  notifies people, and the caller decides. For an update or delete that sends no mail, a `/set`
+  answer that names the id in neither map is `not_found` (update) or lists it as not deleted
+  (delete), and one that cannot be parsed is `upstream_rejected`. For a notifying update or
+  delete these cases mean "we do not know whether the server sent mail": `send_unconfirmed`,
+  the sends stay counted, and an update keeps its dedupe row (blocking the identical request).
 - **Same rules as mail.** The tools go through `defineTool` and the vault. The account comes from
   the grant, no tool has an account parameter, ids are only used inside the grant's account, and
   a foreign id answers "not found". An `address_book_id` or `calendar_id` that is not the
@@ -244,13 +248,45 @@ like mail: reading, creating, changing and deleting.
   all-day or floating end gets a day to spare, and an unknown end is not past: when unsure, a
   write counts as notifying and costs a send it may not need, never the reverse. A notifying
   write must involve only allow-listed addresses outside production (checked before anything is
-  written), takes one send of the mailbox's 50 per day (shared with `send_mail`; a deletion of
-  several notifying events reserves all of them at once, or deletes nothing), and a notifying
-  create or update is deduplicated over a hash of the operation and its validated input with
-  the same `recent_sends` rows and in-flight table as `send_mail`. A deletion sends the
-  notifying ids and the others in two requests, and gives back the sends of events that were
-  definitely not deleted. Non-notifying writes cost nothing beyond the call. The tools and the
-  audit rows report how many attendees were notified, never an address.
+  written), takes one send of the mailbox's 50 per day (shared with `send_mail`) for every
+  started ten addresses it involves (one send covers at most `eventParticipantsMax` people, like
+  one message; more is possible for an existing event created elsewhere), refused with
+  `send_limit_reached` before anything is written when fewer are left (a deletion of several
+  notifying events reserves the sum at once, or deletes nothing), and a notifying create or
+  update is deduplicated over a hash of the operation and its validated input with the same
+  `recent_sends` rows and in-flight table as `send_mail`. A deletion sends the notifying ids and
+  the others in two requests, and gives back the sends of events that were definitely not
+  deleted; when the second request fails after the first went through, the result still
+  reports the first (its cancellations) and names the second's ids in `not_deleted`.
+  Non-notifying writes cost nothing beyond the call. The tools and the audit rows report how
+  many attendees were notified, never an address.
+- **One event write at a time.** An update reads the event, decides and then writes; another
+  write in between could change who would be notified (a write decided as "notifies only
+  allow-listed people" would then notify someone else). So `create_event`, `update_event` and
+  `delete_event` of one vault run one after the other (a promise queue in `MailboxOperations`,
+  released on every exit). A notifying create or update identical to one already on its way
+  upstream still shares that one's result instead of queueing.
+- **The organizer rule.** The mailbox organizes an event when its `organizerCalendarAddress` is
+  the mailbox's own address (case-insensitive, without `mailto:`) or the event names no
+  organizer. Only then can a write notify. For a meeting someone else organized, an update with
+  `participants` or `recurrence` is `invalid_input` and nothing is written (the connector would
+  otherwise make the mailbox the organizer of a foreign meeting); every other update and every
+  deletion is written with `sendSchedulingMessages: false`, costs no send and reports
+  `invitations: 0` / `cancellations: 0`: it only changes the mailbox's own copy, and the
+  organizer is not informed. The tool descriptions say so.
+- **Replacing participants** (`update_event` with `participants`) keeps what kept attendees
+  answered: an address already on the event keeps its stored `participationStatus`, and its
+  `name` when the input gives none; only new addresses start as `needs-action` with
+  `expectReply: true`. The stored participants come from the same read as the audience.
+- **Time zones of writes.** `time_zone` is an IANA name (`Area/Location` with one or more `/`
+  parts, or `UTC`); offsets and abbreviations are refused, the name must be known to `Intl`,
+  and its canonical spelling is written (`UTC` as `Etc/UTC`). A new event's time without
+  `time_zone` is in `Etc/UTC`. An update's new time without `time_zone` keeps the event's stored
+  `timeZone` (read with the audience), so a recurring local-time meeting does not shift by an
+  hour after the next daylight-saving change; only a floating event gets `Etc/UTC`. A wall-clock
+  time that occurs twice is its first occurrence (RFC 5545, RFC 8984), in the connector and in
+  the stand-in alike. A timed write takes years 1000 to 9999 only, and a wall-clock year outside
+  that range in the event's zone is `invalid_input`, never a wrong year.
 - **Stalwart's property names.** Stalwart 1.x implements the newer JSCalendar names and stores
   any unknown property silently as inert data, so a wrong name would never fail. The connector
   writes `calendarAddress` (`mailto:`) for participants, `organizerCalendarAddress`, one
@@ -258,7 +294,9 @@ like mail: reading, creating, changing and deleting.
   older `recurrenceRules`, `email` and `sendTo` as fallbacks. The stand-in behaves like the
   server here: it expands `recurrenceRule` only, treats `recurrenceRules`, `sendTo` and
   `replyTo` as inert, and records the iTIP messages it "sends" only for
-  `sendSchedulingMessages: true`, attendees, no draft and an end not in the past.
+  `sendSchedulingMessages: true`, attendees, no draft and an end not in the past; for an event
+  organized by someone else that lists the mailbox, it records a `REPLY` to the organizer
+  instead.
 - **What is assumed, not known.** The tests run against a stand-in written from the same
   reading of the JMAP Contacts (RFC 9610) and the JMAP Calendars draft as the code, so they
   cannot show that Stalwart agrees. The unknowns are listed as live checks in the README: the
