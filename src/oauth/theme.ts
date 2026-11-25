@@ -32,6 +32,14 @@ export const THEME = {
     body: { family: "Instrument Sans", src: "/brand/fonts/instrument-sans.woff2", weight: "400 700" },
   },
   icon: "/brand/favicon.svg",
+  /**
+   * One sentence for the page shown before the sign-in at the mail server: which login is meant,
+   * in the words your users know. Deployment-specific, like the rest of this file.
+   */
+  signInHint: {
+    de: "Benutze deine E-Mail-Adresse und dein Mail-Passwort, dieselben wie im Webmail.",
+    en: "Use your email address and your mail password, the same as for webmail.",
+  },
   /** The right half on wide screens. The image is decoration; the lines are the brand's claim. */
   artwork: {
     src: "/brand/artwork.jpg",

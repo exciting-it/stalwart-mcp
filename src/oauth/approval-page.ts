@@ -75,6 +75,30 @@ const APPROVAL_COPY = {
 const MAIL_PERMISSIONS = ["read", "drafts", "send", "move"] as const;
 const AREA_PERMISSIONS = ["contacts", "calendars"] as const;
 
+/** The page before the sign-in at the mail server: what is about to happen, in two steps. */
+const INTRO_COPY = {
+  en: {
+    lead: (client: string, host: string) => `${client} (${host}) wants to connect to your mailbox. This takes two steps:`,
+    signIn: "Sign in",
+    signInText: (mailHost: string) => `On the next page you sign in at your mail server (${mailHost}).`,
+    confirm: "Confirm",
+    confirmText: "Then you come back here, see what the application may do, and confirm the connection.",
+    password: "The application never sees your password.",
+    go: "Continue to sign-in",
+    caution: "Only continue if you started the connection yourself just now.",
+  },
+  de: {
+    lead: (client: string, host: string) => `${client} (${host}) möchte sich mit deinem Postfach verbinden. Das geht in zwei Schritten:`,
+    signIn: "Anmelden",
+    signInText: (mailHost: string) => `Auf der nächsten Seite meldest du dich bei deinem Mailserver an (${mailHost}).`,
+    confirm: "Bestätigen",
+    confirmText: "Danach kommst du hierher zurück, siehst, was die Anwendung darf, und bestätigst die Verbindung.",
+    password: "Dein Passwort bekommt die Anwendung nie zu sehen.",
+    go: "Weiter zur Anmeldung",
+    caution: "Fahre nur fort, wenn du die Verbindung gerade selbst gestartet hast.",
+  },
+} as const;
+
 const MESSAGE_COPY: Record<MessageKind, Record<PageLanguage, string>> = {
   refused: {
     en: "This mailbox cannot be connected.",
@@ -123,6 +147,15 @@ const STYLE = [
   `.tick{flex:none;position:relative;width:1.125rem;height:1.125rem;margin-top:.0625rem;border-radius:.3125rem;background:${C.primary};opacity:.8}`,
   `.tick::after{content:"";position:absolute;left:.375rem;top:.1875rem;width:.3125rem;height:.5625rem;border:solid ${C.onPrimary};border-width:0 2px 2px 0;transform:rotate(45deg)}`,
   `.never{margin:.625rem 0 0;font-size:.75rem;color:${C.muted}}`,
+  // The intro page: two numbered steps and one link that leaves for the mail server's sign-in.
+  ".steps{list-style:none;margin:1.5rem 0 0;padding:0;counter-reset:step}",
+  ".steps li{position:relative;padding:0 0 1.125rem 2.75rem;font-size:.875rem;line-height:1.45}",
+  `.steps li::before{counter-increment:step;content:counter(step);position:absolute;left:0;top:-.0625rem;display:flex;align-items:center;justify-content:center;width:1.875rem;height:1.875rem;border-radius:50%;border:1px solid ${C.border};background:${C.surface};font-weight:600;font-size:.8125rem}`,
+  ".steps strong{display:block;font-weight:600}",
+  `.steps .hint{display:block;margin-top:.25rem;color:${C.muted}}`,
+  `.go{display:flex;align-items:center;justify-content:center;height:2.5rem;margin:.75rem 0 0;border-radius:.875rem;background:${C.primary};color:${C.onPrimary};font-size:.875rem;font-weight:500;text-decoration:none;box-shadow:0 1px 2px rgba(14,70,35,.2);transition:background-color .15s ease}`,
+  `.go:hover{background:${C.primaryHover}}`,
+  `.go:focus-visible{outline:2px solid ${C.ring};outline-offset:2px}`,
   ".caution{margin:1rem 0 0;font-size:.875rem;font-weight:600}",
   "form{display:flex;gap:.75rem;margin:2rem 0 0}",
   `button{font:inherit;font-size:.875rem;font-weight:500;height:2.5rem;padding:0 1.25rem;border-radius:.875rem;border:1px solid ${C.border};background:${C.background};color:${C.ink};cursor:pointer;transition:background-color .15s ease}`,
@@ -220,6 +253,29 @@ ${permissions}
 </form>
 <p class="note">${t.wrongMailbox(email)}</p>`;
   return htmlResponse(p.lang, t.title, body, 200);
+}
+
+/**
+ * The page before the sign-in. `continueUrl` is the mail server's sign-in address this worker
+ * built for the request; it is the only address on any page that leaves this origin.
+ */
+export function renderIntroPage(p: {
+  lang: PageLanguage;
+  clientName: string;
+  redirectHost: string;
+  mailHost: string;
+  continueUrl: string;
+}): Response {
+  const t = INTRO_COPY[p.lang];
+  const body = `<p class="sub">${t.lead(escapeHtml(p.clientName), escapeHtml(p.redirectHost))}</p>
+<ol class="steps">
+<li><strong>${escapeHtml(t.signIn)}</strong>${escapeHtml(t.signInText(p.mailHost))}<span class="hint">${escapeHtml(THEME.signInHint[p.lang])}</span></li>
+<li><strong>${escapeHtml(t.confirm)}</strong>${escapeHtml(t.confirmText)}</li>
+</ol>
+<p class="never">${escapeHtml(t.password)}</p>
+<p class="caution">${escapeHtml(t.caution)}</p>
+<a class="go" href="${escapeHtml(p.continueUrl)}">${escapeHtml(t.go)}</a>`;
+  return htmlResponse(p.lang, APPROVAL_COPY[p.lang].title, body, 200);
 }
 
 export function renderMessagePage(p: { lang: PageLanguage; kind: MessageKind; status: number }): Response {
