@@ -16,6 +16,8 @@ export default defineConfig({
           CONNECTOR_NAME: "Test Mail",
           // The local runtime does not implement jurisdictions; tests run without one.
           DATA_JURISDICTION: "",
+          // Every area on, so all tools are under test.
+          FEATURES: "contacts,calendars",
           STALWART_OAUTH_CLIENT_ID: "test-client",
           STALWART_OAUTH_CLIENT_SECRET: "test-secret",
           // Test value (base64 of 32 zero bytes), not a secret.

@@ -1,4 +1,10 @@
-import { stalwartOrigin } from "../config";
+import { AREAS, type Area, features, stalwartOrigin } from "../config";
+
+const MAIL_SCOPE = "urn:ietf:params:oauth:scope:mail";
+const AREA_SCOPE: Record<Area, string> = {
+  contacts: "urn:ietf:params:oauth:scope:contacts",
+  calendars: "urn:ietf:params:oauth:scope:calendars",
+};
 
 /**
  * The one Stalwart server this worker talks to (`STALWART_ORIGIN`). Every upstream URL is
@@ -20,5 +26,8 @@ export const STALWART = {
   get session(): string {
     return `${stalwartOrigin()}/jmap/session`;
   },
-  scope: "urn:ietf:params:oauth:scope:mail",
+  /** Mail always; one more scope for each area in `FEATURES`. Never more than the deployment offers. */
+  get scope(): string {
+    return [MAIL_SCOPE, ...AREAS.filter((area) => features().has(area)).map((area) => AREA_SCOPE[area])].join(" ");
+  },
 } as const;

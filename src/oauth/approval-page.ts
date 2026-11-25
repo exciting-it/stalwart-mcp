@@ -4,6 +4,7 @@
  * client-supplied, so every interpolated value is escaped. No page ever shows an error detail
  * or upstream text. The pages run no script and load only this origin's own fonts and images.
  */
+import type { Area } from "../config";
 import { THEME } from "./theme";
 
 export type PageLanguage = "de" | "en";
@@ -37,6 +38,11 @@ const APPROVAL_COPY = {
     scope:
       "It will be able to read and search your mail, save drafts, send mail in your name (at most 50 messages per day) and move messages to other folders or to the trash. It never empties the trash.",
     wrongMailbox: (email: string) => `Not ${email}? Choose Deny, sign out of your mailbox and try again.`,
+    also: {
+      contacts: "It can also read your address book.",
+      calendars: "It can also read your calendars.",
+      both: "It can also read your calendars and your address book.",
+    },
     caution: "Only allow this if you started the connection yourself just now.",
     allow: "Allow",
     deny: "Deny",
@@ -48,6 +54,11 @@ const APPROVAL_COPY = {
       "Die Anwendung kann deine E-Mails lesen und durchsuchen, Entwürfe speichern, in deinem Namen senden (höchstens 50 Nachrichten pro Tag) und Nachrichten in andere Ordner oder in den Papierkorb verschieben. Den Papierkorb leert sie nie.",
     wrongMailbox: (email: string) =>
       `Nicht ${email}? Wähle „Ablehnen“, melde dich im Postfach ab und versuche es erneut.`,
+    also: {
+      contacts: "Außerdem kann sie dein Adressbuch lesen.",
+      calendars: "Außerdem kann sie deine Kalender lesen.",
+      both: "Außerdem kann sie deine Kalender und dein Adressbuch lesen.",
+    },
     caution: "Erlaube das nur, wenn du die Verbindung gerade selbst gestartet hast.",
     allow: "Erlauben",
     deny: "Ablehnen",
@@ -164,14 +175,19 @@ export function renderApprovalPage(p: {
   redirectHost: string;
   email: string;
   handle: string;
+  /** The areas beyond mail this deployment asks for; the page names each of them. */
+  areas?: ReadonlySet<Area>;
 }): Response {
   const t = APPROVAL_COPY[p.lang];
+  const contacts = p.areas?.has("contacts") ?? false;
+  const calendars = p.areas?.has("calendars") ?? false;
+  const also = contacts && calendars ? t.also.both : contacts ? t.also.contacts : calendars ? t.also.calendars : null;
   const client = escapeHtml(p.clientName);
   const host = escapeHtml(p.redirectHost);
   const email = escapeHtml(p.email);
   const body = `<p class="sub">${t.lead(client, host)}</p>
 <p class="mailbox">${email}</p>
-<p class="text">${escapeHtml(t.scope)}</p>
+<p class="text">${escapeHtml(t.scope)}</p>${also === null ? "" : `\n<p class="text">${escapeHtml(also)}</p>`}
 <p class="caution">${escapeHtml(t.caution)}</p>
 <form method="post" action="/approve">
 <input type="hidden" name="h" value="${escapeHtml(p.handle)}">

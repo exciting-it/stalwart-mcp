@@ -20,6 +20,11 @@ export interface JmapSession {
   apiUrl: string;
   accountId: string;
   username: string;
+  /**
+   * The capabilities for which this account is the token's primary account. Stalwart lists only
+   * what the token's scopes allow, so this tells whether a connection may use contacts or calendars.
+   */
+  capabilities: string[];
 }
 
 const USING = [
@@ -92,7 +97,10 @@ export async function fetchSession(accessToken: string): Promise<JmapSession> {
   if (typeof apiUrl !== "string" || !onStalwart(apiUrl)) throw new MailError("upstream_rejected");
   if (typeof username !== "string" || username === "") throw new MailError("upstream_rejected");
   if (!MailIdSchema.safeParse(accountId).success) throw new MailError("upstream_rejected");
-  return { apiUrl, accountId: accountId as string, username };
+  const capabilities = Object.entries(body.primaryAccounts)
+    .filter(([, id]) => id === accountId)
+    .map(([capability]) => capability);
+  return { apiUrl, accountId: accountId as string, username, capabilities };
 }
 
 function isInvocation(v: unknown): v is JmapInvocation {
@@ -107,7 +115,7 @@ export async function jmapCall(
   session: JmapSession,
   accessToken: string,
   calls: JmapInvocation[],
-  { outcomeUnknown }: { outcomeUnknown?: MailErrorCode } = {},
+  { outcomeUnknown, using = USING }: { outcomeUnknown?: MailErrorCode; using?: readonly string[] } = {},
 ): Promise<JmapInvocation[]> {
   // Checked again here, so a stored or hand-made session can never carry the token elsewhere.
   if (!onStalwart(session.apiUrl)) throw new MailError("upstream_rejected");
@@ -117,7 +125,7 @@ export async function jmapCall(
     {
       method: "POST",
       headers: { "Content-Type": "application/json", Accept: "application/json" },
-      body: JSON.stringify({ using: USING, methodCalls: calls }),
+      body: JSON.stringify({ using, methodCalls: calls }),
     },
     outcomeUnknown,
   );

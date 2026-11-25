@@ -254,6 +254,7 @@ export const MAIL_ERROR_CODES = [
   "send_limit_reached",
   "recipient_not_allowed",
   "reconnect_required",
+  "not_granted",
   "blocked",
   "disabled",
   "no_identity",
@@ -276,6 +277,8 @@ export const MAIL_ERROR_MESSAGES: Record<MailErrorCode, string> = {
   send_limit_reached: "The daily sending limit has been reached.",
   recipient_not_allowed: "One or more recipients are not allowed.",
   reconnect_required: "The connection must be re-authorized by the mailbox owner.",
+  not_granted:
+    "This connection does not include that permission. Remove the connector in your AI tool and connect the mailbox again.",
   blocked: "This connection has been blocked.",
   disabled: "The mail connector is disabled for this mailbox.",
   no_identity: "The mailbox has no sending identity.",

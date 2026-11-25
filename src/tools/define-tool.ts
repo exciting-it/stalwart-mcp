@@ -3,6 +3,7 @@
  * comes only from the grant; a result leaves only as the parsed output schema; a failure leaves
  * only as the fixed sentence of its error code.
  */
+import type { Area } from "../config";
 import {
   MAIL_ERROR_MESSAGES,
   MailError,
@@ -38,6 +39,8 @@ export interface ToolSpec<I extends z.ZodTypeAny, O extends z.ZodTypeAny> {
   title: string;
   description: string;
   kind: "read" | "draft" | "send" | "move" | "trash";
+  /** The area this tool belongs to; without one it is a mail tool and always offered. */
+  area?: Area;
   input: I;
   output: O;
   /** `grant` is the verified connection: its address may be shown, never chosen by the input. */
@@ -60,6 +63,7 @@ const REFUSED_CODES: ReadonlySet<MailErrorCode> = new Set<MailErrorCode>([
   "send_limit_reached",
   "recipient_not_allowed",
   "reconnect_required",
+  "not_granted",
 ]);
 
 type Outcome = { ok: true; result: Record<string, unknown> } | { ok: false; code: MailErrorCode };

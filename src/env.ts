@@ -13,6 +13,12 @@ export interface Env {
    * stored connection.
    */
   DATA_JURISDICTION?: string;
+  /**
+   * What the connector offers beyond mail: a comma-separated list of `contacts` and `calendars`.
+   * Optional; without it only mail. Each area widens the scope asked of Stalwart, so mailboxes
+   * connected before it was switched on have to connect again to use it.
+   */
+  FEATURES?: string;
 
   // --- bindings ---
   OAUTH_KV: KVNamespace;

@@ -87,6 +87,28 @@ describe("approval page", () => {
   });
 });
 
+describe("areas beyond mail on the approval page", () => {
+  const page = (lang: "de" | "en", areas?: ("contacts" | "calendars")[]) =>
+    renderApprovalPage({ lang, ...base, areas: areas === undefined ? undefined : new Set(areas) }).text();
+
+  it("says nothing about calendars or contacts when the deployment offers only mail", async () => {
+    for (const html of [await page("en"), await page("en", []), await page("de", [])]) {
+      expect(html).not.toMatch(/calendar|address book|Kalender|Adressbuch/i);
+    }
+  });
+
+  it("names exactly the areas that are switched on", async () => {
+    expect(await page("en", ["contacts"])).toContain("It can also read your address book.");
+    expect(await page("en", ["contacts"])).not.toMatch(/calendar/i);
+    expect(await page("en", ["calendars"])).toContain("It can also read your calendars.");
+    expect(await page("en", ["calendars"])).not.toMatch(/address book/i);
+    expect(await page("en", ["contacts", "calendars"])).toContain("It can also read your calendars and your address book.");
+    expect(await page("de", ["contacts", "calendars"])).toContain("Außerdem kann sie deine Kalender und dein Adressbuch lesen.");
+    expect(await page("de", ["contacts"])).toContain("Außerdem kann sie dein Adressbuch lesen.");
+    expect(await page("de", ["calendars"])).toContain("Außerdem kann sie deine Kalender lesen.");
+  });
+});
+
 describe("page design", () => {
   const pages = () => [
     renderApprovalPage({ lang: "de", ...base }),

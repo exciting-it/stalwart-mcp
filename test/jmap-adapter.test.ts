@@ -47,7 +47,12 @@ describe("fetchSession", () => {
   it("takes the account id from primaryAccounts and the address from username", async () => {
     const { accountId } = fake.addMailbox(A);
     const session = await fetchSession(fake.tokensFor(A).accessToken);
-    expect(session).toEqual({ apiUrl: `${STALWART.origin}/jmap/`, accountId, username: A });
+    expect(session).toEqual({
+      apiUrl: `${STALWART.origin}/jmap/`,
+      accountId,
+      username: A,
+      capabilities: ["urn:ietf:params:jmap:mail", "urn:ietf:params:jmap:submission"],
+    });
     expect(fake.requests[0]).toMatchObject({ url: STALWART.session, method: "GET" });
   });
 
@@ -63,7 +68,7 @@ describe("fetchSession", () => {
     await expectMailError(fetchSession(accessToken), "upstream_rejected");
 
     // An adapter built from such a session (e.g. a stored one) refuses before any request.
-    const session: JmapSession = { apiUrl: `${EVIL}/jmap/`, accountId: "acc1", username: A };
+    const session: JmapSession = { apiUrl: `${EVIL}/jmap/`, accountId: "acc1", username: A, capabilities: [] };
     const adapter = new JmapMailboxAdapter({ accountId: "acc1", accessToken, session });
     await expectMailError(adapter.listMailboxes(), "upstream_rejected");
     expect(fake.requests).toHaveLength(1);

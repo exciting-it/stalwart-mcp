@@ -9,10 +9,10 @@ import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/
 import type { AnySchema } from "@modelcontextprotocol/sdk/server/zod-compat.js";
 import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
-import { connectorName } from "../config";
+import { connectorName, features } from "../config";
 import type { Env } from "../env";
 import { GrantClientId, GrantProps } from "../oauth/grant-props";
-import { TOOLS } from "../tools";
+import { toolsFor } from "../tools";
 import type { Grant, ToolDeps, ToolSpec } from "../tools/define-tool";
 
 export const SERVER_INSTRUCTIONS =
@@ -98,7 +98,7 @@ function serverFor(deps: ToolDeps, grant: Grant): McpServer {
     { name: "stalwart-mcp", title: connectorName(), version: "1.0.0" },
     { instructions: serverInstructions(grant.email) },
   );
-  for (const tool of TOOLS) {
+  for (const tool of toolsFor(features())) {
     const { spec } = tool;
     // The SDK types Zod through its own copy; these are runtime-compatible Zod 3 schemas.
     server.registerTool<AnySchema, AnySchema>(

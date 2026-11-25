@@ -3,6 +3,7 @@
  * GET only renders. POST decides; the handle works once and only in the browser that started
  * the flow (the library's `__Host-` cookie). Only Allow creates a Worker grant.
  */
+import { features } from "../config";
 import type { OAuthHelpers } from "@cloudflare/workers-oauth-provider";
 import { isBlocked, writeAudit } from "../audit";
 import type { Env } from "../env";
@@ -29,6 +30,7 @@ export async function handleApprove(request: Request, env: Env, api: OAuthHelper
       redirectHost: pending.redirectHost,
       email: pending.email,
       handle,
+      areas: features(),
     });
   }
   if (request.method !== "POST") return new Response("Method not allowed", { status: 405, headers: { Allow: "GET, POST" } });

@@ -48,6 +48,35 @@ export function dataJurisdiction(value: unknown): DurableObjectJurisdiction | un
   return typeof value === "string" && DATA_JURISDICTIONS.includes(value) ? (value as DurableObjectJurisdiction) : null;
 }
 
+/** What a deployment can offer beyond mail. Each area needs its own scope at Stalwart. */
+export const AREAS = ["contacts", "calendars"] as const;
+export type Area = (typeof AREAS)[number];
+
+/**
+ * `FEATURES` as a set of areas: empty when it is not set (mail only), null when it names
+ * something this worker does not know.
+ */
+export function parseFeatures(value: unknown): ReadonlySet<Area> | null {
+  if (value === undefined || value === "") return new Set();
+  if (typeof value !== "string") return null;
+  const areas = new Set<Area>();
+  for (const part of value.split(",")) {
+    const name = part.trim();
+    if (!(AREAS as readonly string[]).includes(name)) return null;
+    areas.add(name as Area);
+  }
+  return areas;
+}
+
+/**
+ * The areas beyond mail this deployment offers (`FEATURES`). They decide which scopes are asked
+ * of Stalwart, which tools exist and what the approval page says. A setting that is not valid
+ * offers none; `configProblem` closes the worker for it anyway.
+ */
+export function features(): ReadonlySet<Area> {
+  return parseFeatures(env.FEATURES) ?? new Set();
+}
+
 export const DEFAULT_CONNECTOR_NAME = "Stalwart Mail";
 const CONNECTOR_NAME_MAX = 60;
 

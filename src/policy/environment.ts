@@ -1,4 +1,4 @@
-import { dataJurisdiction, httpsOrigin } from "../config";
+import { dataJurisdiction, httpsOrigin, parseFeatures } from "../config";
 import type { Env } from "../env";
 
 export function isProduction(env: Pick<Env, "ENVIRONMENT">): boolean {
@@ -18,12 +18,14 @@ export function publicOrigin(env: Pick<Env, "ENVIRONMENT" | "PUBLIC_ORIGIN">, re
 
 /** The setting that keeps this deployment from serving anything, or null when all are in order. */
 export function configProblem(
-  env: Pick<Env, "ENVIRONMENT" | "STALWART_ORIGIN" | "PUBLIC_ORIGIN" | "DATA_JURISDICTION">,
-): "STALWART_ORIGIN" | "PUBLIC_ORIGIN" | "DATA_JURISDICTION" | null {
+  env: Pick<Env, "ENVIRONMENT" | "STALWART_ORIGIN" | "PUBLIC_ORIGIN" | "DATA_JURISDICTION" | "FEATURES">,
+): "STALWART_ORIGIN" | "PUBLIC_ORIGIN" | "DATA_JURISDICTION" | "FEATURES" | null {
   if (httpsOrigin(env.STALWART_ORIGIN) === null) return "STALWART_ORIGIN";
   if (isProduction(env) && httpsOrigin(env.PUBLIC_ORIGIN) === null) return "PUBLIC_ORIGIN";
   // A mistyped jurisdiction must not quietly become "no restriction".
   if (dataJurisdiction(env.DATA_JURISDICTION) === null) return "DATA_JURISDICTION";
+  // A mistyped area must not quietly ask Stalwart for less (or more) than intended.
+  if (parseFeatures(env.FEATURES) === null) return "FEATURES";
   return null;
 }
 
