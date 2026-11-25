@@ -32,10 +32,12 @@
     "ENVIRONMENT": "production",
     "STALWART_ORIGIN": "https://mail.exciting-it.com",
     "PUBLIC_ORIGIN": "https://mail-mcp.exciting-it.com",
-    "CONNECTOR_NAME": "exciting IT Mail"
+    "CONNECTOR_NAME": "exciting IT Mail",
+    "DATA_JURISDICTION": "eu"
   },
-  // KV and D1 carry no ids yet. Create them once (README, "Deploying your own"), with a
-  // jurisdiction if you need one (it can only be set at creation), and put the ids here.
+  // Production's KV and D1 do not exist yet and carry no ids. Create them once (README,
+  // "Deploying your own"), with a jurisdiction if you need one (it can only be set at
+  // creation), and put the ids here. The ids are not secrets.
   "kv_namespaces": [{ "binding": "OAUTH_KV" }],
   "d1_databases": [{ "binding": "DB", "database_name": "stalwart-mcp", "migrations_dir": "migrations" }],
   "ratelimits": [
@@ -64,10 +66,19 @@
       "vars": {
         "ENVIRONMENT": "staging",
         "STALWART_ORIGIN": "https://mail.exciting-it.com",
-        "CONNECTOR_NAME": "exciting IT Mail (staging)"
+        "CONNECTOR_NAME": "exciting IT Mail (staging)",
+        "DATA_JURISDICTION": "eu"
       },
-      "kv_namespaces": [{ "binding": "OAUTH_KV" }],
-      "d1_databases": [{ "binding": "DB", "database_name": "stalwart-mcp-staging", "migrations_dir": "migrations" }],
+      // Both created with `--jurisdiction eu` (it can only be set at creation).
+      "kv_namespaces": [{ "binding": "OAUTH_KV", "id": "fb0e1cc95ae944ff83795c9bf85f33cb" }],
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "stalwart-mcp-staging",
+          "database_id": "9d6ed4cf-37eb-4b74-b185-8fac529faf9b",
+          "migrations_dir": "migrations"
+        }
+      ],
       "ratelimits": [
         { "name": "AUTH_RATE_LIMITER", "namespace_id": "2101", "simple": { "limit": 30, "period": 60 } },
         { "name": "REGISTER_RATE_LIMITER", "namespace_id": "2102", "simple": { "limit": 20, "period": 60 } },
