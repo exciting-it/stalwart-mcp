@@ -5,6 +5,7 @@
  * allow-list, deduplicated, and counted against the daily limit before it goes out. A send whose
  * outcome is unknown stays counted and blocks an identical send for the dedupe window.
  */
+import { type CollabAdapter, CollabRequest, type CollabValue } from "../collab";
 import {
   CreateDraftInput,
   MAIL_LIMITS,
@@ -17,8 +18,10 @@ import {
 } from "../mail";
 import type { z } from "zod";
 import { clock } from "../clock";
+import { type Area, parseFeatures } from "../config";
 import type { Env } from "../env";
 import type { JmapSession } from "../jmap/jmap-client";
+import { JmapCollabAdapter } from "../jmap/jmap-collab-adapter";
 import { JmapMailboxAdapter } from "../jmap/jmap-mailbox-adapter";
 import { recipientsAllowed } from "../policy/environment";
 import {
@@ -120,6 +123,34 @@ export class MailboxOperations {
     );
   }
 
+  /**
+   * The read-only contacts and calendar operations, as one request (`CollabRequest`). An area the
+   * deployment has not switched on (`FEATURES`) is `not_granted`, whatever the stored token could do.
+   */
+  collab(caller: Caller, request: unknown): Promise<VaultResult<CollabValue>> {
+    return this.#operation("collab", caller, () => {
+      const parsed = parse(CollabRequest, request);
+      const area: Area = parsed.op === "search_contacts" || parsed.op === "read_contact" ? "contacts" : "calendars";
+      if (!(parseFeatures(this.#env.FEATURES) ?? new Set<Area>()).has(area)) throw new MailError("not_granted");
+      return parsed;
+    }, (req) =>
+      this.#collabUpstream(caller.accountId, (a): Promise<CollabValue> => {
+        switch (req.op) {
+          case "search_contacts":
+            return a.searchContacts(req.input);
+          case "read_contact":
+            return a.readContact(req.input);
+          case "list_calendars":
+            return a.listCalendars();
+          case "search_events":
+            return a.searchEvents(req.input);
+          case "read_event":
+            return a.readEvent(req.input);
+        }
+      }),
+    );
+  }
+
   sendMail(caller: Caller, input: unknown): Promise<VaultResult<SendResult>> {
     const { accountId } = caller;
     return this.#operation("sendMail", caller, () => parse(SendMailInput, input), async (message) => {
@@ -208,6 +239,13 @@ export class MailboxOperations {
   #upstream<T>(accountId: string, call: (adapter: JmapMailboxAdapter) => Promise<T>): Promise<T> {
     return this.#slots.run(() =>
       this.#withAccessToken((accessToken, session) => call(new JmapMailboxAdapter({ accountId, accessToken, session }))),
+    );
+  }
+
+  /** Like `#upstream`, with the contacts and calendar adapter. */
+  #collabUpstream<T>(accountId: string, call: (adapter: CollabAdapter) => Promise<T>): Promise<T> {
+    return this.#slots.run(() =>
+      this.#withAccessToken((accessToken, session) => call(new JmapCollabAdapter({ accountId, accessToken, session }))),
     );
   }
 }

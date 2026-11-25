@@ -4,11 +4,11 @@
  * only as the fixed sentence of its error code.
  */
 import type { Area } from "../config";
+import { COLLAB_CONTENT_NOTICE, type Mailbox } from "../collab";
 import {
   MAIL_ERROR_MESSAGES,
   MailError,
   UNTRUSTED_CONTENT_NOTICE,
-  type MailboxAdapter,
   type MailErrorCode,
   type SearchMailResult,
 } from "../mail";
@@ -25,7 +25,7 @@ export interface Grant {
 export interface ToolDeps {
   enabled(): boolean;
   blocked(g: Grant): Promise<boolean>;
-  mailbox(g: Grant): MailboxAdapter;
+  mailbox(g: Grant): Mailbox;
   audit(e: AuditEntry): Promise<void>;
   /**
    * Revokes the Worker grant `accessToken` belongs to. The MCP handler calls it when the mailbox
@@ -44,7 +44,7 @@ export interface ToolSpec<I extends z.ZodTypeAny, O extends z.ZodTypeAny> {
   input: I;
   output: O;
   /** `grant` is the verified connection: its address may be shown, never chosen by the input. */
-  run(mailbox: MailboxAdapter, input: z.infer<I>, grant: Grant): Promise<z.infer<O>>;
+  run(mailbox: Mailbox, input: z.infer<I>, grant: Grant): Promise<z.infer<O>>;
   count?(result: z.infer<O>): number;
 }
 
@@ -80,6 +80,11 @@ type ContentNotice = z.infer<typeof SearchMailResult>["content_notice"];
 export function withContentNotice<T extends object>(result: T): { content_notice: ContentNotice } & T {
   // Core declares the notice as `string`; the result schema's literal is checked again in `execute`.
   return { content_notice: UNTRUSTED_CONTENT_NOTICE as ContentNotice, ...result };
+}
+
+/** Marks a result that carries contacts or calendar content with its fixed notice. */
+export function withCollabNotice<T extends object>(result: T): { content_notice: typeof COLLAB_CONTENT_NOTICE } & T {
+  return { content_notice: COLLAB_CONTENT_NOTICE, ...result };
 }
 
 /** The untrusted-content notice leads the result, so a reader meets it before any mail text. */

@@ -6,10 +6,12 @@
  */
 import { clock } from "../src/clock";
 import { STALWART } from "../src/stalwart/endpoints";
+import { addDefaultAddressBook, AREA_SCOPES, COLLAB_CAPABILITIES } from "./fake-stalwart-collab";
 import { handleJmapRequest } from "./fake-stalwart-jmap";
-import type { FakeAccount, FakeAddress, FakeEmail, FakeFolder, FakeState, SentMessage } from "./fake-stalwart-state";
+import type { FakeArea } from "./fake-stalwart-support";
+import type { FakeAccount, FakeAddress, FakeContact, FakeEmail, FakeFolder, FakeState, SentMessage } from "./fake-stalwart-state";
 
-export type { FakeAccount, FakeAddress, FakeAttachment, FakeEmail, FakeFolder, FakeIdentity, FakeState, SentMessage } from "./fake-stalwart-state";
+export type { FakeAccount, FakeAddress, FakeAddressBook, FakeAttachment, FakeContact, FakeEmail, FakeFolder, FakeIdentity, FakeState, SentMessage } from "./fake-stalwart-state";
 
 export interface RecordedRequest {
   url: string;
@@ -63,14 +65,28 @@ export interface FakeTokens {
   accessExpiresAt: number;
 }
 
+export interface TokensForOptions {
+  /** A token with the mail scope only, as for a mailbox connected before an area was switched on. */
+  mailOnly?: boolean;
+}
+
 export interface FakeStalwart {
   fetch: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
   requests: RecordedRequest[];
   addMailbox(email: string, options?: AddMailboxOptions): { accountId: string };
   addMessage(email: string, options?: AddMessageOptions): { id: string; threadId: string; folderId: string };
-  tokensFor(email: string): FakeTokens;
+  /** The newest grant of `email`, else a new one. Its scopes are what `STALWART.scope` asks for, or mail only. */
+  tokensFor(email: string, options?: TokensForOptions): FakeTokens;
+  /** Adds a ContactCard (JSContact fields; `addressBookIds` defaults to the default book) to `email`'s account. */
+  addContact(email: string, card?: Record<string, unknown>): { id: string; addressBookId: string };
+  addAddressBook(email: string, name?: string): { id: string };
+  defaultAddressBookId(email: string): string;
+  /** Cuts every grant of `email` down to the mail scope, as if the mailbox had connected before an area was switched on. */
+  restrictToMail(email: string): void;
+  /** The scope string of the grant `token` belongs to, or null for an unknown token. */
+  scopeOf(token: string): string | null;
   /** A code for `email`, redeemable only with the verifier of `codeChallenge` (S256; see `pkceChallenge`). */
-  issueCode(email: string, options: { codeChallenge: string; redirectUri?: string }): string;
+  issueCode(email: string, options: { codeChallenge: string; redirectUri?: string; scope?: string }): string;
   /**
    * The sign-in step at `/login`: checks the URL our `/authorize` redirected to and returns the
    * callback URL with a code bound to its `code_challenge` and `redirect_uri` (or `error=access_denied`).
@@ -99,16 +115,27 @@ const RECEIVED_BASE = Date.UTC(2026, 0, 1);
 
 interface Grant {
   email: string;
+  /** What the token may do: the scopes asked for at sign-in. */
+  scope: string;
   accessToken: string;
   accessExpiresAt: number;
   refreshToken: string;
   supersededRefreshTokens: Set<string>;
 }
 
+const MAIL_SCOPE = "urn:ietf:params:oauth:scope:mail";
+
+/** The areas a scope string carries. */
+function areasOf(scope: string): Set<FakeArea> {
+  const given = new Set(scope.split(" "));
+  return new Set((Object.keys(AREA_SCOPES) as FakeArea[]).filter((area) => given.has(AREA_SCOPES[area])));
+}
+
 interface PendingCode {
   email: string;
   codeChallenge: string;
   redirectUri?: string;
+  scope: string;
 }
 
 function json(body: unknown, status = 200, headers: Record<string, string> = {}): Response {
@@ -183,7 +210,10 @@ export function createFakeStalwart(): FakeStalwart {
       emails: new Map(),
       identities: [],
       sent: [],
+      addressBooks: new Map(),
+      contacts: new Map(),
     };
+    addDefaultAddressBook(account, nextId("ab"));
     const folder = (name: string, role: string) => {
       const f: FakeFolder = { id: nextId("mb"), name, role, parentId: null };
       account.folders.set(f.id, f);
@@ -259,9 +289,10 @@ export function createFakeStalwart(): FakeStalwart {
     return { id, threadId: message.threadId, folderId: folder.id };
   }
 
-  function newGrant(email: string): Grant {
+  function newGrant(email: string, scope: string = STALWART.scope): Grant {
     const grant: Grant = {
       email,
+      scope,
       accessToken: nextId("fake-at-"),
       accessExpiresAt: clock.now() + ACCESS_TTL_SECONDS * 1000,
       refreshToken: nextId("fake-rt-"),
@@ -282,7 +313,7 @@ export function createFakeStalwart(): FakeStalwart {
       access_token: grant.accessToken,
       token_type: "Bearer",
       expires_in: ACCESS_TTL_SECONDS,
-      scope: STALWART.scope,
+      scope: grant.scope,
     };
     if (omitRefreshToken) omitRefreshToken = false;
     else body.refresh_token = grant.refreshToken;
@@ -311,7 +342,7 @@ export function createFakeStalwart(): FakeStalwart {
       if (pending.codeChallenge !== (await pkceChallenge(verifier))) {
         return json({ error: "invalid_grant" }, 400);
       }
-      const grant = newGrant(pending.email);
+      const grant = newGrant(pending.email, pending.scope);
       codeGrants.push({ email: pending.email, accessToken: grant.accessToken, refreshToken: grant.refreshToken, accessExpiresAt: grant.accessExpiresAt });
       return tokenResponse(grant);
     }
@@ -347,16 +378,22 @@ export function createFakeStalwart(): FakeStalwart {
     return new Response(null, { status: 200 });
   }
 
-  function bearerAccount(req: Request): FakeAccount | null {
+  function bearerAccount(req: Request): { account: FakeAccount; areas: Set<FakeArea> } | null {
     const header = req.headers.get("authorization") ?? "";
     if (!header.startsWith("Bearer ")) return null;
     const token = header.slice("Bearer ".length);
     const grant = grants.find((g) => g.accessToken === token);
     if (!grant || grant.accessExpiresAt <= clock.now()) return null;
-    return accounts.get(key(grant.email)) ?? null;
+    const account = accounts.get(key(grant.email));
+    return account ? { account, areas: areasOf(grant.scope) } : null;
   }
 
-  function sessionObject(account: FakeAccount): unknown {
+  /** Stalwart lists an area's capability only when the token's scopes include it. */
+  function sessionObject(account: FakeAccount, areas: Set<FakeArea>): unknown {
+    const withAreas = <T>(mail: Record<string, T>, value: (area: FakeArea) => T): Record<string, T> => ({
+      ...mail,
+      ...Object.fromEntries([...areas].sort().map((area) => [COLLAB_CAPABILITIES[area], value(area)])),
+    });
     const api = `${STALWART.origin}/jmap/`;
     return {
       capabilities: {
@@ -370,24 +407,26 @@ export function createFakeStalwart(): FakeStalwart {
           maxObjectsInSet: 500,
           collationAlgorithms: ["i;ascii-casemap"],
         },
-        "urn:ietf:params:jmap:mail": {},
-        "urn:ietf:params:jmap:submission": {},
+        ...withAreas({ "urn:ietf:params:jmap:mail": {}, "urn:ietf:params:jmap:submission": {} }, () => ({})),
       },
       accounts: {
         [account.accountId]: {
           name: account.email,
           isPersonal: true,
           isReadOnly: false,
-          accountCapabilities: {
-            "urn:ietf:params:jmap:mail": { maxMailboxesPerEmail: null, emailQuerySortOptions: ["receivedAt"] },
-            "urn:ietf:params:jmap:submission": { maxDelayedSend: 0, submissionExtensions: {} },
-          },
+          accountCapabilities: withAreas(
+            {
+              "urn:ietf:params:jmap:mail": { maxMailboxesPerEmail: null, emailQuerySortOptions: ["receivedAt"] },
+              "urn:ietf:params:jmap:submission": { maxDelayedSend: 0, submissionExtensions: {} },
+            } as Record<string, unknown>,
+            () => ({}),
+          ),
         },
       },
-      primaryAccounts: {
-        "urn:ietf:params:jmap:mail": account.accountId,
-        "urn:ietf:params:jmap:submission": account.accountId,
-      },
+      primaryAccounts: withAreas(
+        { "urn:ietf:params:jmap:mail": account.accountId, "urn:ietf:params:jmap:submission": account.accountId },
+        () => account.accountId,
+      ),
       username: account.email,
       apiUrl: api,
       downloadUrl: `${api}download/{accountId}/{blobId}/{name}?accept={type}`,
@@ -428,15 +467,15 @@ export function createFakeStalwart(): FakeStalwart {
     }
 
     if (url.pathname === "/jmap/session" && req.method === "GET") {
-      const account = bearerAccount(req);
-      return account ? json(sessionObject(account)) : unauthorized();
+      const bearer = bearerAccount(req);
+      return bearer ? json(sessionObject(bearer.account, bearer.areas)) : unauthorized();
     }
     if ((url.pathname === "/jmap/" || url.pathname === "/jmap") && req.method === "POST") {
-      const account = bearerAccount(req);
-      if (!account) return unauthorized();
+      const bearer = bearerAccount(req);
+      if (!bearer) return unauthorized();
       const submitFailure = text.includes("EmailSubmission/set") ? submitFailures.shift() : undefined;
       if (submitFailure === "network") throw new TypeError("fake-stalwart: network failure");
-      const result = handleJmapRequest(state, account, parseBody(text, "application/json"));
+      const result = handleJmapRequest(state, bearer.account, parseBody(text, "application/json"), bearer.areas);
       if (submitFailure === "accepted-then-503") return new Response("fake-stalwart upstream detail", { status: 503 });
       if (submitFailure === "accepted-then-invalid-json") {
         return new Response("<html>fake-stalwart upstream detail", { status: 200, headers: { "Content-Type": "application/json" } });
@@ -458,19 +497,49 @@ export function createFakeStalwart(): FakeStalwart {
     requests,
     addMailbox,
     addMessage,
-    tokensFor(email) {
+    tokensFor(email, options = {}) {
       accountFor(email);
-      const grant = [...grants].reverse().find((g) => key(g.email) === key(email)) ?? newGrant(email);
+      const wanted = options.mailOnly ? MAIL_SCOPE : STALWART.scope;
+      const grant =
+        [...grants].reverse().find((g) => key(g.email) === key(email) && g.scope === wanted) ?? newGrant(email, wanted);
       return {
         accessToken: grant.accessToken,
         refreshToken: grant.refreshToken,
         accessExpiresAt: grant.accessExpiresAt,
       };
     },
+    addContact(email, card = {}) {
+      const account = accountFor(email);
+      const defaultBook = [...account.addressBooks.values()].find((b) => b.isDefault)!;
+      const id = nextId("ct");
+      const stored: FakeContact = {
+        "@type": "Card",
+        addressBookIds: { [defaultBook.id]: true },
+        updated: state.nextReceivedAt(),
+        ...card,
+        id,
+      };
+      for (const bookId of Object.keys(stored.addressBookIds)) {
+        if (!account.addressBooks.has(bookId)) throw new Error(`fake-stalwart: ${account.email} has no address book ${bookId}`);
+      }
+      account.contacts.set(id, stored);
+      return { id, addressBookId: Object.keys(stored.addressBookIds)[0]! };
+    },
+    addAddressBook(email, name = "Book") {
+      const account = accountFor(email);
+      const id = nextId("ab");
+      account.addressBooks.set(id, { id, name, isDefault: false });
+      return { id };
+    },
+    defaultAddressBookId: (email) => [...accountFor(email).addressBooks.values()].find((b) => b.isDefault)!.id,
+    restrictToMail(email) {
+      for (const g of grants) if (key(g.email) === key(email)) g.scope = MAIL_SCOPE;
+    },
+    scopeOf: (token) => grants.find((g) => g.accessToken === token || g.refreshToken === token)?.scope ?? null,
     issueCode(email, options) {
       accountFor(email);
       const code = nextId("fake-code-");
-      codes.set(code, { email, ...options });
+      codes.set(code, { email, ...options, scope: options.scope ?? STALWART.scope });
       return code;
     },
     authorize(locationUrl, email, options = {}) {
@@ -492,7 +561,7 @@ export function createFakeStalwart(): FakeStalwart {
       }
       accountFor(email);
       const code = nextId("fake-code-");
-      codes.set(code, { email, codeChallenge: challenge, redirectUri });
+      codes.set(code, { email, codeChallenge: challenge, redirectUri, scope: p.get("scope") ?? "" });
       back.search = new URLSearchParams({ code, state, iss: STALWART.origin }).toString();
       return back.toString();
     },

@@ -3,9 +3,9 @@
  * and threads. An id that belongs to the other account answers `MailError("not_found")`, as the
  * real adapter does, and every call is recorded with the account id it ran against.
  */
+import type { CalendarInfo, ContactDetail, ContactSummary, EventDetail, EventSummary, Mailbox } from "../src/collab";
 import {
   MailError,
-  type MailboxAdapter,
   type MailFolder,
   type MailSummary,
   type OutgoingMessage,
@@ -28,11 +28,14 @@ interface Account {
   email: string;
   folders: MailFolder[];
   messages: StoredMessage[];
+  contacts: ContactDetail[];
+  calendars: CalendarInfo[];
+  events: EventDetail[];
 }
 
 export interface FakeCall {
   accountId: string;
-  method: keyof MailboxAdapter;
+  method: keyof Mailbox;
 }
 
 export interface FakeIds {
@@ -41,6 +44,10 @@ export interface FakeIds {
   folderId: string;
   messageId: string;
   threadId: string;
+  contactId: string;
+  addressBookId: string;
+  calendarId: string;
+  eventId: string;
 }
 
 const folder = (id: string, name: string, role: string | null): MailFolder => ({
@@ -52,8 +59,32 @@ const folder = (id: string, name: string, role: string | null): MailFolder => ({
   unread: 0,
 });
 
+const summaryOfContact = (c: ContactDetail): ContactSummary => ({
+  id: c.id,
+  name: c.name,
+  emails: c.emails.map((e) => e.address).slice(0, 5),
+  phones: c.phones.map((n) => n.number).slice(0, 5),
+  organization: c.organizations[0]?.name ?? null,
+  kind: c.kind,
+});
+
+const summaryOfEvent = (e: EventDetail): EventSummary => ({
+  id: e.id,
+  calendar_ids: e.calendar_ids,
+  title: e.title,
+  start: e.start,
+  end: e.end,
+  local_start: e.local_start,
+  time_zone: e.time_zone,
+  all_day: e.all_day,
+  location: e.location,
+  status: e.status,
+  recurring: e.recurring,
+});
+
 function seedAccount(key: AccountKey): Account {
   const p = key.toLowerCase();
+  const calendarId = `${p}-cal-1`;
   return {
     accountId: `acct-${p}`,
     email: `${p}@test.example`,
@@ -68,6 +99,54 @@ function seedAccount(key: AccountKey): Account {
         date: "2026-11-20T10:00:00Z",
       },
     ],
+    contacts: [
+      {
+        id: `${p}-contact-1`,
+        kind: "individual",
+        name: `Contact of ${key}`,
+        given_name: "Contact",
+        surname: `of ${key}`,
+        nicknames: [],
+        emails: [{ address: `contact.${p}@elsewhere.example`, label: "work" }],
+        phones: [],
+        organizations: [{ name: "Example Org", units: [] }],
+        titles: [],
+        addresses: [],
+        birthday: null,
+        notes: "",
+        notes_truncated: false,
+        address_book_ids: [`${p}-book-1`],
+        updated: "2026-11-20T09:00:00Z",
+      },
+    ],
+    // Simple fixed data: part 2 of the calendar work refines these.
+    calendars: [
+      { id: calendarId, name: `Calendar ${key}`, description: null, color: null, is_default: true, time_zone: null, can_write: true },
+    ],
+    events: [
+      {
+        id: `${p}-event-1`,
+        calendar_ids: [calendarId],
+        title: `Meeting of ${key}`,
+        start: "2026-11-27T09:00:00Z",
+        end: "2026-11-27T10:00:00Z",
+        local_start: "2026-11-27T10:00:00",
+        time_zone: "Europe/Berlin",
+        all_day: false,
+        location: null,
+        status: "confirmed",
+        recurring: false,
+        description: "",
+        description_truncated: false,
+        locations: [],
+        online_meetings: [],
+        participants: [],
+        participants_omitted: 0,
+        recurrence: null,
+        free_busy: null,
+        privacy: null,
+      },
+    ],
   };
 }
 
@@ -80,7 +159,17 @@ export function createFakeMailStore() {
   const ids = (key: AccountKey): FakeIds => {
     const a = accounts[key];
     const m = a.messages[0]!;
-    return { accountId: a.accountId, email: a.email, folderId: a.folders[0]!.id, messageId: m.id, threadId: m.threadId };
+    return {
+      accountId: a.accountId,
+      email: a.email,
+      folderId: a.folders[0]!.id,
+      messageId: m.id,
+      threadId: m.threadId,
+      contactId: a.contacts[0]!.id,
+      addressBookId: a.contacts[0]!.address_book_ids[0]!,
+      calendarId: a.calendars[0]!.id,
+      eventId: a.events[0]!.id,
+    };
   };
 
   const summary = (m: StoredMessage, owner: Account): MailSummary => ({
@@ -111,11 +200,11 @@ export function createFakeMailStore() {
     attachments: [],
   });
 
-  function mailboxFor(accountId: string): MailboxAdapter {
+  function mailboxFor(accountId: string): Mailbox {
     const account = Object.values(accounts).find((a) => a.accountId === accountId);
     if (account === undefined) throw new Error("unknown fake account");
 
-    const record = (method: keyof MailboxAdapter): void => {
+    const record = (method: keyof Mailbox): void => {
       calls.push({ accountId, method });
       if (nextFailure !== undefined) {
         const failure = nextFailure;
@@ -181,6 +270,51 @@ export function createFakeMailStore() {
           recipients: input.to.length + input.cc.length + input.bcc.length,
           deduplicated: false,
         };
+      },
+      async searchContacts(input) {
+        record("searchContacts");
+        // An address book of the other account matches nothing here.
+        const needle = (v: string | undefined) => (v === undefined ? () => true : (t: string) => t.toLowerCase().includes(v.toLowerCase()));
+        const text = needle(input.text);
+        const hits = account.contacts
+          .filter((c) => input.address_book_id === undefined || c.address_book_ids.includes(input.address_book_id))
+          .filter((c) => text(c.name) || c.emails.some((e) => text(e.address)))
+          .filter((c) => needle(input.name)(c.name))
+          .filter((c) => input.email === undefined || c.emails.some((e) => needle(input.email)(e.address)))
+          .sort((x, y) => (y.updated ?? "").localeCompare(x.updated ?? ""));
+        const page = hits.slice(input.offset, input.offset + input.limit);
+        const next = input.offset + page.length;
+        return { contacts: page.map(summaryOfContact), next_offset: next < hits.length ? next : null };
+      },
+      async readContact(input) {
+        record("readContact");
+        const contact = account.contacts.find((c) => c.id === input.contact_id);
+        if (contact === undefined) throw new MailError("not_found");
+        return { contact };
+      },
+      async listCalendars() {
+        record("listCalendars");
+        return { calendars: account.calendars };
+      },
+      async searchEvents(input) {
+        record("searchEvents");
+        const hits = account.events
+          .filter((e) => input.calendar_id === undefined || e.calendar_ids.includes(input.calendar_id))
+          .filter(
+            (e) =>
+              e.start !== null &&
+              Date.parse(e.start) < Date.parse(input.before) &&
+              Date.parse(e.end ?? e.start) > Date.parse(input.after),
+          );
+        const page = hits.slice(input.offset, input.offset + input.limit);
+        const next = input.offset + page.length;
+        return { events: page.map(summaryOfEvent), next_offset: next < hits.length ? next : null };
+      },
+      async readEvent(input) {
+        record("readEvent");
+        const event = account.events.find((e) => e.id === input.event_id);
+        if (event === undefined) throw new MailError("not_found");
+        return { event };
       },
     };
   }

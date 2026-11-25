@@ -477,6 +477,7 @@ describe("isolation", () => {
 describe("token door", () => {
   const RPC_SURFACE = [
     "alarm",
+    "collab",
     "confirmGrant",
     "createDraft",
     "listMailboxes",

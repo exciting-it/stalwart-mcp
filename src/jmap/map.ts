@@ -19,7 +19,7 @@ import { cleanText, htmlToText } from "../content/sanitize";
 const LIMITS = { subject: 998, name: 200, address: 320, type: 255, date: 64 } as const;
 
 /** Every mail-derived string except bodies goes through here. */
-function clean(value: string, maxChars: number): string {
+export function clean(value: string, maxChars: number): string {
   return cleanText(value, maxChars).text;
 }
 
@@ -156,7 +156,7 @@ export function replyThreading(original: z.infer<typeof JmapReplySource>): Recor
 
 // ---- mapping ----
 
-const trueKeys = (m: Record<string, boolean> | null | undefined) =>
+export const trueKeys = (m: Record<string, boolean> | null | undefined) =>
   Object.entries(m ?? {}).filter(([, on]) => on).map(([k]) => k);
 
 function toAddresses(list: z.infer<typeof AddressList>): MailAddress[] {

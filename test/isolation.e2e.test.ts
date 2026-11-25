@@ -90,6 +90,71 @@ describe("mail connector isolation, end to end", () => {
     expect(structured(own).messages[0]!.subject).toBe("B only");
   });
 
+  it("user A cannot read user B's contacts or address books", async () => {
+    const accountIdA = fake.addMailbox(A).accountId;
+    const accountIdB = fake.addMailbox(B).accountId;
+    const a = await connect(fake, A);
+    const b = await connect(fake, B);
+    const mine = fake.addContact(A, { name: { full: "A's friend" } });
+    const secret = fake.addContact(B, { name: { full: "B's secret" }, emails: { e: { address: "secret@b.example" } } });
+
+    const before = fake.requests.length;
+    const own = await callTool(a.accessToken!, "search_contacts", {});
+    expect((own.structuredContent as { contacts: { id: string }[] }).contacts.map((c) => c.id)).toEqual([mine.id]);
+    const byText = await callTool(a.accessToken!, "search_contacts", { text: "secret" });
+    const byBook = await callTool(a.accessToken!, "search_contacts", { address_book_id: secret.addressBookId });
+    for (const r of [byText, byBook]) expect((r.structuredContent as { contacts: unknown[] }).contacts).toEqual([]);
+    const foreign = await callTool(a.accessToken!, "read_contact", { contact_id: secret.id });
+    expect(foreign).toEqual({ isError: true, content: [{ type: "text", text: MAIL_ERROR_MESSAGES.not_found }] });
+    expect(JSON.stringify([own, byText, byBook, foreign])).not.toContain("B's secret");
+
+    const aRequests = fake.requests.slice(before);
+    const tokensA = fake.tokensFor(A);
+    expect(aRequests.length).toBeGreaterThan(0);
+    for (const r of aRequests) {
+      expect(r.authorization).toBe(`Bearer ${tokensA.accessToken}`);
+      const calls = (r.body as { methodCalls?: [string, { accountId?: string }, string][] } | null)?.methodCalls;
+      for (const [name, args] of calls ?? []) {
+        expect(args.accountId).toBe(accountIdA);
+        expect(args.accountId).not.toBe(accountIdB);
+        expect(name).toMatch(/\/(get|query)$/);
+      }
+    }
+    const theirs = await callTool(b.accessToken!, "read_contact", { contact_id: secret.id });
+    expect((theirs.structuredContent as { contact: { name: string } }).contact.name).toBe("B's secret");
+  });
+
+  it("a mailbox connected with the mail scope only gets not_granted for contacts and calendars, audited as refused", async () => {
+    const accountA = fake.addMailbox(A).accountId;
+    const a = await connect(fake, A);
+    // As if the mailbox had connected before the areas were switched on.
+    fake.restrictToMail(A);
+    fake.addContact(A, { name: { full: "Hidden" } });
+
+    const before = fake.requests.filter((r) => r.url === `${STALWART.origin}/jmap/`).length;
+    const calls: [string, Record<string, unknown>][] = [
+      ["search_contacts", {}],
+      ["read_contact", { contact_id: "ct1" }],
+    ];
+    for (const [name, args] of calls) {
+      const r = await callTool(a.accessToken!, name, args);
+      expect(r).toEqual({ isError: true, content: [{ type: "text", text: MAIL_ERROR_MESSAGES.not_granted }] });
+    }
+    // Only the session was read: no JMAP method call went out for either tool.
+    expect(fake.requests.filter((r) => r.url === `${STALWART.origin}/jmap/`).length).toBe(before);
+    const { results } = await env.DB.prepare(
+      "SELECT tool, outcome, error_code FROM audit_log WHERE account_id = ? AND event = 'tool_call' ORDER BY id",
+    )
+      .bind(accountA)
+      .all();
+    expect(results).toEqual([
+      { tool: "search_contacts", outcome: "refused", error_code: "not_granted" },
+      { tool: "read_contact", outcome: "refused", error_code: "not_granted" },
+    ]);
+    // Mail is unaffected.
+    expect((await callTool(a.accessToken!, "list_mailboxes", {})).isError).toBeFalsy();
+  });
+
   it("a token for A is refused on /mcp after A's grant is revoked", async () => {
     const accountA = fake.addMailbox(A).accountId;
     const a = await connect(fake, A);

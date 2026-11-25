@@ -3,6 +3,16 @@
  * `MailboxVault` over RPC, which holds the tokens and enforces the limits. A failed operation
  * becomes `MailError(code)`; a failure of the RPC call itself becomes `MailError("internal")`.
  */
+import type {
+  CollabAdapter,
+  CollabRequestT,
+  CollabValue,
+  Mailbox,
+  ReadContactInputT,
+  ReadEventInputT,
+  SearchContactsInputT,
+  SearchEventsInputT,
+} from "../collab";
 import {
   MAIL_ERROR_CODES,
   MailError,
@@ -21,7 +31,7 @@ type Stub = DurableObjectStub<MailboxVault>;
 const isObject = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null;
 const isErrorCode = (v: unknown): v is MailErrorCode => (MAIL_ERROR_CODES as readonly unknown[]).includes(v);
 
-export class VaultMailbox implements MailboxAdapter {
+export class VaultMailbox implements Mailbox {
   readonly #env: Env;
   readonly #accountId: string;
   readonly #email: string;
@@ -57,6 +67,31 @@ export class VaultMailbox implements MailboxAdapter {
 
   sendMail(input: OutgoingMessage) {
     return this.#call<Awaited<ReturnType<MailboxAdapter["sendMail"]>>>((v, id, email) => v.sendMail(id, email, input));
+  }
+
+  searchContacts(input: SearchContactsInputT) {
+    return this.#collab<ReturnType<CollabAdapter["searchContacts"]>>({ op: "search_contacts", input });
+  }
+
+  readContact(input: ReadContactInputT) {
+    return this.#collab<ReturnType<CollabAdapter["readContact"]>>({ op: "read_contact", input });
+  }
+
+  listCalendars() {
+    return this.#collab<ReturnType<CollabAdapter["listCalendars"]>>({ op: "list_calendars" });
+  }
+
+  searchEvents(input: SearchEventsInputT) {
+    return this.#collab<ReturnType<CollabAdapter["searchEvents"]>>({ op: "search_events", input });
+  }
+
+  readEvent(input: ReadEventInputT) {
+    return this.#collab<ReturnType<CollabAdapter["readEvent"]>>({ op: "read_event", input });
+  }
+
+  /** One thin call of the vault's `collab`; `T` is the promise of the operation's result. */
+  #collab<T extends Promise<CollabValue>>(request: CollabRequestT): Promise<Awaited<T>> {
+    return this.#call<Awaited<T>>((v, id, email) => v.collab(id, email, request));
   }
 
   /** Unwraps a `VaultResult`; anything that is not one is `internal`. */

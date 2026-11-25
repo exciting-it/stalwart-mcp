@@ -12,6 +12,7 @@
  * only, so a stub can never reach it.
  */
 import { DurableObject } from "cloudflare:workers";
+import type { CollabRequestT, CollabValue } from "../collab";
 import {
   MAIL_LIMITS,
   MailError,
@@ -215,6 +216,11 @@ export class MailboxVault extends DurableObject<Env> {
 
   moveMail(accountId: string, email: string, input: MoveMailRequestT): Promise<VaultResult<MoveMailOutcome>> {
     return this.#operations.moveMail({ accountId, email }, input);
+  }
+
+  /** The read-only contacts and calendar operations; `request` is validated by the operations. */
+  collab(accountId: string, email: string, request: CollabRequestT): Promise<VaultResult<CollabValue>> {
+    return this.#operations.collab({ accountId, email }, request);
   }
 
   sendMail(accountId: string, email: string, input: OutgoingMessage): Promise<VaultResult<SendResult>> {

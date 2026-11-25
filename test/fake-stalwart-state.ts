@@ -63,6 +63,19 @@ export interface SentMessage {
   references: string[] | null;
 }
 
+export interface FakeAddressBook {
+  id: string;
+  name: string;
+  isDefault: boolean;
+}
+
+/** A ContactCard as the fake stores it: a JSContact Card (RFC 9553) with `id` and `addressBookIds`. */
+export type FakeContact = Record<string, unknown> & {
+  id: string;
+  addressBookIds: Record<string, true>;
+  updated: string;
+};
+
 export interface FakeAccount {
   accountId: string;
   email: string;
@@ -70,6 +83,8 @@ export interface FakeAccount {
   emails: Map<string, FakeEmail>;
   identities: FakeIdentity[];
   sent: SentMessage[];
+  addressBooks: Map<string, FakeAddressBook>;
+  contacts: Map<string, FakeContact>;
 }
 
 /** What the JMAP handlers need from the fake. */

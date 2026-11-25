@@ -5,33 +5,27 @@
  * `created`/`notCreated` in `/set` answers and `onSuccessUpdateEmail`.
  */
 import type { JmapInvocation } from "../src/jmap/jmap-client";
+import { COLLAB_CAPABILITIES, COLLAB_METHODS } from "./fake-stalwart-collab";
 import type { FakeAccount, FakeAddress, FakeEmail, FakeState } from "./fake-stalwart-state";
+import {
+  type Args,
+  contains,
+  type Ctx,
+  type FakeArea,
+  type Handler,
+  ids,
+  isObject,
+  type MethodEntry,
+  MethodError,
+  pick,
+} from "./fake-stalwart-support";
 
 const CORE = "urn:ietf:params:jmap:core";
 const MAIL = "urn:ietf:params:jmap:mail";
 const SUBMISSION = "urn:ietf:params:jmap:submission";
 
-type Args = Record<string, unknown>;
 type SetError = { type: string; properties?: string[] };
 
-class MethodError extends Error {
-  constructor(readonly type: string) {
-    super(type);
-  }
-}
-
-interface Ctx {
-  state: FakeState;
-  account: FakeAccount;
-  callId: string;
-  out: JmapInvocation[];
-  /** Creation id → server id, for every object created earlier in this request. */
-  createdIds: Map<string, string>;
-}
-
-type Handler = (args: Args, ctx: Ctx) => void;
-
-const isObject = (v: unknown): v is Args => typeof v === "object" && v !== null && !Array.isArray(v);
 const clone = <T>(v: T): T => structuredClone(v);
 
 // ---- request envelope ----
@@ -40,12 +34,14 @@ export function handleJmapRequest(
   state: FakeState,
   account: FakeAccount,
   body: unknown,
+  /** The areas the request's token has a scope for (contacts, calendars); mail is always served. */
+  areas: ReadonlySet<FakeArea>,
 ): { status: number; body: unknown } {
   const notRequest = { status: 400, body: { type: "urn:ietf:params:jmap:error:notRequest", status: 400 } };
   if (!isObject(body) || !Array.isArray(body.using) || !Array.isArray(body.methodCalls)) return notRequest;
   const using = new Set(body.using as unknown[]);
   for (const cap of using) {
-    if (cap !== CORE && cap !== MAIL && cap !== SUBMISSION) {
+    if (cap !== CORE && cap !== MAIL && cap !== SUBMISSION && !(Object.values(COLLAB_CAPABILITIES) as unknown[]).includes(cap)) {
       return { status: 400, body: { type: "urn:ietf:params:jmap:error:unknownCapability", status: 400 } };
     }
   }
@@ -59,7 +55,11 @@ export function handleJmapRequest(
     const ctx: Ctx = { state, account, callId, out, createdIds };
     try {
       const method = METHODS[name];
-      if (!method || !using.has(method.capability)) throw new MethodError("unknownMethod");
+      // A method is served only when its capability is in `using` and, for contacts and
+      // calendars, the token's scopes include the area.
+      if (!method || !using.has(method.capability) || (method.area && !areas.has(method.area))) {
+        throw new MethodError("unknownMethod");
+      }
       const args = resolveBackReferences(rawArgs, out);
       if (args.accountId !== account.accountId) throw new MethodError("accountNotFound");
       method.handler(args, ctx);
@@ -114,25 +114,6 @@ function evaluatePointer(value: unknown, path: string): unknown {
 }
 
 // ---- helpers ----
-
-function ids(args: Args): string[] | null {
-  if (args.ids === null || args.ids === undefined) return null;
-  if (!Array.isArray(args.ids) || !args.ids.every((i) => typeof i === "string")) {
-    throw new MethodError("invalidArguments");
-  }
-  return args.ids as string[];
-}
-
-function pick(obj: Args, properties: unknown, known: readonly string[]): Args {
-  if (properties === null || properties === undefined) return obj;
-  if (!Array.isArray(properties)) throw new MethodError("invalidArguments");
-  const out: Args = { id: obj.id };
-  for (const p of properties) {
-    if (typeof p !== "string" || !known.includes(p)) throw new MethodError("invalidArguments");
-    out[p] = obj[p];
-  }
-  return out;
-}
 
 function isUnread(e: FakeEmail): boolean {
   return !e.keywords.$seen;
@@ -194,8 +175,6 @@ const FILTER_KEYS = new Set([
   "hasKeyword", "notKeyword", "hasAttachment",
 ]);
 
-const contains = (haystack: string | null, needle: string) =>
-  (haystack ?? "").toLowerCase().includes(needle.toLowerCase());
 const addressesContain = (list: FakeAddress[], needle: string) =>
   list.some((a) => contains(a.name, needle) || contains(a.email, needle));
 
@@ -655,7 +634,8 @@ const emailSubmissionSet: Handler = (args, ctx) => {
   }
 };
 
-const METHODS: Record<string, { capability: string; handler: Handler }> = {
+const METHODS: Record<string, MethodEntry> = {
+  ...COLLAB_METHODS,
   "Mailbox/get": { capability: MAIL, handler: mailboxGet },
   "Email/query": { capability: MAIL, handler: emailQuery },
   "Email/get": { capability: MAIL, handler: emailGet },

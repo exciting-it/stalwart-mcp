@@ -51,7 +51,13 @@ describe("fetchSession", () => {
       apiUrl: `${STALWART.origin}/jmap/`,
       accountId,
       username: A,
-      capabilities: ["urn:ietf:params:jmap:mail", "urn:ietf:params:jmap:submission"],
+      // The test config offers contacts and calendars: the token has a scope for each.
+      capabilities: [
+        "urn:ietf:params:jmap:mail",
+        "urn:ietf:params:jmap:submission",
+        "urn:ietf:params:jmap:calendars",
+        "urn:ietf:params:jmap:contacts",
+      ],
     });
     expect(fake.requests[0]).toMatchObject({ url: STALWART.session, method: "GET" });
   });

@@ -49,8 +49,8 @@ export const EmailAddressSchema = z
   .regex(/^[^\r\n,<>]+$/)
   .email();
 
-const Filter = z.string().max(MAIL_LIMITS.filterChars);
-const IsoDateTime = z.string().datetime({ offset: true });
+export const Filter = z.string().max(MAIL_LIMITS.filterChars);
+export const IsoDateTime = z.string().datetime({ offset: true });
 
 // ---- tool inputs ----
 
