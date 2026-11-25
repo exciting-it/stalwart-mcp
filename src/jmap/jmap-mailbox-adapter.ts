@@ -222,6 +222,7 @@ export class JmapMailboxAdapter implements MailboxAdapter {
    * Moves messages into one folder of this account, named by id or by the Trash role. A moved
    * message is in that folder only. The patch is an `Email/set` update of `mailboxIds`: nothing
    * is destroyed, and an id that is not a message of this account is reported, not acted on.
+   * A target named by id must not be the Trash folder.
    */
   async moveMail(input: MoveMailRequestT): Promise<MoveMailOutcome> {
     const { target } = input;
@@ -230,21 +231,24 @@ export class JmapMailboxAdapter implements MailboxAdapter {
     const folder =
       "role" in target ? folders.find((f) => f.role === target.role) : folders.find((f) => f.id === target.folder_id);
     if (!folder) throw new MailError("role" in target ? "mailbox_unsupported" : "not_found");
+    // Moving into Trash is deleting. Only the request that names the role may do it, so the one
+    // tool that is marked as deleting is the only way there.
+    if (!("role" in target) && folder.role === "trash") throw new MailError("invalid_input");
 
     const ids = [...new Set(input.message_ids)];
     const update = Object.fromEntries(ids.map((id) => [id, { mailboxIds: { [folder.id]: true } }]));
     const responses = await this.#call([["Email/set", { update }, "u"]]);
-    const { updated, refused } = updateResult(methodResult(responses, "u", "Email/set"));
+    const { updated, refused } = updateResult(methodResult(responses, "u", "Email/set", { idsFromInput: true }));
 
-    const notFound: string[] = [];
-    for (const id of ids) {
-      if (updated.has(id)) continue;
-      // Anything but "no such message here" is a refusal we cannot explain to the caller.
-      if (refused.get(id) !== "notFound") throw new MailError("upstream_rejected");
-      notFound.push(id);
+    const notMoved = ids.filter((id) => !updated.has(id));
+    if (notMoved.length === ids.length) {
+      // Nothing moved. An id the answer does not mention counts as "no such message here"; any
+      // other refusal is the server's and is reported as such.
+      const unknownOnly = notMoved.every((id) => (refused.get(id) ?? "notFound") === "notFound");
+      throw new MailError(unknownOnly ? "not_found" : "upstream_rejected");
     }
-    if (notFound.length === ids.length) throw new MailError("not_found");
-    return { folder_id: folder.id, moved: ids.length - notFound.length, not_found: notFound };
+    // Some moved: that is the result, and the rest is named, whatever the reason.
+    return { folder_id: folder.id, moved: ids.length - notMoved.length, not_moved: notMoved };
   }
 
   /**

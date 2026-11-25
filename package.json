@@ -15,7 +15,8 @@
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "depgraph": "madge --circular --extensions ts src"
+    "depgraph": "madge --circular --extensions ts src",
+    "check:brand": "bun run scripts/check-brand.ts"
   },
   "dependencies": {
     "@cloudflare/workers-oauth-provider": "1.3.0",

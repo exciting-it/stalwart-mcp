@@ -170,7 +170,7 @@ export function createFakeMailStore() {
           moved += 1;
         }
         if (moved === 0) throw new MailError("not_found");
-        return { folder_id: folderId, moved, not_found: notFound };
+        return { folder_id: folderId, moved, not_moved: notFound };
       },
       async sendMail(input: OutgoingMessage) {
         record("sendMail");

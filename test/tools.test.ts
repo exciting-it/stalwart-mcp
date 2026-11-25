@@ -219,9 +219,16 @@ describe("tools", () => {
   });
 
   it("move_mail and delete_mail act on the grant's own messages only", async () => {
-    // B's message and folder ids: nothing of A's matches, so nothing moves.
-    const foreign = await byName("move_mail").execute(deps, grantA, validInputFor(byName("move_mail")));
+    // B's message with A's own folder: the folder exists, the message is not A's, nothing moves.
+    const foreign = await byName("move_mail").execute(deps, grantA, {
+      message_ids: [store.b.messageId],
+      folder_id: "a-drafts",
+    });
     expect(text(foreign)).toBe(MAIL_ERROR_MESSAGES.not_found);
+    // B's folder is no folder of A's either.
+    expect(text(await byName("move_mail").execute(deps, grantA, validInputFor(byName("move_mail"))))).toBe(
+      MAIL_ERROR_MESSAGES.not_found,
+    );
     expect(text(await byName("delete_mail").execute(deps, grantA, validInputFor(byName("delete_mail"))))).toBe(
       MAIL_ERROR_MESSAGES.not_found,
     );
@@ -231,7 +238,7 @@ describe("tools", () => {
     const mixed = await byName("delete_mail").execute(deps, grantA, {
       message_ids: [store.a.messageId, store.b.messageId],
     });
-    expect(mixed.structuredContent).toEqual({ folder_id: "acct-a-trash", moved: 1, not_found: [store.b.messageId] });
+    expect(mixed.structuredContent).toEqual({ folder_id: "acct-a-trash", moved: 1, not_moved: [store.b.messageId] });
   });
 
   it("delete_mail accepts message ids only, and both tools at most 50 of them", async () => {

@@ -115,7 +115,7 @@ call.
 | `create_draft` | write | New mail or reply, saved in Drafts |
 | `send_mail` | write, external effect | Sends a new mail or reply, plain text, copy in Sent |
 | `move_mail` | write | Moves messages into one folder of the mailbox |
-| `delete_mail` | write | Moves messages to the Trash folder; nothing is destroyed |
+| `delete_mail` | write | Moves messages to the Trash folder; the connector never empties it |
 
 Rules that hold for every tool:
 
@@ -132,6 +132,10 @@ Rules that hold for every tool:
   only describe each tool truthfully.
 - Deleting is a move to the Trash folder. The adapter has no call that destroys a message, and
   `delete_mail` takes message ids and nothing else, so no input can turn it into one.
+  `move_mail` refuses the Trash folder as a target, so the tool marked as deleting is the only
+  way there. What happens to old Trash afterwards is the mail server's setting: if it empties
+  Trash on a schedule, a deleted message does disappear then. The pages and tool texts say
+  "never empties the Trash" for that reason, not "never deleted".
 - Every tool runs through one wrapper, `defineTool`: **validate → authorize (grant, off switch,
   block list, limits) → act → audit**.
 

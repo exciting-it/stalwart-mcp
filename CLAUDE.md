@@ -34,7 +34,7 @@ before changing anything. This is auth and mail code: boring correctness is the 
 - Tests are never deleted or skipped to get green.
 - Run `bun run test` (Vitest), never `bun test`.
 
-Before "done": `bun run lint && bun run typecheck && bun run test && bun run depgraph`, and
+Before "done": `bun run lint && bun run typecheck && bun run test && bun run depgraph && bun run check:brand`, and
 `bunx wrangler deploy --dry-run` for both environments.
 
 ## Working style

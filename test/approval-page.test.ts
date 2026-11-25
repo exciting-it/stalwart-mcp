@@ -51,7 +51,7 @@ describe("approval page", () => {
     expect(en).toContain("Claude (claude.ai) wants to access this mailbox:");
     expect(en).toContain('<p class="mailbox">a@test.example</p>');
     expect(en).toContain(
-      "It will be able to read and search your mail, save drafts, send mail in your name (at most 50 messages per day) and move messages to other folders or to the trash. It cannot remove anything for good.",
+      "It will be able to read and search your mail, save drafts, send mail in your name (at most 50 messages per day) and move messages to other folders or to the trash. It never empties the trash.",
     );
     expect(en).toContain("Not a@test.example? Choose Deny, sign out of your mailbox and try again.");
     expect(en).toContain("Only allow this if you started the connection yourself just now.");
@@ -64,7 +64,7 @@ describe("approval page", () => {
     expect(de).toContain("Claude (claude.ai) möchte auf dieses Postfach zugreifen:");
     expect(de).toContain('<p class="mailbox">a@test.example</p>');
     expect(de).toContain(
-      "Die Anwendung kann deine E-Mails lesen und durchsuchen, Entwürfe speichern, in deinem Namen senden (höchstens 50 Nachrichten pro Tag) und Nachrichten in andere Ordner oder in den Papierkorb verschieben. Endgültig löschen kann sie nichts.",
+      "Die Anwendung kann deine E-Mails lesen und durchsuchen, Entwürfe speichern, in deinem Namen senden (höchstens 50 Nachrichten pro Tag) und Nachrichten in andere Ordner oder in den Papierkorb verschieben. Den Papierkorb leert sie nie.",
     );
     expect(de).toContain("Nicht a@test.example? Wähle „Ablehnen“, melde dich im Postfach ab und versuche es erneut.");
     expect(de).toContain("Erlaube das nur, wenn du die Verbindung gerade selbst gestartet hast.");
@@ -114,7 +114,9 @@ describe("page design", () => {
     }
   });
 
-  it("references exactly the four brand files kept in public/brand", async () => {
+  // That each of these files exists in public/ is checked outside the Workers runtime, by
+  // `bun run check:brand` (scripts/check-brand.ts): tests here cannot read the file system.
+  it("references exactly these four brand files", async () => {
     const html = await renderApprovalPage({ lang: "de", ...base }).text();
     const files = [...html.matchAll(/"(\/brand\/[^"]+)"/g)].map((m) => m[1]!);
     expect(new Set(files)).toEqual(

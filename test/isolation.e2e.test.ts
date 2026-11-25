@@ -130,7 +130,7 @@ describe("mail connector isolation, end to end", () => {
 
     const deleted = await callTool(a.accessToken!, "delete_mail", { message_ids: [mine.id] });
     expect(deleted.isError).toBeFalsy();
-    expect(structured(deleted)).toEqual({ folder_id: fake.folderId(A, "trash"), moved: 1, not_found: [] });
+    expect(structured(deleted)).toEqual({ folder_id: fake.folderId(A, "trash"), moved: 1, not_moved: [] });
     expect(fake.email(A, mine.id)).toMatchObject({ subject: "mine", mailboxIds: { [fake.folderId(A, "trash")!]: true } });
   });
 

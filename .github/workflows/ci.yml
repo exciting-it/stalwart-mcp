@@ -24,5 +24,6 @@ jobs:
       - run: bun run typecheck
       - run: bun run test
       - run: bun run depgraph
+      - run: bun run check:brand
       - run: bunx wrangler deploy --dry-run --env=""
       - run: bunx wrangler deploy --dry-run --env staging

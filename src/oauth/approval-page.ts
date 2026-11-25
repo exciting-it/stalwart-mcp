@@ -35,7 +35,7 @@ const APPROVAL_COPY = {
     title: "Connect your mailbox",
     lead: (client: string, host: string) => `${client} (${host}) wants to access this mailbox:`,
     scope:
-      "It will be able to read and search your mail, save drafts, send mail in your name (at most 50 messages per day) and move messages to other folders or to the trash. It cannot remove anything for good.",
+      "It will be able to read and search your mail, save drafts, send mail in your name (at most 50 messages per day) and move messages to other folders or to the trash. It never empties the trash.",
     wrongMailbox: (email: string) => `Not ${email}? Choose Deny, sign out of your mailbox and try again.`,
     caution: "Only allow this if you started the connection yourself just now.",
     allow: "Allow",
@@ -45,7 +45,7 @@ const APPROVAL_COPY = {
     title: "Postfach verbinden",
     lead: (client: string, host: string) => `${client} (${host}) möchte auf dieses Postfach zugreifen:`,
     scope:
-      "Die Anwendung kann deine E-Mails lesen und durchsuchen, Entwürfe speichern, in deinem Namen senden (höchstens 50 Nachrichten pro Tag) und Nachrichten in andere Ordner oder in den Papierkorb verschieben. Endgültig löschen kann sie nichts.",
+      "Die Anwendung kann deine E-Mails lesen und durchsuchen, Entwürfe speichern, in deinem Namen senden (höchstens 50 Nachrichten pro Tag) und Nachrichten in andere Ordner oder in den Papierkorb verschieben. Den Papierkorb leert sie nie.",
     wrongMailbox: (email: string) =>
       `Nicht ${email}? Wähle „Ablehnen“, melde dich im Postfach ab und versuche es erneut.`,
     caution: "Erlaube das nur, wenn du die Verbindung gerade selbst gestartet hast.",

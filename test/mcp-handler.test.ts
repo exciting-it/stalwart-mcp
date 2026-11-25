@@ -107,7 +107,8 @@ describe("MCP endpoint", () => {
       idempotentHint: true,
       openWorldHint: false,
     });
-    expect(byName.delete_mail!.description).toContain("Nothing is removed for good");
+    expect(byName.delete_mail!.description).toContain("This connector never empties the Trash");
+    expect(byName.move_mail!.description).toContain("The Trash folder is not accepted here");
     // delete_mail takes message ids and nothing else: no folder, no "permanent" switch.
     expect(Object.keys(byName.delete_mail!.inputSchema.properties ?? {})).toEqual(["message_ids"]);
     const read = { readOnlyHint: true, openWorldHint: false };

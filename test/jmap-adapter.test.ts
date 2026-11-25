@@ -497,7 +497,7 @@ describe("JmapMailboxAdapter", () => {
     expect(await a.moveMail({ message_ids: [one.id, two.id, one.id], target: { folder_id: drafts } })).toEqual({
       folder_id: drafts,
       moved: 2,
-      not_found: [],
+      not_moved: [],
     });
     expect(fake.email(A, one.id)!.mailboxIds).toEqual({ [drafts]: true });
     expect(fake.email(A, two.id)!.mailboxIds).toEqual({ [drafts]: true });
@@ -513,7 +513,7 @@ describe("JmapMailboxAdapter", () => {
     expect(await a.moveMail({ message_ids: [m.id], target: { role: "trash" } })).toEqual({
       folder_id: trash,
       moved: 1,
-      not_found: [],
+      not_moved: [],
     });
     expect(fake.email(A, m.id)).toMatchObject({ subject: "keep me", mailboxIds: { [trash]: true } });
     // It can be brought back.
@@ -538,7 +538,7 @@ describe("JmapMailboxAdapter", () => {
     expect(await a.moveMail({ message_ids: [own.id, foreign.id], target: { role: "trash" } })).toEqual({
       folder_id: fake.folderId(A, "trash"),
       moved: 1,
-      not_found: [foreign.id],
+      not_moved: [foreign.id],
     });
     expect(fake.email(B, foreign.id)!.mailboxIds).toEqual(before);
 
@@ -548,6 +548,69 @@ describe("JmapMailboxAdapter", () => {
     expect(jmapRequests().slice(requests).flatMap(methodNames)).toEqual(["Mailbox/get"]);
     expect(fake.email(A, own.id)!.mailboxIds).toEqual({ [fake.folderId(A, "trash")!]: true });
     expect(JSON.stringify(fake.requests)).not.toContain("secret");
+  });
+
+  it("move by folder id refuses the Trash folder: only a delete request goes there", async () => {
+    const m = fake.addMessage(A, { subject: "stay" });
+    const a = await adapterFor(A);
+    const requests = jmapRequests().length;
+    await expectMailError(
+      a.moveMail({ message_ids: [m.id], target: { folder_id: fake.folderId(A, "trash")! } }),
+      "invalid_input",
+    );
+    expect(jmapRequests().slice(requests).flatMap(methodNames)).toEqual(["Mailbox/get"]);
+    expect(fake.email(A, m.id)!.mailboxIds).toEqual({ [m.folderId]: true });
+  });
+
+  /** Answers as the fake does, but rewrites the `Email/set` answer of a move. */
+  function rewriteMoveAnswer(change: (args: { updated: Record<string, null> | null; notUpdated: Record<string, unknown> | null }) => void) {
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+      const res = await fake.fetch(input, init);
+      const sent = init?.body === undefined ? "" : String(init.body);
+      if (!sent.includes('"Email/set"')) return res;
+      const body = (await res.json()) as { methodResponses: [string, Record<string, unknown>, string][] };
+      for (const r of body.methodResponses) if (r[0] === "Email/set") change(r[1] as never);
+      return Response.json(body);
+    });
+  }
+
+  it("reports what moved when the server refuses some messages for another reason", async () => {
+    const one = fake.addMessage(A, { subject: "one" });
+    const two = fake.addMessage(A, { subject: "two" });
+    const a = await adapterFor(A);
+    rewriteMoveAnswer((args) => {
+      delete args.updated![two.id];
+      args.notUpdated = { [two.id]: { type: "forbidden" } };
+    });
+    expect(await a.moveMail({ message_ids: [one.id, two.id], target: { role: "trash" } })).toEqual({
+      folder_id: fake.folderId(A, "trash"),
+      moved: 1,
+      not_moved: [two.id],
+    });
+    // Nothing moved and the reason is not "no such message": that is the server's refusal.
+    rewriteMoveAnswer((args) => {
+      args.updated = null;
+      args.notUpdated = { [one.id]: { type: "forbidden" } };
+    });
+    await expectMailError(a.moveMail({ message_ids: [one.id], target: { folder_id: one.folderId } }), "upstream_rejected");
+  });
+
+  it("an id the server's answer does not mention counts as not moved, never as moved", async () => {
+    const one = fake.addMessage(A, { subject: "one" });
+    const two = fake.addMessage(A, { subject: "two" });
+    const a = await adapterFor(A);
+    rewriteMoveAnswer((args) => {
+      delete args.updated![two.id];
+    });
+    expect(await a.moveMail({ message_ids: [one.id, two.id], target: { role: "trash" } })).toMatchObject({
+      moved: 1,
+      not_moved: [two.id],
+    });
+    rewriteMoveAnswer((args) => {
+      args.updated = null;
+      args.notUpdated = null;
+    });
+    await expectMailError(a.moveMail({ message_ids: [one.id], target: { folder_id: one.folderId } }), "not_found");
   });
 
   it("answers mailbox_unsupported for a delete when the mailbox has no Trash folder", async () => {

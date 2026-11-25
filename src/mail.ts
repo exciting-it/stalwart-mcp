@@ -224,11 +224,14 @@ export const ReadThreadResult = z.object({
   content_notice: ContentNotice,
 });
 
-/** `not_found` lists the ids that are not messages of this mailbox; the others were moved. */
+/**
+ * `not_moved` lists the ids that stayed where they were: not messages of this mailbox, or
+ * refused by the mail server. The others are now in `folder_id`.
+ */
 export const MoveMailResult = z.object({
   folder_id: z.string(),
   moved: z.number().int(),
-  not_found: z.array(z.string()),
+  not_moved: z.array(z.string()),
 });
 
 export const CreateDraftResult = z.object({
@@ -306,7 +309,7 @@ export interface MailboxAdapter {
     omitted_messages: number;
   }>;
   createDraft(input: OutgoingMessage): Promise<{ draft_id: string; folder_id: string }>;
-  /** Moves messages into one folder of this mailbox. Throws `not_found` when none could be moved. */
+  /** Moves messages into one folder of this mailbox. Throws when none could be moved. */
   moveMail(input: MoveMailRequestT): Promise<MoveMailOutcome>;
   sendMail(
     input: OutgoingMessage,

@@ -31,7 +31,9 @@ Why it is built this way, and what its security rests on: [docs/design.md](docs/
 | `delete_mail` | Move messages to the Trash folder |
 
 It cannot remove mail for good, flag mail, manage folders, touch filters, or send from another
-address. Deleting always means moving to Trash, and `move_mail` brings a message back.
+address. Deleting always means moving to Trash, and `move_mail` brings a message back. The
+connector never empties the Trash; whether the mail server does is its own setting (see Known
+limits).
 
 ## Sign-in flow
 
@@ -157,6 +159,8 @@ These need the OAuth client and a test mailbox on your server:
 - [ ] A removed application answers the refresh with `error: "invalid_grant"`. With a bare 401 instead, the connection is only cleared by the 30-day idle alarm.
 - [ ] `expires_in` in the token response is a number.
 - [ ] Bcc recipients are not visible to the To and Cc recipients of a sent message.
+- [ ] `move_mail` and `delete_mail` against the real server: a moved message is in the target folder only; a foreign or malformed id is reported as not found.
+- [ ] Whether the server empties Trash on its own (Stalwart's auto-expunge), and whether that is what you want now that an AI tool can move mail there.
 - [ ] Whether Stalwart ever reuses an account id (a reused id would meet the old vault).
 - [ ] Remove the application and reconnect with two AI tools: do the earlier tools regain access (see "Known limits")?
 - [ ] How long an issued Stalwart access token keeps working after the application is removed, and after the OAuth client is deleted.
@@ -166,7 +170,8 @@ Repeat them after a Stalwart upgrade.
 ## Runbook
 
 **Switch everything off.** Set `MAIL_MCP_ENABLED` to anything but `true` in the dashboard. Every
-endpoint answers 503: no request is served and no tool call reaches Stalwart. The vaults'
+endpoint answers 503: no request is served and no tool call reaches Stalwart. Only the static
+brand files under `/brand/` stay reachable; they hold no data. The vaults'
 cleanup alarms and the daily purge still run.
 
 **Block one mailbox.** In the D1 database (`stalwart-mcp`, or `stalwart-mcp-staging`):
@@ -238,6 +243,7 @@ bun run test        # all tests, in the Workers runtime (real KV, D1 and Durable
 bun run typecheck
 bun run lint
 bun run depgraph    # no circular imports
+bun run check:brand # every file the browser pages reference exists in public/
 ```
 
 Use `bun run test`, never `bun test` (Bun's own runner ignores the Vitest setup). Nothing in the

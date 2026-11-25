@@ -5,7 +5,7 @@ export const deleteMail = defineTool({
   name: "delete_mail",
   title: "Delete mail",
   description:
-    "Move messages of the connected mailbox to its Trash folder. Nothing is removed for good, and move_mail can bring a message back. At most 50 messages per call. Confirm with the user first.",
+    "Move messages of the connected mailbox to its Trash folder. This connector never empties the Trash, and move_mail can bring a message back; the mail server itself may clear old Trash on its own schedule. At most 50 messages per call. Confirm with the user first.",
   kind: "trash",
   input: DeleteMailInput,
   output: MoveMailResult,
