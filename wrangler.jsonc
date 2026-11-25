@@ -16,6 +16,9 @@
   //   STALWART_ORIGIN  the Stalwart server, an https origin
   //   PUBLIC_ORIGIN    this worker's own https origin (production only; must match `routes`)
   //   CONNECTOR_NAME   the name AI tools show for the connector (optional)
+  //   DATA_JURISDICTION  restricts where the mailbox vaults run and store data: "eu", "us" or
+  //                    "fedramp" (optional). Choose it BEFORE the first sign-in: vault ids
+  //                    depend on it, so a later change orphans every stored connection.
   // A variable declared here is rewritten on every deploy. What an operator changes while the
   // worker runs lives in the Cloudflare dashboard instead, and `keep_vars` keeps it there:
   //   MAIL_MCP_ENABLED             off switch; the worker answers 503 unless exactly "true"
@@ -31,8 +34,8 @@
     "PUBLIC_ORIGIN": "https://mail-mcp.exciting-it.com",
     "CONNECTOR_NAME": "exciting IT Mail"
   },
-  // KV and D1 carry no ids: the first `wrangler deploy` provisions them (wrangler >= 4.45);
-  // paste the ids back here afterwards.
+  // KV and D1 carry no ids yet. Create them once (README, "Deploying your own"), with a
+  // jurisdiction if you need one (it can only be set at creation), and put the ids here.
   "kv_namespaces": [{ "binding": "OAUTH_KV" }],
   "d1_databases": [{ "binding": "DB", "database_name": "stalwart-mcp", "migrations_dir": "migrations" }],
   "ratelimits": [

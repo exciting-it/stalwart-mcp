@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { connectorName, httpsOrigin, stalwartOrigin } from "../src/config";
+import { connectorName, dataJurisdiction, httpsOrigin, stalwartOrigin } from "../src/config";
 import { STALWART } from "../src/stalwart/endpoints";
 
 describe("httpsOrigin", () => {
@@ -27,6 +27,16 @@ describe("httpsOrigin", () => {
     "https://mail.example.com, https://other.example",
     "javascript:alert(1)",
   ])("%j is not an https origin", (value) => expect(httpsOrigin(value)).toBeNull());
+});
+
+describe("dataJurisdiction", () => {
+  it.each(["eu", "us", "fedramp"])("%j is a jurisdiction", (value) => expect(dataJurisdiction(value)).toBe(value));
+
+  it.each([undefined, ""])("%j means no restriction", (value) => expect(dataJurisdiction(value)).toBeUndefined());
+
+  it.each(["EU", " eu", "europe", "de", "eu,us", "none", 1, null])("%j is refused, not ignored", (value) =>
+    expect(dataJurisdiction(value)).toBeNull(),
+  );
 });
 
 describe("deployment settings (vitest.config.ts)", () => {

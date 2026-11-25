@@ -77,36 +77,61 @@ access to it, a Cloudflare account, and [Bun](https://bun.sh).
    - `CONNECTOR_NAME`: the name AI tools show (optional, default "Stalwart Mail").
 2. **OAuth client on Stalwart**, one per environment: confidential, grant types authorization
    code and refresh, scope mail, exactly one redirect URI `<origin of the worker>/callback`.
-3. **First deploy of staging:** `bunx wrangler deploy --env staging`. The config names the KV
-   namespace and the D1 database without ids, so this creates them; paste the ids it reports
-   into `wrangler.jsonc`. Then apply the migration:
-   `bunx wrangler d1 migrations apply stalwart-mcp-staging --env staging --remote`.
-4. **Secrets**, per environment (`bunx wrangler secret put <NAME> --env staging`):
+3. **Storage for staging.** Create the KV namespace and the D1 database once and put their ids
+   into `env.staging` in `wrangler.jsonc` (they are not secrets):
+   `bunx wrangler kv namespace create stalwart-mcp-staging-oauth` and
+   `bunx wrangler d1 create stalwart-mcp-staging`. If the data has to stay in a region, add
+   `--jurisdiction eu` to both now; it cannot be added later (see "Where the data lives").
+   Then apply the migration: `bun run migrate:staging`.
+4. **Connect the repository** (Cloudflare dashboard, Workers & Pages, import a repository):
+   worker name `stalwart-mcp-staging`, deploy command `bun run deploy:staging`. From then on
+   every push to the connected branch deploys; nothing is uploaded by hand. The staging and the
+   production worker each get their own connection to the same repository.
+5. **Secrets**, per environment (`bunx wrangler secret put <NAME> --env staging`):
    - `STALWART_OAUTH_CLIENT_SECRET`: the client secret from step 2.
    - `TOKEN_ENC_KEY`: 32 random bytes, base64 (`openssl rand -base64 32`). Changing it later
      makes every stored mailbox token unreadable: every mailbox is disconnected.
-5. **Dashboard variables**, per environment (kept across deploys by `keep_vars`):
+6. **Dashboard variables**, per environment (kept across deploys by `keep_vars`):
    - `STALWART_OAUTH_CLIENT_ID`: the client id from step 2.
    - `SIGNIN_ALLOWLIST`: comma-separated mailbox addresses that may connect (staging).
    - `SEND_ALLOWLIST`: comma-separated addresses `send_mail` may deliver to (staging).
    - `MAIL_MCP_ENABLED`: set to `true` last. Anything else makes every endpoint answer 503.
-6. Check that the Durable Object migration `v1` was applied (the `MailboxVault` class exists
+7. Check that the Durable Object migration `v1` was applied (the `MailboxVault` class exists
    with SQLite storage), then work through the live checks below with a test mailbox.
-7. Production: the same steps without `--env staging` (`--env=""`), with its own OAuth client,
-   secrets and variables. The allow-lists are not used in production.
+8. Production: the same steps for the top-level environment (`stalwart-mcp`,
+   `bun run migrate:production`, deploy command `bun run deploy:production`,
+   `--env=""` for secrets), with its own OAuth client, secrets and variables. The allow-lists
+   are not used in production.
 
 Outside production both allow-lists are enforced in code. If a list is empty, nobody can
 connect and nothing is sent. This is what makes it safe to point staging at your one, real
 mail server.
 
-Decide where the data lives before the first production sign-in. Durable Object ids depend on
-the namespace's jurisdiction, so adding an EU jurisdiction later loses every stored connection.
-The code does not set one today.
+### Where the data lives
+
+Three stores hold data, and each is pinned to a region in its own way. Decide before the first
+sign-in; none of them can be changed afterwards without losing what is stored.
+
+| Store | Holds | How to restrict it |
+|---|---|---|
+| Mailbox vaults (Durable Objects) | Encrypted Stalwart tokens, limits, recent sends | `DATA_JURISDICTION` in `vars`: `eu`, `us` or `fedramp` |
+| D1 database | Audit log, block list, pending approvals | `--jurisdiction` when the database is created |
+| KV namespace | The AI tools' grants and registrations | `--jurisdiction` when the namespace is created; Cloudflare may still cache entries elsewhere |
+
+Vault ids depend on `DATA_JURISDICTION`, so changing it later orphans every stored connection:
+users have to sign in again, and when an orphaned vault expires (30 idle days) it also ends
+that mailbox's current grants. A value Cloudflare does not offer
+closes the worker (503, `config_error DATA_JURISDICTION`) instead of running unrestricted.
+
+The local runtime does not implement jurisdictions: `wrangler dev` and the tests only work
+without `DATA_JURISDICTION`. The tests cover that the vault is looked up through the restricted
+namespace; that it really stays there is one of the live checks.
 
 ## Live checks before real users
 
 These need the OAuth client and a test mailbox on your server:
 
+- [ ] With `DATA_JURISDICTION` set: sign-in and a tool call work on the deployed worker (the local runtime cannot run this).
 - [ ] One grant per account and client; how a second authorization affects the first refresh token.
 - [ ] Whether a rejected Bearer token counts toward Stalwart's address ban.
 - [ ] The JMAP session under the `mail` scope includes submission, and `EmailSubmission/set` with the identity from `Identity/get` delivers.
@@ -161,7 +186,8 @@ The worker's `console` output holds only fixed markers such as `oauth_error <cod
 record request URLs, and `/callback?code=…&state=…` and `/approve?h=…` carry codes and handles.
 
 **Everything answers 503 although the switch is on.** Look for `config_error` in the worker's
-logs: `STALWART_ORIGIN` or `PUBLIC_ORIGIN` is missing or not an https origin. In production a
+logs: `STALWART_ORIGIN` or `PUBLIC_ORIGIN` is missing or not an https origin, or
+`DATA_JURISDICTION` is not one of Cloudflare's. In production a
 request under a host other than `PUBLIC_ORIGIN` answers 404.
 
 ## Known limits

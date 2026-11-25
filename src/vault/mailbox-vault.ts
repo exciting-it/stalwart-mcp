@@ -24,6 +24,7 @@ import {
 } from "../mail";
 import { writeAudit } from "../audit";
 import { clock } from "../clock";
+import { dataJurisdiction } from "../config";
 import type { Env } from "../env";
 import { fetchSession, type JmapSession, UpstreamAuthError } from "../jmap/jmap-client";
 import { grantDirectory } from "../oauth/options";
@@ -454,8 +455,15 @@ async function mailErrorsOnly<T>(run: () => Promise<T>): Promise<T> {
   }
 }
 
+/**
+ * The vault of a mailbox. With `DATA_JURISDICTION` set, the vault runs and stores its data only
+ * there; the same account id names a different vault in each jurisdiction and in none.
+ */
 export function vaultFor(env: Env, accountId: string): DurableObjectStub<MailboxVault> {
   // `Env` leaves the namespace untyped (see env.ts); the binding is declared for this class only.
   const namespace = env.MAILBOX_VAULT as unknown as DurableObjectNamespace<MailboxVault>;
-  return namespace.get(namespace.idFromName(accountId));
+  const jurisdiction = dataJurisdiction(env.DATA_JURISDICTION);
+  if (jurisdiction === null) throw new MailError("internal");
+  const scoped = jurisdiction === undefined ? namespace : namespace.jurisdiction(jurisdiction);
+  return scoped.get(scoped.idFromName(accountId));
 }

@@ -73,6 +73,13 @@ describe("environment policy", () => {
     // Staging answers under the request origin and needs no PUBLIC_ORIGIN.
     expect(configProblem({ ENVIRONMENT: "staging", STALWART_ORIGIN: "https://mail.example" })).toBeNull();
     expect(configProblem({ ENVIRONMENT: "staging", STALWART_ORIGIN: "" })).toBe("STALWART_ORIGIN");
+    // A jurisdiction is optional, but a mistyped one closes the worker.
+    expect(configProblem({ ENVIRONMENT: "production", ...ok, DATA_JURISDICTION: "eu" })).toBeNull();
+    expect(configProblem({ ENVIRONMENT: "production", ...ok, DATA_JURISDICTION: "" })).toBeNull();
+    expect(configProblem({ ENVIRONMENT: "production", ...ok, DATA_JURISDICTION: "EU" })).toBe("DATA_JURISDICTION");
+    expect(configProblem({ ENVIRONMENT: "staging", STALWART_ORIGIN: "https://mail.example", DATA_JURISDICTION: "europe" })).toBe(
+      "DATA_JURISDICTION",
+    );
   });
 
   it.each(["false", "TRUE", "1", "", undefined])("is disabled for MAIL_MCP_ENABLED=%j", (v) =>

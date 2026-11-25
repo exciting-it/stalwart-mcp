@@ -8,6 +8,10 @@
   "packageManager": "bun@1.4.0",
   "scripts": {
     "dev": "wrangler dev --env staging",
+    "deploy:staging": "wrangler deploy --env staging",
+    "deploy:production": "wrangler deploy --env=\"\"",
+    "migrate:staging": "wrangler d1 migrations apply DB --env staging --remote",
+    "migrate:production": "wrangler d1 migrations apply DB --env=\"\" --remote",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",

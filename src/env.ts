@@ -7,6 +7,12 @@ export interface Env {
   PUBLIC_ORIGIN?: string;
   /** The name AI tools show for the connector. Optional. */
   CONNECTOR_NAME?: string;
+  /**
+   * Restricts where the mailbox vaults run and store data: `eu`, `us` or `fedramp`. Optional. Must be
+   * chosen before the first sign-in: vault ids depend on it, so a later change orphans every
+   * stored connection.
+   */
+  DATA_JURISDICTION?: string;
 
   // --- bindings ---
   OAUTH_KV: KVNamespace;

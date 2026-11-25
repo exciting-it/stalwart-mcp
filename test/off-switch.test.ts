@@ -21,6 +21,7 @@ describe("off switch", () => {
     ["a Stalwart address that is not https", { STALWART_ORIGIN: "http://stalwart.test.example" }, "STALWART_ORIGIN"],
     ["a Stalwart address with a path", { STALWART_ORIGIN: "https://stalwart.test.example/jmap" }, "STALWART_ORIGIN"],
     ["production without its own address", { ENVIRONMENT: "production" }, "PUBLIC_ORIGIN"],
+    ["a data location Cloudflare does not offer", { DATA_JURISDICTION: "europe" }, "DATA_JURISDICTION"],
   ] as const)("answers 503 on every path with %s", async (_case, override, setting) => {
     const log = vi.spyOn(console, "error").mockImplementation(() => {});
     for (const path of ["/mcp", "/authorize", "/token", "/register", "/.well-known/oauth-authorization-server"]) {

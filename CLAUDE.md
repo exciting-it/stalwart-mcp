@@ -39,6 +39,7 @@ Before "done": `bun run lint && bun run typecheck && bun run test && bun run dep
 
 ## Working style
 
-- Deploys go through Cloudflare Workers Builds, not GitHub Actions. Actions is the quality gate.
+- Deploys go through Cloudflare Workers Builds (the Git connection runs `bun run deploy:<env>`),
+  never by hand and not from GitHub Actions. Actions is the quality gate.
 - Nothing against a real mail server and no deploy without the owner's OK.
 - Docs, comments and commit messages in English.

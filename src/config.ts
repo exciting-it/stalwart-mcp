@@ -36,6 +36,18 @@ export function stalwartOrigin(): string {
   return origin;
 }
 
+/** Where Cloudflare may run and store the mailbox vaults, when restricted. */
+const DATA_JURISDICTIONS: readonly string[] = ["eu", "us", "fedramp"] satisfies DurableObjectJurisdiction[];
+
+/**
+ * `DATA_JURISDICTION` as Cloudflare's jurisdiction: undefined when it is not set (no
+ * restriction), null when it names something Cloudflare does not offer here.
+ */
+export function dataJurisdiction(value: unknown): DurableObjectJurisdiction | undefined | null {
+  if (value === undefined || value === "") return undefined;
+  return typeof value === "string" && DATA_JURISDICTIONS.includes(value) ? (value as DurableObjectJurisdiction) : null;
+}
+
 export const DEFAULT_CONNECTOR_NAME = "Stalwart Mail";
 const CONNECTOR_NAME_MAX = 60;
 

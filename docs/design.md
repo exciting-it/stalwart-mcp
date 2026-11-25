@@ -158,7 +158,8 @@ to …"). The server cannot make an AI tool safe, but it does the following:
   own tokens are stored as hashes. No token, mail text or recipient address is written to logs.
 - **Addresses are deployment settings.** The Stalwart server and, in production, the worker's
   own origin come from `wrangler.jsonc`, never from a request. A missing or malformed address
-  closes the worker (503) instead of falling back to anything.
+  closes the worker (503) instead of falling back to anything. The same holds for the optional
+  data jurisdiction of the vaults: a mistyped one never becomes "no restriction".
 - **Limits.** Per mailbox in the vault: tool calls per minute and the send limits. Per source
   address on the unauthenticated OAuth endpoints: rate-limit bindings.
 - **Off switch and block list.** A dashboard variable (anything but `true` answers 503 on every
