@@ -38,7 +38,7 @@ export interface ToolSpec<I extends z.ZodTypeAny, O extends z.ZodTypeAny> {
   name: string;
   title: string;
   description: string;
-  kind: "read" | "draft" | "send" | "move" | "trash";
+  kind: "read" | "draft" | "send" | "move" | "trash" | "create" | "update" | "destroy";
   /** The area this tool belongs to; without one it is a mail tool and always offered. */
   area?: Area;
   input: I;

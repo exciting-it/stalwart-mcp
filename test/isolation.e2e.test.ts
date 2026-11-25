@@ -124,6 +124,40 @@ describe("mail connector isolation, end to end", () => {
     expect((theirs.structuredContent as { contact: { name: string } }).contact.name).toBe("B's secret");
   });
 
+  it("user A cannot change, delete or create into user B's contacts or address books", async () => {
+    const accountIdA = fake.addMailbox(A).accountId;
+    const accountIdB = fake.addMailbox(B).accountId;
+    const a = await connect(fake, A);
+    const secret = fake.addContact(B, { name: { full: "B's secret" } });
+    const theirBook = fake.addAddressBook(B, "B's book");
+    const before = fake.contactsOf(B);
+    const notFound = { isError: true, content: [{ type: "text", text: MAIL_ERROR_MESSAGES.not_found }] };
+
+    const mark = fake.requests.length;
+    expect(await callTool(a.accessToken!, "update_contact", { contact_id: secret.id, name: "Taken" })).toEqual(notFound);
+    expect(await callTool(a.accessToken!, "delete_contact", { contact_ids: [secret.id] })).toEqual(notFound);
+    expect(await callTool(a.accessToken!, "create_contact", { name: "x", address_book_id: theirBook.id })).toEqual(notFound);
+    expect(fake.contactsOf(B)).toEqual(before);
+    expect(fake.contactsOf(A)).toEqual([]);
+
+    // Own writes work, and every request names A's account and A's token only.
+    const created = await callTool(a.accessToken!, "create_contact", { name: "Mine" });
+    const { contact_id } = created.structuredContent as { contact_id: string };
+    expect(fake.contactsOf(A).map((c) => c.id)).toEqual([contact_id]);
+    const mixed = await callTool(a.accessToken!, "delete_contact", { contact_ids: [contact_id, secret.id] });
+    expect(mixed.structuredContent).toEqual({ deleted: 1, not_deleted: [secret.id] });
+    expect(fake.contactsOf(B)).toEqual(before);
+    for (const r of fake.requests.slice(mark)) {
+      expect(r.authorization).toBe(`Bearer ${fake.tokensFor(A).accessToken}`);
+      const methodCalls = (r.body as { methodCalls?: [string, { accountId?: string }, string][] } | null)?.methodCalls;
+      for (const [name, args] of methodCalls ?? []) {
+        expect(args.accountId).toBe(accountIdA);
+        expect(args.accountId).not.toBe(accountIdB);
+        expect(name).toMatch(/^(AddressBook\/get|ContactCard\/set)$/);
+      }
+    }
+  });
+
   it("user A cannot read user B's calendars or events", async () => {
     const accountIdA = fake.addMailbox(A).accountId;
     const accountIdB = fake.addMailbox(B).accountId;

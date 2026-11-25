@@ -129,6 +129,51 @@ export function updateResult(args: unknown): { updated: Set<string>; refused: Ma
   };
 }
 
+/**
+ * The server id of the object a `/set` created as `creationId`. A refusal (`notCreated`) is
+ * `upstream_rejected`. An answer that names the object in neither map shows nothing about what the
+ * server did, so a create must not be repeated blindly: `upstream_unavailable`.
+ */
+export function createdOrThrow(args: unknown, creationId: string): string {
+  if (notCreated(args, creationId)) throw new MailError("upstream_rejected");
+  const id = createdId(args, creationId);
+  if (id === null) throw new MailError("upstream_unavailable");
+  return id;
+}
+
+/**
+ * Requires that a `/set` answer shows `id` as updated: `notFound` or an id in neither map is
+ * `not_found`, any other refusal is `upstream_rejected`.
+ */
+export function requireUpdated(args: unknown, id: string): void {
+  const { updated, refused } = updateResult(args);
+  if (updated.has(id)) return;
+  const type = refused.get(id);
+  throw new MailError(type === undefined || type === "notFound" ? "not_found" : "upstream_rejected");
+}
+
+/**
+ * What a `/set` with `destroy: ids` did, as `moveMail` reports a batch: the ids in `destroyed` are
+ * deleted and every other id is in `not_deleted`. When none was deleted: `not_found` if every
+ * refusal is `notFound` (or the id is not mentioned), else `upstream_rejected`.
+ */
+export function destroyResult(args: unknown, ids: string[]): { deleted: number; not_deleted: string[] } {
+  const parsed = parseUpstream(
+    z.object({
+      destroyed: z.array(z.string()).nullish(),
+      notDestroyed: z.record(z.string(), z.object({ type: z.string() })).nullish(),
+    }),
+    args,
+  );
+  const destroyed = new Set(parsed.destroyed ?? []);
+  const notDeleted = ids.filter((id) => !destroyed.has(id));
+  if (notDeleted.length === ids.length) {
+    const unknownOnly = notDeleted.every((id) => (parsed.notDestroyed?.[id]?.type ?? "notFound") === "notFound");
+    throw new MailError(unknownOnly ? "not_found" : "upstream_rejected");
+  }
+  return { deleted: ids.length - notDeleted.length, not_deleted: notDeleted };
+}
+
 /** True when a `/set` answer lists `creationId` under `notCreated`: the server refused it. */
 export function notCreated(args: unknown, creationId: string): boolean {
   const parsed = z.object({ notCreated: z.record(z.string(), z.unknown()).nullish() }).safeParse(args);

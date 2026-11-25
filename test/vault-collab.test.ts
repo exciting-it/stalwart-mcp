@@ -109,7 +109,10 @@ describe("collab through the vault", () => {
     const loose = stub as unknown as { collab(id: string, email: string, request: unknown): Promise<unknown> };
     const call = (request: unknown) => loose.collab(accountId, A, request);
     for (const bad of [
-      { op: "delete_contact", input: { contact_id: "ct1" } },
+      { op: "purge_contacts", input: { contact_id: "ct1" } },
+      { op: "delete_contact", input: { contact_ids: ["ct1"], account_id: "x" } },
+      { op: "delete_contact", input: { contact_ids: [] } },
+      { op: "create_contact", input: {} },
       { op: "search_contacts", input: { limit: 99 } },
       { op: "search_contacts", input: {}, account_id: "x" },
       { op: "read_event", input: { event_id: "../x" } },
@@ -188,5 +191,142 @@ describe("feature switch", () => {
       }).collab(caller(A, accountId), { op: "search_contacts", input: { limit: 10, offset: 0 } }),
     );
     expect(answer).toEqual({ ok: false, code: "not_granted" });
+  });
+});
+
+describe("writing contacts and events through the vault", () => {
+  const caller = (email: string, accountId: string) => ({ accountId, email });
+  const WRITES = [
+    { op: "create_contact", input: { name: "Ada" } },
+    { op: "update_contact", input: { contact_id: "ct1", name: "Ada" } },
+    { op: "delete_contact", input: { contact_ids: ["ct1"] } },
+    { op: "create_event", input: { title: "Standup", date: "2026-11-27" } },
+    { op: "update_event", input: { event_id: "ev1", title: "Standup" } },
+    { op: "delete_event", input: { event_ids: ["ev1"] } },
+  ] as const;
+
+  it("creates, changes and deletes a contact in the mailbox's own address book", async () => {
+    const { box } = await signIn(A);
+    fake.addMailbox(B);
+    const other = fake.addContact(B, { name: { full: "Bob" } });
+    const created = await box.createContact({ name: "Ada", emails: [{ address: "ada@example.org" }] });
+    expect(created.address_book_id).toBe(fake.defaultAddressBookId(A));
+    expect(await box.updateContact({ contact_id: created.contact_id, job_title: "Engineer" })).toEqual({
+      contact_id: created.contact_id,
+    });
+    expect((await box.readContact({ contact_id: created.contact_id })).contact).toMatchObject({
+      name: "Ada",
+      titles: ["Engineer"],
+    });
+    await expectCode(box.updateContact({ contact_id: other.id, name: "Mine now" }), "not_found");
+    await expectCode(box.deleteContact({ contact_ids: [other.id] }), "not_found");
+    expect(await box.deleteContact({ contact_ids: [created.contact_id] })).toEqual({ deleted: 1, not_deleted: [] });
+    await expectCode(box.readContact({ contact_id: created.contact_id }), "not_found");
+  });
+
+  it("counts every one of the six write operations against the per-mailbox call limit", async () => {
+    const { box } = await signIn(A);
+    for (let i = 0; i < MAIL_LIMITS.toolCallsPerMinute - 2; i++) await box.searchContacts({ limit: 1, offset: 0 });
+    await box.createContact({ name: "Ada" });
+    await box.listMailboxes();
+    await expectCode(box.createContact({ name: "Bob" }), "rate_limited");
+    await expectCode(box.updateContact({ contact_id: "ct1", name: "x" }), "rate_limited");
+    await expectCode(box.deleteContact({ contact_ids: ["ct1"] }), "rate_limited");
+    await expectCode(box.createEvent({ title: "x", date: "2026-11-27" }), "rate_limited");
+    await expectCode(box.updateEvent({ event_id: "ev1", title: "x" }), "rate_limited");
+    await expectCode(box.deleteEvent({ event_ids: ["ev1"] }), "rate_limited");
+  });
+
+  it("a connection with the mail scope only answers not_granted for all six write operations and sends nothing", async () => {
+    const { stub, accountId } = await signIn(A, { mailOnly: true });
+    const loose = stub as unknown as { collab(id: string, email: string, request: unknown): Promise<unknown> };
+    for (const request of WRITES) {
+      expect(await loose.collab(accountId, A, request)).toEqual({ ok: false, code: "not_granted" });
+    }
+    expect(jmapPosts()).toHaveLength(0);
+  });
+
+  it.each([
+    ["", "contacts"],
+    ["", "calendars"],
+    ["contacts", "calendars"],
+    ["calendars", "contacts"],
+  ])("FEATURES=%j: the write operations of %s are refused and send nothing", async (features, area) => {
+    const { stub, accountId } = await signIn(A);
+    const before = jmapPosts().length;
+    const requests = WRITES.filter((r) => r.op.endsWith(area === "contacts" ? "_contact" : "_event"));
+    expect(requests).toHaveLength(3);
+    const answers = await runInDurableObject(stub, (vault: MailboxVault, state) => {
+      const ops = new MailboxOperations({
+        sql: state.storage.sql,
+        env: { ...env, FEATURES: features } as Env,
+        withAccessToken: (fn) => vault[WITH_ACCESS_TOKEN](fn),
+      });
+      return Promise.all(requests.map((r) => ops.collab(caller(A, accountId), r)));
+    });
+    for (const answer of answers) expect(answer).toEqual({ ok: false, code: "not_granted" });
+    expect(jmapPosts().length).toBe(before);
+  });
+
+  it("rejects a write request with a bad shape as invalid_input", async () => {
+    const { stub, accountId } = await signIn(A);
+    const loose = stub as unknown as { collab(id: string, email: string, request: unknown): Promise<unknown> };
+    for (const bad of [
+      { op: "create_contact", input: {} },
+      { op: "update_contact", input: { contact_id: "ct1" } },
+      { op: "delete_event", input: { event_ids: ["ev1"], account_id: "x" } },
+    ]) {
+      expect(await loose.collab(accountId, A, bad)).toEqual({ ok: false, code: "invalid_input" });
+    }
+    expect(jmapPosts()).toHaveLength(0);
+  });
+
+  describe("deleting in batches", () => {
+    const contactIds = (n: number) => Array.from({ length: n }, () => fake.addContact(A, { name: { full: "x" } }).id);
+
+    it("deletes up to 50 contacts in one request; a duplicate counts once", async () => {
+      const { box } = await signIn(A);
+      const ids = contactIds(50);
+      const before = jmapPosts().length;
+      expect(await box.deleteContact({ contact_ids: ids })).toEqual({ deleted: 50, not_deleted: [] });
+      expect(jmapPosts().length - before).toBe(1);
+      expect(fake.contactsOf(A)).toEqual([]);
+      const [one, two] = contactIds(2);
+      expect(await box.deleteContact({ contact_ids: [one!, two!, one!] })).toEqual({ deleted: 2, not_deleted: [] });
+    });
+
+    it("refuses 51 ids and an empty list as invalid input, and sends nothing", async () => {
+      const { stub, accountId } = await signIn(A);
+      const loose = stub as unknown as { collab(id: string, email: string, request: unknown): Promise<unknown> };
+      const ids = Array.from({ length: 51 }, (_, i) => `ct${i}`);
+      expect(await loose.collab(accountId, A, { op: "delete_contact", input: { contact_ids: ids } })).toEqual({
+        ok: false,
+        code: "invalid_input",
+      });
+      expect(await loose.collab(accountId, A, { op: "delete_event", input: { event_ids: [] } })).toEqual({
+        ok: false,
+        code: "invalid_input",
+      });
+      expect(jmapPosts()).toHaveLength(0);
+    });
+
+    it("names the ids that stayed, leaves another mailbox's contact alone, and not_found when none was deleted", async () => {
+      const { box } = await signIn(A);
+      fake.addMailbox(B);
+      const theirs = fake.addContact(B, { name: { full: "Bob" } });
+      const [mine] = contactIds(1);
+      expect(await box.deleteContact({ contact_ids: [theirs.id, mine!, "missing"] })).toEqual({
+        deleted: 1,
+        not_deleted: [theirs.id, "missing"],
+      });
+      expect(fake.contactsOf(B)).toHaveLength(1);
+      await expectCode(box.deleteContact({ contact_ids: [theirs.id] }), "not_found");
+    });
+
+    it("has no daily limit on deletions", async () => {
+      const { box } = await signIn(A);
+      for (let i = 0; i < 3; i++) await box.deleteContact({ contact_ids: contactIds(50) });
+      expect(fake.contactsOf(A)).toEqual([]);
+    });
   });
 });

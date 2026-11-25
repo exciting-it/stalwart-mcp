@@ -4,6 +4,13 @@ import {
   COLLAB_LIMITS,
   CollabRequest,
   ContactDetailSchema,
+  CreateContactInput,
+  CreateContactResult,
+  CreateEventInput,
+  CreateEventResult,
+  DeleteContactInput,
+  DeleteEventInput,
+  DeleteResult,
   EventDetailSchema,
   ListCalendarsInput,
   ReadContactInput,
@@ -13,6 +20,10 @@ import {
   SearchContactsResult,
   SearchEventsInput,
   SearchEventsInputBase,
+  UpdateContactInput,
+  UpdateContactResult,
+  UpdateEventInput,
+  UpdateEventResult,
 } from "../src/collab";
 import { MAIL_LIMITS } from "../src/mail";
 
@@ -134,7 +145,7 @@ describe("the request that crosses the vault", () => {
 
   it("rejects unknown operations, missing or refined-away input and extra keys", () => {
     for (const bad of [
-      { op: "delete_contact", input: { contact_id: "ct1" } },
+      { op: "purge_contacts", input: { contact_id: "ct1" } },
       { op: "read_contact" },
       { op: "read_contact", input: { contact_id: "ct1" }, account_id: "x" },
       { op: "list_calendars", input: {} },
@@ -214,5 +225,368 @@ describe("results", () => {
     expect(EventDetailSchema.safeParse({ ...event, locations: Array(6).fill("x") }).success).toBe(false);
     expect(EventDetailSchema.safeParse({ ...event, online_meetings: Array(4).fill("https://x.example") }).success).toBe(false);
     expect(EventDetailSchema.safeParse({ ...event, description: "d".repeat(5001) }).success).toBe(false);
+  });
+});
+
+// ---- writing ----
+
+const ok = (schema: { safeParse(v: unknown): { success: boolean } }, value: unknown) =>
+  expect(schema.safeParse(value).success, JSON.stringify(value)).toBe(true);
+const refused = (schema: { safeParse(v: unknown): { success: boolean } }, value: unknown) =>
+  expect(schema.safeParse(value).success, JSON.stringify(value)).toBe(false);
+
+describe("limits of the write tools", () => {
+  it("has the limits of the brief", () => {
+    expect(COLLAB_LIMITS).toMatchObject({
+      deleteBatchMax: 50,
+      contactEntriesMax: 10,
+      eventDaysMax: 366,
+      eventSpanDaysMax: 31,
+    });
+  });
+});
+
+describe("create_contact input", () => {
+  it("accepts every field, and each of the identifying ones alone", () => {
+    ok(CreateContactInput, {
+      name: "Ada Lovelace",
+      given_name: "Ada",
+      surname: "Lovelace",
+      emails: [{ address: "ada@example.org", label: "work" }, { address: "ada@home.example", label: "private" }],
+      phones: [{ number: "+49 30 1234", label: "work" }],
+      organization: "Analytical Engines",
+      job_title: "Programmer",
+      notes: "Line one\nLine two\r\nLine three",
+      birthday: "1815-12-10",
+      address_book_id: "ab1",
+    });
+    for (const alone of [
+      { name: "Ada" },
+      { given_name: "Ada" },
+      { surname: "Lovelace" },
+      { organization: "Org" },
+      { emails: [{ address: "a@example.org" }] },
+    ]) {
+      ok(CreateContactInput, alone);
+    }
+  });
+
+  it("needs a name, a name part, an organization or an email", () => {
+    for (const bad of [
+      {},
+      { notes: "x" },
+      { job_title: "Boss", birthday: "1990-01-01" },
+      { phones: [{ number: "1" }] },
+      { emails: [] },
+      { organization: "" },
+      { address_book_id: "ab1" },
+    ]) {
+      refused(CreateContactInput, bad);
+    }
+  });
+
+  it("limits single-line text to 200 characters without a line break", () => {
+    ok(CreateContactInput, { name: "x".repeat(200) });
+    for (const field of ["name", "given_name", "surname"]) {
+      refused(CreateContactInput, { [field]: "x".repeat(201) });
+      refused(CreateContactInput, { [field]: "a\nb" });
+      refused(CreateContactInput, { [field]: "a\rb" });
+      refused(CreateContactInput, { [field]: "" });
+    }
+    for (const field of ["organization", "job_title"]) {
+      refused(CreateContactInput, { name: "x", [field]: "x".repeat(201) });
+      refused(CreateContactInput, { name: "x", [field]: "a\nb" });
+    }
+    refused(CreateContactInput, { phones: [{ number: "1\n2" }], name: "x" });
+  });
+
+  it("limits notes to 2000 characters, line breaks allowed", () => {
+    ok(CreateContactInput, { name: "x", notes: "n".repeat(2000) });
+    refused(CreateContactInput, { name: "x", notes: "n".repeat(2001) });
+  });
+
+  it("allows at most 10 emails and 10 phones, phone numbers up to 50 characters, labels work or private", () => {
+    const emails = (n: number) => Array.from({ length: n }, (_, i) => ({ address: `p${i}@example.org` }));
+    const phones = (n: number) => Array.from({ length: n }, (_, i) => ({ number: `+49 ${i}` }));
+    ok(CreateContactInput, { emails: emails(10), phones: phones(10) });
+    refused(CreateContactInput, { emails: emails(11) });
+    refused(CreateContactInput, { name: "x", phones: phones(11) });
+    ok(CreateContactInput, { name: "x", phones: [{ number: "1".repeat(50) }] });
+    refused(CreateContactInput, { name: "x", phones: [{ number: "1".repeat(51) }] });
+    refused(CreateContactInput, { name: "x", phones: [{ number: "" }] });
+    refused(CreateContactInput, { emails: [{ address: "a@example.org", label: "home" }] });
+    refused(CreateContactInput, { name: "x", phones: [{ number: "1", label: "mobile" }] });
+    refused(CreateContactInput, { emails: [{ address: "a@example.org", extra: 1 }] });
+  });
+
+  it("takes bare addresses only: no display name, list or line break", () => {
+    for (const address of ["Ada <ada@example.org>", "a@example.org, b@example.org", "a@example.org\nBcc: x@example.org", "nope"]) {
+      refused(CreateContactInput, { emails: [{ address }] });
+    }
+  });
+
+  it("takes a birthday as a real date: YYYY-MM-DD or --MM-DD", () => {
+    for (const birthday of ["1990-05-17", "2024-02-29", "0001-01-01", "--05-17", "--02-29", "--12-31"]) {
+      ok(CreateContactInput, { name: "x", birthday });
+    }
+    for (const birthday of [
+      "1990-02-30", "2023-02-29", "1990-13-01", "1990-00-10", "1990-04-31", "1990-5-17", "90-05-17", "--02-30", "--13-01",
+      "--00-10", "--04-31", "-05-17", "1990/05/17", "1990-05-17T00:00:00Z", "0000-01-01", "",
+    ]) {
+      refused(CreateContactInput, { name: "x", birthday });
+    }
+  });
+
+  it("refuses unknown keys, an account, a bad address book id and wrong types", () => {
+    for (const bad of [
+      { name: "x", account_id: "a" },
+      { name: "x", from: "a@example.org" },
+      { name: "x", address_book_id: "../x" },
+      { name: "x", address_book_id: "" },
+      { name: 5 },
+      { name: "x", emails: "a@example.org" },
+      { name: "x", contact_id: "ct1" },
+      "name",
+      null,
+    ]) {
+      refused(CreateContactInput, bad);
+    }
+  });
+});
+
+describe("update_contact input", () => {
+  it("needs a contact_id and at least one field besides it", () => {
+    ok(UpdateContactInput, { contact_id: "ct1", name: "Ada" });
+    ok(UpdateContactInput, { contact_id: "ct1", notes: "" });
+    ok(UpdateContactInput, { contact_id: "ct1", emails: [] });
+    ok(UpdateContactInput, { contact_id: "ct1", organization: "", job_title: "" });
+    refused(UpdateContactInput, { contact_id: "ct1" });
+    refused(UpdateContactInput, { name: "Ada" });
+    refused(UpdateContactInput, {});
+    refused(UpdateContactInput, { contact_id: "../x", name: "Ada" });
+    refused(UpdateContactInput, { contact_id: "" , name: "Ada" });
+  });
+
+  it("applies the same field rules as the create input", () => {
+    for (const bad of [
+      { name: "x".repeat(201) },
+      { given_name: "a\nb" },
+      { notes: "n".repeat(2001) },
+      { birthday: "1990-02-30" },
+      { emails: Array.from({ length: 11 }, (_, i) => ({ address: `p${i}@example.org` })) },
+      { phones: [{ number: "1", label: "mobile" }] },
+      { account_id: "a" },
+      { address_book_id: "ab1" },
+    ]) {
+      refused(UpdateContactInput, { contact_id: "ct1", ...bad });
+    }
+  });
+});
+
+describe("delete_contact and delete_event input", () => {
+  const ids = (n: number) => Array.from({ length: n }, (_, i) => `id${i}`);
+
+  it("take 1 to 50 ids and nothing else", () => {
+    ok(DeleteContactInput, { contact_ids: ["ct1"] });
+    ok(DeleteContactInput, { contact_ids: ids(50) });
+    ok(DeleteEventInput, { event_ids: ["ev1-20261127T090000"] });
+    ok(DeleteEventInput, { event_ids: ids(50) });
+    for (const bad of [
+      {},
+      { contact_ids: [] },
+      { contact_ids: ids(51) },
+      { contact_ids: ["ct1"], account_id: "a" },
+      { contact_ids: "ct1" },
+      { contact_id: "ct1" },
+      { contact_ids: ["../x"] },
+      { contact_ids: [""] },
+      { contact_ids: ["ct1"], event_ids: ["ev1"] },
+    ]) {
+      refused(DeleteContactInput, bad);
+    }
+    for (const bad of [{}, { event_ids: [] }, { event_ids: ids(51) }, { event_ids: ["ev1"], account_id: "a" }, { event_id: "ev1" }, { event_ids: ["a/b"] }, { contact_ids: ["ct1"] }]) {
+      refused(DeleteEventInput, bad);
+    }
+  });
+});
+
+describe("create_event input", () => {
+  const timed = { title: "Standup", start: "2026-11-27T09:00:00+01:00", end: "2026-11-27T10:30:00+01:00" };
+
+  it("accepts a timed event, with or without a time zone", () => {
+    ok(CreateEventInput, timed);
+    ok(CreateEventInput, { ...timed, time_zone: "Europe/Berlin", location: "Room 1", description: "Agenda\nItem", calendar_id: "cal1" });
+    ok(CreateEventInput, { ...timed, time_zone: "Etc/UTC" });
+    ok(CreateEventInput, { title: "t", start: "2026-11-27T09:00:00Z", end: "2026-11-27T09:00:01Z" });
+  });
+
+  it("accepts an all-day event, with days from 1 to 366", () => {
+    ok(CreateEventInput, { title: "Holiday", date: "2026-12-24" });
+    ok(CreateEventInput, { title: "Holiday", date: "2026-12-24", days: 3 });
+    ok(CreateEventInput, { title: "Year", date: "2026-01-01", days: 366 });
+    ok(CreateEventInput, { title: "Leap", date: "2028-02-29" });
+    for (const days of [0, 367, -1, 1.5, "3"]) refused(CreateEventInput, { title: "x", date: "2026-12-24", days });
+  });
+
+  it("needs a title, and exactly one of start and end, or date", () => {
+    refused(CreateEventInput, { start: timed.start, end: timed.end });
+    refused(CreateEventInput, { title: "x" });
+    refused(CreateEventInput, { title: "x", start: timed.start });
+    refused(CreateEventInput, { title: "x", end: timed.end });
+    refused(CreateEventInput, { ...timed, date: "2026-11-27" });
+    refused(CreateEventInput, { title: "x", start: timed.start, date: "2026-11-27" });
+    refused(CreateEventInput, { title: "" });
+    refused(CreateEventInput, { title: "x".repeat(201), date: "2026-11-27" });
+    refused(CreateEventInput, { title: "a\nb", date: "2026-11-27" });
+  });
+
+  it("takes days only with date and time_zone only with start and end", () => {
+    refused(CreateEventInput, { ...timed, days: 2 });
+    refused(CreateEventInput, { title: "x", date: "2026-11-27", time_zone: "Europe/Berlin" });
+    refused(CreateEventInput, { title: "x", date: "2026-11-27", time_zone: "Etc/UTC" });
+  });
+
+  it("needs end later than start, at most 31 days apart", () => {
+    refused(CreateEventInput, { title: "x", start: "2026-11-27T10:00:00Z", end: "2026-11-27T10:00:00Z" });
+    refused(CreateEventInput, { title: "x", start: "2026-11-27T10:00:00Z", end: "2026-11-27T09:00:00Z" });
+    // The same instant written with two offsets is not later.
+    refused(CreateEventInput, { title: "x", start: "2026-11-27T10:00:00+01:00", end: "2026-11-27T09:00:00Z" });
+    ok(CreateEventInput, { title: "x", start: "2026-11-01T00:00:00Z", end: "2026-12-02T00:00:00Z" });
+    refused(CreateEventInput, { title: "x", start: "2026-11-01T00:00:00Z", end: "2026-12-02T00:00:01Z" });
+  });
+
+  it("takes only IANA time zone names that Intl knows", () => {
+    for (const time_zone of ["Europe/Berlin", "Asia/Dubai", "America/New_York", "UTC", "Etc/UTC"]) {
+      ok(CreateEventInput, { ...timed, time_zone });
+    }
+    for (const time_zone of ["Mars/Olympus", "Berlin", "", "Europe/Berlin\n", "x".repeat(201), 5]) {
+      refused(CreateEventInput, { ...timed, time_zone });
+    }
+  });
+
+  it("needs real dates, offsets on instants and a four-digit year", () => {
+    for (const date of ["2026-02-30", "2026-13-01", "2026-1-1", "27.11.2026", "2026-11-27T00:00:00Z", "0000-01-01", ""]) {
+      refused(CreateEventInput, { title: "x", date });
+    }
+    refused(CreateEventInput, { title: "x", start: "2026-11-27T09:00:00", end: "2026-11-27T10:00:00" });
+    refused(CreateEventInput, { title: "x", start: "not a date", end: "2026-11-27T10:00:00Z" });
+    // A year that is not four digits in UTC cannot be a LocalDateTime.
+    refused(CreateEventInput, { title: "x", start: "0000-01-01T00:00:00+05:00", end: "0000-01-01T08:00:00Z" });
+    refused(CreateEventInput, { title: "x", start: "9999-12-31T23:00:00Z", end: "10000-01-01T00:00:00Z" });
+  });
+
+  it("limits location to 200 characters in one line and description to 5000 characters with line breaks", () => {
+    ok(CreateEventInput, { ...timed, location: "x".repeat(200), description: "d\n".repeat(2500) });
+    refused(CreateEventInput, { ...timed, location: "x".repeat(201) });
+    refused(CreateEventInput, { ...timed, location: "a\nb" });
+    refused(CreateEventInput, { ...timed, description: "d".repeat(5001) });
+  });
+
+  it("has no participants, recurrence or account parameter", () => {
+    for (const extra of [
+      { participants: [{ email: "a@example.org" }] },
+      { attendees: ["a@example.org"] },
+      { recurrence: "daily" },
+      { recurrenceRules: [] },
+      { account_id: "a" },
+      { sendSchedulingMessages: true },
+      { send_invitations: true },
+      { event_id: "ev1" },
+    ]) {
+      refused(CreateEventInput, { ...timed, ...extra });
+    }
+  });
+});
+
+describe("update_event input", () => {
+  it("needs an event_id and at least one field besides it", () => {
+    ok(UpdateEventInput, { event_id: "ev1", title: "New" });
+    ok(UpdateEventInput, { event_id: "ev1", location: "" });
+    ok(UpdateEventInput, { event_id: "ev1", description: "" });
+    ok(UpdateEventInput, { event_id: "ev1", calendar_id: "cal2" });
+    refused(UpdateEventInput, { event_id: "ev1" });
+    refused(UpdateEventInput, { title: "New" });
+    refused(UpdateEventInput, {});
+    refused(UpdateEventInput, { event_id: "../x", title: "New" });
+  });
+
+  it("changes the time as a timed or as an all-day event, never both", () => {
+    ok(UpdateEventInput, { event_id: "ev1", start: "2026-11-27T09:00:00Z", end: "2026-11-27T10:00:00Z" });
+    ok(UpdateEventInput, { event_id: "ev1", start: "2026-11-27T09:00:00Z", end: "2026-11-27T10:00:00Z", time_zone: "Europe/Berlin" });
+    ok(UpdateEventInput, { event_id: "ev1", date: "2026-12-24" });
+    ok(UpdateEventInput, { event_id: "ev1", date: "2026-12-24", days: 2 });
+    refused(UpdateEventInput, { event_id: "ev1", start: "2026-11-27T09:00:00Z" });
+    refused(UpdateEventInput, { event_id: "ev1", end: "2026-11-27T10:00:00Z" });
+    refused(UpdateEventInput, { event_id: "ev1", start: "2026-11-27T09:00:00Z", end: "2026-11-27T10:00:00Z", date: "2026-11-27" });
+    refused(UpdateEventInput, { event_id: "ev1", days: 2 });
+    refused(UpdateEventInput, { event_id: "ev1", time_zone: "Europe/Berlin" });
+    refused(UpdateEventInput, { event_id: "ev1", date: "2026-11-27", time_zone: "Europe/Berlin" });
+    refused(UpdateEventInput, { event_id: "ev1", start: "2026-11-27T10:00:00Z", end: "2026-11-27T10:00:00Z" });
+    refused(UpdateEventInput, { event_id: "ev1", start: "2026-01-01T00:00:00Z", end: "2026-03-01T00:00:00Z" });
+    refused(UpdateEventInput, { event_id: "ev1", date: "2026-11-27", days: 367 });
+    refused(UpdateEventInput, { event_id: "ev1", time_zone: "Mars/Olympus", start: "2026-11-27T09:00:00Z", end: "2026-11-27T10:00:00Z" });
+  });
+
+  it("has no participants, recurrence or account parameter", () => {
+    for (const extra of [{ participants: [] }, { recurrence: "daily" }, { account_id: "a" }, { sendSchedulingMessages: false }]) {
+      refused(UpdateEventInput, { event_id: "ev1", title: "x", ...extra });
+    }
+  });
+
+  it("does not throw on a malformed instant: it is a refusal", () => {
+    expect(UpdateEventInput.safeParse({ event_id: "ev1", start: "garbage", end: "garbage" }).success).toBe(false);
+    expect(CreateEventInput.safeParse({ title: "x", start: "garbage", end: "also garbage" }).success).toBe(false);
+    expect(SearchEventsInput.safeParse({ after: "garbage", before: "garbage" }).success).toBe(false);
+  });
+});
+
+describe("results of the write tools", () => {
+  it("carry ids only", () => {
+    ok(CreateContactResult, { contact_id: "ct1", address_book_id: "ab1" });
+    ok(UpdateContactResult, { contact_id: "ct1" });
+    ok(DeleteResult, { deleted: 2, not_deleted: ["ct3"] });
+    ok(CreateEventResult, { event_id: "ev1", calendar_id: "cal1" });
+    ok(UpdateEventResult, { event_id: "ev1" });
+    refused(DeleteResult, { deleted: true, id: "ct1" });
+    refused(DeleteResult, { deleted: 1 });
+    refused(CreateContactResult, { contact_id: "ct1" });
+    refused(CreateEventResult, { event_id: "ev1" });
+    // No content notice: the schemas drop everything that is not an id.
+    expect(CreateContactResult.parse({ contact_id: "ct1", address_book_id: "ab1", name: "Ada", content_notice: "x" })).toEqual({
+      contact_id: "ct1",
+      address_book_id: "ab1",
+    });
+  });
+});
+
+describe("the six write operations of the request that crosses the vault", () => {
+  it("accepts each with its input", () => {
+    for (const request of [
+      { op: "create_contact", input: { name: "Ada" } },
+      { op: "update_contact", input: { contact_id: "ct1", name: "Ada" } },
+      { op: "delete_contact", input: { contact_ids: ["ct1", "ct2"] } },
+      { op: "create_event", input: { title: "x", date: "2026-11-27" } },
+      { op: "update_event", input: { event_id: "ev1", title: "x" } },
+      { op: "delete_event", input: { event_ids: ["ev1"] } },
+    ]) {
+      ok(CollabRequest, request);
+    }
+  });
+
+  it("refuses missing or refined-away input, extra keys and the wrong input for an operation", () => {
+    for (const bad of [
+      { op: "create_contact" },
+      { op: "create_contact", input: {} },
+      { op: "update_contact", input: { contact_id: "ct1" } },
+      { op: "delete_contact", input: { contact_ids: ["ct1"] }, account_id: "x" },
+      { op: "delete_contact", input: { event_ids: ["ev1"] } },
+      { op: "delete_contact", input: { contact_ids: [] } },
+      { op: "create_event", input: { title: "x" } },
+      { op: "update_event", input: { event_id: "ev1" } },
+      { op: "delete_event", input: { event_ids: ["ev1"], extra: 1 } },
+      { op: "delete_event", input: { contact_ids: ["ct1"] } },
+    ]) {
+      refused(CollabRequest, bad);
+    }
   });
 });

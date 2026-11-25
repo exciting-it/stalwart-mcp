@@ -37,6 +37,21 @@ import {
 } from "./limits";
 import { readConnection } from "./token-store";
 
+/** The area each operation of a `CollabRequest` belongs to. */
+const COLLAB_OP_AREA: Record<z.output<typeof CollabRequest>["op"], Area> = {
+  search_contacts: "contacts",
+  read_contact: "contacts",
+  create_contact: "contacts",
+  update_contact: "contacts",
+  delete_contact: "contacts",
+  list_calendars: "calendars",
+  search_events: "calendars",
+  read_event: "calendars",
+  create_event: "calendars",
+  update_event: "calendars",
+  delete_event: "calendars",
+};
+
 export type VaultResult<T> = { ok: true; value: T } | { ok: false; code: MailErrorCode };
 
 export type SendResult = RecordedSend & { deduplicated: boolean };
@@ -124,13 +139,13 @@ export class MailboxOperations {
   }
 
   /**
-   * The read-only contacts and calendar operations, as one request (`CollabRequest`). An area the
+   * The contacts and calendar operations, as one request (`CollabRequest`). An area the
    * deployment has not switched on (`FEATURES`) is `not_granted`, whatever the stored token could do.
    */
   collab(caller: Caller, request: unknown): Promise<VaultResult<CollabValue>> {
     return this.#operation("collab", caller, () => {
       const parsed = parse(CollabRequest, request);
-      const area: Area = parsed.op === "search_contacts" || parsed.op === "read_contact" ? "contacts" : "calendars";
+      const area: Area = COLLAB_OP_AREA[parsed.op];
       if (!(parseFeatures(this.#env.FEATURES) ?? new Set<Area>()).has(area)) throw new MailError("not_granted");
       return parsed;
     }, (req) =>
@@ -146,6 +161,18 @@ export class MailboxOperations {
             return a.searchEvents(req.input);
           case "read_event":
             return a.readEvent(req.input);
+          case "create_contact":
+            return a.createContact(req.input);
+          case "update_contact":
+            return a.updateContact(req.input);
+          case "delete_contact":
+            return a.deleteContact(req.input);
+          case "create_event":
+            return a.createEvent(req.input);
+          case "update_event":
+            return a.updateEvent(req.input);
+          case "delete_event":
+            return a.deleteEvent(req.input);
         }
       }),
     );

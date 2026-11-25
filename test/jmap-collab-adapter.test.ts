@@ -1,8 +1,10 @@
 import { MailError } from "../src/mail";
-import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { COLLAB_LIMITS, type CollabAdapter } from "../src/collab";
 import { fetchSession, jmapCall } from "../src/jmap/jmap-client";
+import { chooseTarget } from "../src/jmap/collab-map";
 import { JmapCollabAdapter } from "../src/jmap/jmap-collab-adapter";
+import { createdOrThrow, destroyResult, requireUpdated } from "../src/jmap/map";
 import { STALWART } from "../src/stalwart/endpoints";
 import { createFakeStalwart, type FakeStalwart, type RecordedRequest } from "./fake-stalwart";
 
@@ -14,6 +16,9 @@ const CORE = "urn:ietf:params:jmap:core";
 
 let fake: FakeStalwart;
 const allRequests: RecordedRequest[] = [];
+/** Requests of the tests that write: kept apart, so the read operations can be shown to send only reads. */
+const writeRequests: RecordedRequest[] = [];
+let writing = false;
 
 beforeEach(() => {
   fake = createFakeStalwart();
@@ -21,7 +26,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  allRequests.push(...fake.requests);
+  (writing ? writeRequests : allRequests).push(...fake.requests);
   vi.unstubAllGlobals();
 });
 
@@ -947,9 +952,9 @@ describe("calendar permission", () => {
   });
 });
 
-describe("read only", () => {
-  // Runs last in this file: every request the tests above sent is in `allRequests` by now.
-  it("no request of the tests above contains a /set, /copy or /parse method", () => {
+describe("the read operations", () => {
+  // Runs before the write tests: every request the read tests sent is in `allRequests` by now.
+  it("send only /get and /query: no request of the read tests above contains a /set, /copy or /parse method", () => {
     const names = allRequests.flatMap((r) =>
       Array.isArray(r.body?.methodCalls) ? (r.body.methodCalls as [string][]).map((c) => c[0]) : [],
     );
@@ -958,12 +963,621 @@ describe("read only", () => {
   });
 });
 
+// ---- writing contacts ----
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const setCalls = (name: string) =>
+  jmapRequests().flatMap((r) => calls(r).filter((c) => c[0] === name));
+
+/** The fetch of the next `n`-th JMAP request is replaced by `answer`; all others reach the fake. */
+function failRequest(nth: number, answer: () => Promise<Response>): void {
+  let seen = 0;
+  vi.stubGlobal("fetch", (input: RequestInfo | URL, init?: RequestInit) => {
+    const isJmap = new Request(input, init).url === `${STALWART.origin}/jmap/`;
+    if (isJmap && ++seen === nth) return answer();
+    return fake.fetch(input, init);
+  });
+}
+
+describe("writing contacts", () => {
+  beforeAll(() => {
+    writing = true;
+  });
+  afterAll(() => {
+    writing = false;
+  });
+
+  describe("createContact", () => {
+    it("looks up the address books, then creates a JSContact card in the default one", async () => {
+      const { accountId } = fake.addMailbox(A);
+      const work = fake.addAddressBook(A, "Work");
+      const adapter = await adapterFor(A);
+      const result = await adapter.createContact({
+        name: "Ada Lovelace",
+        given_name: "Ada",
+        surname: "Lovelace",
+        emails: [{ address: "ada@example.org", label: "work" }, { address: "ada@home.example" }],
+        phones: [{ number: "+49 30 1234", label: "private" }],
+        organization: "Analytical Engines",
+        job_title: "Programmer",
+        notes: "Line one\nLine two",
+        birthday: "1815-12-10",
+      });
+      const book = fake.defaultAddressBookId(A);
+      expect(book).not.toBe(work.id);
+      expect(result).toEqual({ contact_id: expect.any(String), address_book_id: book });
+
+      const requests = jmapRequests();
+      expect(requests).toHaveLength(2);
+      expect(requests[0]!.body.using).toEqual([CORE, CONTACTS]);
+      expect(calls(requests[0]!)).toEqual([
+        ["AddressBook/get", { ids: null, properties: ["id", "isDefault"], accountId }, "b"],
+      ]);
+      expect(requests[1]!.body.using).toEqual([CORE, CONTACTS]);
+      expect(calls(requests[1]!)).toEqual([
+        [
+          "ContactCard/set",
+          {
+            accountId,
+            create: {
+              c: {
+                "@type": "Card",
+                version: "1.0",
+                uid: expect.stringMatching(UUID),
+                kind: "individual",
+                addressBookIds: { [book]: true },
+                name: {
+                  full: "Ada Lovelace",
+                  components: [
+                    { kind: "given", value: "Ada" },
+                    { kind: "surname", value: "Lovelace" },
+                  ],
+                  isOrdered: true,
+                },
+                emails: {
+                  e1: { address: "ada@example.org", contexts: { work: true } },
+                  e2: { address: "ada@home.example" },
+                },
+                phones: { p1: { number: "+49 30 1234", contexts: { private: true } } },
+                organizations: { o1: { name: "Analytical Engines" } },
+                titles: { t1: { name: "Programmer", kind: "title" } },
+                notes: { n1: { note: "Line one\nLine two" } },
+                anniversaries: { a1: { kind: "birth", date: { year: 1815, month: 12, day: 10 } } },
+              },
+            },
+          },
+          "s",
+        ],
+      ]);
+
+      // Stored by the fake, and read back by the read adapter.
+      const stored = fake.contactsOf(A);
+      expect(stored).toHaveLength(1);
+      expect(stored[0]).toMatchObject({ id: result.contact_id, uid: expect.stringMatching(UUID) });
+      const { contact } = await adapter.readContact({ contact_id: result.contact_id });
+      expect(contact).toMatchObject({
+        name: "Ada Lovelace",
+        given_name: "Ada",
+        surname: "Lovelace",
+        emails: [
+          { address: "ada@example.org", label: "work" },
+          { address: "ada@home.example", label: null },
+        ],
+        phones: [{ number: "+49 30 1234", label: "private" }],
+        organizations: [{ name: "Analytical Engines", units: [] }],
+        titles: ["Programmer"],
+        notes: "Line one\nLine two",
+        birthday: "1815-12-10",
+        address_book_ids: [book],
+      });
+    });
+
+    it("sends only the properties whose input was given, and a name built from the parts", async () => {
+      fake.addMailbox(A);
+      const adapter = await adapterFor(A);
+      await adapter.createContact({ given_name: "Grace", surname: "Hopper", birthday: "--12-09" });
+      await adapter.createContact({ organization: "Only Org", organization_ignored: undefined } as never);
+      await adapter.createContact({ emails: [{ address: "only@example.org" }] });
+      await adapter.createContact({ name: "Mononym", organization: "" });
+      const created = setCalls("ContactCard/set").map(([, args]) => (args.create as { c: Record<string, unknown> }).c);
+      expect(created[0]).toMatchObject({
+        name: {
+          full: "Grace Hopper",
+          components: [
+            { kind: "given", value: "Grace" },
+            { kind: "surname", value: "Hopper" },
+          ],
+          isOrdered: true,
+        },
+        anniversaries: { a1: { kind: "birth", date: { month: 12, day: 9 } } },
+      });
+      expect(Object.keys(created[0]!).sort()).toEqual(
+        ["@type", "addressBookIds", "anniversaries", "kind", "name", "uid", "version"],
+      );
+      expect((created[0]!.anniversaries as { a1: { date: object } }).a1.date).not.toHaveProperty("year");
+      expect(Object.keys(created[1]!).sort()).toEqual(["@type", "addressBookIds", "kind", "organizations", "uid", "version"]);
+      expect(Object.keys(created[2]!).sort()).toEqual(["@type", "addressBookIds", "emails", "kind", "uid", "version"]);
+      expect(created[3]!.name).toEqual({ full: "Mononym" });
+      expect(created[3]).not.toHaveProperty("organizations");
+      expect(new Set(created.map((c) => c.uid)).size).toBe(4);
+    });
+
+    it("creates into the given address book of this account; one of another account is not_found", async () => {
+      fake.addMailbox(A);
+      fake.addMailbox(B);
+      const mine = fake.addAddressBook(A, "Work");
+      const theirs = fake.addAddressBook(B, "Bob's");
+      const adapter = await adapterFor(A);
+      const ok = await adapter.createContact({ name: "x", address_book_id: mine.id });
+      expect(ok.address_book_id).toBe(mine.id);
+      expect(fake.contactsOf(A)[0]!.addressBookIds).toEqual({ [mine.id]: true });
+      const before = setCalls("ContactCard/set").length;
+      await expectMailError(adapter.createContact({ name: "y", address_book_id: theirs.id }), "not_found");
+      expect(setCalls("ContactCard/set")).toHaveLength(before);
+      expect(fake.contactsOf(A)).toHaveLength(1);
+      expect(fake.contactsOf(B)).toHaveLength(0);
+    });
+
+    it("answers upstream_unavailable, without trying again, when the outcome of the set is unknown", async () => {
+      fake.addMailbox(A);
+      const adapter = await adapterFor(A);
+      for (const answer of [
+        () => Promise.reject(new TypeError("network")),
+        () => Promise.resolve(new Response("upstream detail", { status: 503 })),
+        () => Promise.resolve(new Response("<html>upstream detail", { status: 200, headers: { "Content-Type": "application/json" } })),
+        () => Promise.resolve(new Response(JSON.stringify({ methodResponses: [] }), { status: 200, headers: { "Content-Type": "application/json" } })),
+      ]) {
+        const before = fake.requests.length;
+        failRequest(2, answer);
+        await expectMailError(adapter.createContact({ name: "Once" }), "upstream_unavailable");
+        // The address book lookup and one set: nothing was repeated.
+        expect(fake.requests.length - before).toBe(1);
+        vi.stubGlobal("fetch", fake.fetch);
+      }
+    });
+
+    it("answers upstream_rejected when the server refuses the card, without passing text on", async () => {
+      fake.addMailbox(A);
+      const adapter = await adapterFor(A);
+      failRequest(2, () =>
+        Promise.resolve(
+          new Response(
+            JSON.stringify({
+              methodResponses: [
+                ["ContactCard/set", { accountId: "x", notCreated: { c: { type: "invalidProperties", description: "secret detail" } } }, "s"],
+              ],
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          ),
+        ),
+      );
+      const error = await adapter.createContact({ name: "x" }).catch((e: unknown) => e);
+      expect(error).toMatchObject({ code: "upstream_rejected" });
+      expect(String((error as Error).message)).not.toContain("secret");
+    });
+
+    it("answers mailbox_unsupported when the account has no address book", async () => {
+      fake.addMailbox(A);
+      const adapter = await adapterFor(A);
+      failRequest(1, () =>
+        Promise.resolve(
+          new Response(JSON.stringify({ methodResponses: [["AddressBook/get", { accountId: "x", list: [], notFound: [] }, "b"]] }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          }),
+        ),
+      );
+      await expectMailError(adapter.createContact({ name: "x" }), "mailbox_unsupported");
+    });
+  });
+
+  describe("updateContact", () => {
+    it("patches one top-level key per given field and leaves the others as they are", async () => {
+      const { accountId } = fake.addMailbox(A);
+      const { id } = fake.addContact(A, ADA);
+      const adapter = await adapterFor(A);
+      const before = fake.contactsOf(A)[0]!;
+      expect(await adapter.updateContact({ contact_id: id, job_title: "Mathematician", notes: "New note" })).toEqual({
+        contact_id: id,
+      });
+      const requests = jmapRequests();
+      expect(requests).toHaveLength(1);
+      expect(requests[0]!.body.using).toEqual([CORE, CONTACTS]);
+      expect(calls(requests[0]!)).toEqual([
+        [
+          "ContactCard/set",
+          {
+            accountId,
+            update: { [id]: { titles: { t1: { name: "Mathematician", kind: "title" } }, notes: { n1: { note: "New note" } } } },
+          },
+          "s",
+        ],
+      ]);
+      const after = fake.contactsOf(A)[0]!;
+      expect(after.titles).toEqual({ t1: { name: "Mathematician", kind: "title" } });
+      expect(after.notes).toEqual({ n1: { note: "New note" } });
+      const { titles: _t, notes: _n, updated: _u, ...rest } = after;
+      const { titles: _bt, notes: _bn, updated: _bu, ...restBefore } = before;
+      expect(rest).toEqual(restBefore);
+    });
+
+    it("replaces a whole list; an empty list or text removes the property (null)", async () => {
+      const { accountId } = fake.addMailbox(A);
+      const { id } = fake.addContact(A, ADA);
+      const adapter = await adapterFor(A);
+      await adapter.updateContact({
+        contact_id: id,
+        emails: [{ address: "new@example.org", label: "private" }],
+        phones: [],
+        organization: "",
+        job_title: "",
+        notes: "",
+        birthday: "--05-17",
+      });
+      expect(calls(jmapRequests()[0]!)[0]![1]).toEqual({
+        accountId,
+        update: {
+          [id]: {
+            emails: { e1: { address: "new@example.org", contexts: { private: true } } },
+            phones: null,
+            organizations: null,
+            titles: null,
+            notes: null,
+            anniversaries: { a1: { kind: "birth", date: { month: 5, day: 17 } } },
+          },
+        },
+      });
+      const after = fake.contactsOf(A)[0]!;
+      expect(after.emails).toEqual({ e1: { address: "new@example.org", contexts: { private: true } } });
+      for (const gone of ["phones", "organizations", "titles", "notes"]) expect(after).not.toHaveProperty(gone);
+      expect(after.name).toEqual(ADA.name);
+    });
+
+    it("rebuilds the name from the name parts that are given, and only then", async () => {
+      fake.addMailbox(A);
+      const { id } = fake.addContact(A, ADA);
+      const adapter = await adapterFor(A);
+      await adapter.updateContact({ contact_id: id, given_name: "Augusta" });
+      expect(fake.contactsOf(A)[0]!.name).toEqual({
+        full: "Augusta",
+        components: [{ kind: "given", value: "Augusta" }],
+        isOrdered: true,
+      });
+      await adapter.updateContact({ contact_id: id, name: "Countess of Lovelace" });
+      expect(fake.contactsOf(A)[0]!.name).toEqual({ full: "Countess of Lovelace" });
+      await adapter.updateContact({ contact_id: id, organization: "Elsewhere" });
+      expect(fake.contactsOf(A)[0]!.name).toEqual({ full: "Countess of Lovelace" });
+    });
+
+    it("answers not_found for an unknown id and for another account's contact, which stays unchanged", async () => {
+      fake.addMailbox(A);
+      fake.addMailbox(B);
+      const theirs = fake.addContact(B, { name: { full: "Bob" } });
+      const adapter = await adapterFor(A);
+      const before = fake.contactsOf(B);
+      await expectMailError(adapter.updateContact({ contact_id: theirs.id, name: "Mine now" }), "not_found");
+      await expectMailError(adapter.updateContact({ contact_id: "nope", name: "x" }), "not_found");
+      expect(fake.contactsOf(B)).toEqual(before);
+    });
+
+    it("answers upstream_unavailable on a network error, where a read would pass the raw failure", async () => {
+      fake.addMailbox(A);
+      const { id } = fake.addContact(A, ADA);
+      const adapter = await adapterFor(A);
+      fake.failNext("network");
+      await expectMailError(adapter.updateContact({ contact_id: id, name: "x" }), "upstream_unavailable");
+      fake.failNext("invalid-json");
+      await expectMailError(adapter.updateContact({ contact_id: id, name: "x" }), "upstream_unavailable");
+    });
+  });
+
+  describe("deleteContact", () => {
+    it("destroys the contact for good with one /set, and the card is gone", async () => {
+      const { accountId } = fake.addMailbox(A);
+      const { id } = fake.addContact(A, ADA);
+      const keep = fake.addContact(A, { name: { full: "Keep" } });
+      const adapter = await adapterFor(A);
+      expect(await adapter.deleteContact({ contact_ids: [id] })).toEqual({ deleted: 1, not_deleted: [] });
+      const requests = jmapRequests();
+      expect(requests).toHaveLength(1);
+      expect(requests[0]!.body.using).toEqual([CORE, CONTACTS]);
+      expect(calls(requests[0]!)).toEqual([["ContactCard/set", { accountId, destroy: [id] }, "s"]]);
+      expect(fake.contactsOf(A).map((c) => c.id)).toEqual([keep.id]);
+      await expectMailError(adapter.readContact({ contact_id: id }), "not_found");
+      await expectMailError(adapter.deleteContact({ contact_ids: [id] }), "not_found");
+    });
+
+    it("deletes a batch in one /set, counting duplicates once", async () => {
+      const { accountId } = fake.addMailbox(A);
+      const ids = [1, 2, 3, 4].map(() => fake.addContact(A, { name: { full: "x" } }).id);
+      const adapter = await adapterFor(A);
+      expect(await adapter.deleteContact({ contact_ids: [ids[0]!, ids[1]!, ids[0]!, ids[2]!] })).toEqual({
+        deleted: 3,
+        not_deleted: [],
+      });
+      expect(calls(jmapRequests()[0]!)).toEqual([["ContactCard/set", { accountId, destroy: [ids[0], ids[1], ids[2]] }, "s"]]);
+      expect(jmapRequests()).toHaveLength(1);
+      expect(fake.contactsOf(A).map((c) => c.id)).toEqual([ids[3]]);
+    });
+
+    it("deletes the others of a batch and names an unknown or foreign id; B's contact stays", async () => {
+      fake.addMailbox(A);
+      fake.addMailbox(B);
+      const mine = fake.addContact(A, { name: { full: "Ann" } });
+      const keep = fake.addContact(A, { name: { full: "Keep" } });
+      const theirs = fake.addContact(B, { name: { full: "Bob" } });
+      const adapter = await adapterFor(A);
+      expect(await adapter.deleteContact({ contact_ids: [mine.id, theirs.id, "nope"] })).toEqual({
+        deleted: 1,
+        not_deleted: [theirs.id, "nope"],
+      });
+      expect(fake.contactsOf(A).map((c) => c.id)).toEqual([keep.id]);
+      expect(fake.contactsOf(B)).toHaveLength(1);
+    });
+
+    it("answers not_found for another account's contact, which stays", async () => {
+      fake.addMailbox(A);
+      fake.addMailbox(B);
+      const theirs = fake.addContact(B, { name: { full: "Bob" } });
+      const adapter = await adapterFor(A);
+      await expectMailError(adapter.deleteContact({ contact_ids: [theirs.id] }), "not_found");
+      expect(fake.contactsOf(B)).toHaveLength(1);
+    });
+  });
+
+  describe("round trip", () => {
+    it("create, read, update (only the given fields change), search, delete, read is not_found", async () => {
+      fake.addMailbox(A);
+      const adapter = await adapterFor(A);
+      const { contact_id } = await adapter.createContact({
+        given_name: "Alan",
+        surname: "Turing",
+        emails: [{ address: "alan@example.org" }],
+        organization: "Bletchley",
+      });
+      const found = await adapter.searchContacts({ limit: 10, offset: 0, text: "turing" });
+      expect(found.contacts).toMatchObject([{ id: contact_id, name: "Alan Turing", emails: ["alan@example.org"], organization: "Bletchley" }]);
+      const first = (await adapter.readContact({ contact_id })).contact;
+      await adapter.updateContact({ contact_id, phones: [{ number: "+44 1" }] });
+      const second = (await adapter.readContact({ contact_id })).contact;
+      expect(second.phones).toEqual([{ number: "+44 1", label: null }]);
+      expect({ ...second, phones: [], updated: null }).toEqual({ ...first, phones: [], updated: null });
+      await adapter.deleteContact({ contact_ids: [contact_id] });
+      await expectMailError(adapter.readContact({ contact_id }), "not_found");
+      expect((await adapter.searchContacts({ limit: 10, offset: 0 })).contacts).toEqual([]);
+    });
+  });
+
+  describe("isolation", () => {
+    it("no write request carries B's account id, and B's address book and contacts stay untouched", async () => {
+      const accountA = fake.addMailbox(A).accountId;
+      const accountB = fake.addMailbox(B).accountId;
+      const secret = fake.addContact(B, { name: { full: "Bob" } });
+      const theirBook = fake.addAddressBook(B, "Bob's");
+      const before = fake.contactsOf(B);
+      const adapter = await adapterFor(A);
+      await expectMailError(adapter.updateContact({ contact_id: secret.id, name: "x" }), "not_found");
+      await expectMailError(adapter.deleteContact({ contact_ids: [secret.id] }), "not_found");
+      await expectMailError(adapter.createContact({ name: "x", address_book_id: theirBook.id }), "not_found");
+      await adapter.createContact({ name: "mine" });
+      expect(fake.contactsOf(B)).toEqual(before);
+      expect(fake.contactsOf(A)).toHaveLength(1);
+      for (const r of jmapRequests()) {
+        for (const [, args] of calls(r)) {
+          expect(args.accountId).toBe(accountA);
+          expect(args.accountId).not.toBe(accountB);
+        }
+      }
+    });
+
+    it("a card or patch the input tries to point at another account's id is sent with A's account id", async () => {
+      const accountA = fake.addMailbox(A).accountId;
+      fake.addMailbox(B);
+      const adapter = await adapterFor(A);
+      const sneaky = { name: "x", accountId: "acc-b", account_id: "acc-b" } as never;
+      await adapter.createContact(sneaky).catch(() => undefined);
+      expect(jmapRequests().flatMap((r) => calls(r)).every(([, a]) => a.accountId === accountA)).toBe(true);
+      const card = (setCalls("ContactCard/set")[0]![1].create as { c: Record<string, unknown> }).c;
+      expect(card).not.toHaveProperty("accountId");
+      expect(card).not.toHaveProperty("account_id");
+    });
+  });
+
+  describe("permission", () => {
+    it("a token with the mail scope only answers not_granted for all six write operations and sends no request", async () => {
+      fake.addMailbox(A);
+      const adapter = await adapterFor(A, { mailOnly: true });
+      const before = fake.requests.length;
+      await expectMailError(adapter.createContact({ name: "x" }), "not_granted");
+      await expectMailError(adapter.updateContact({ contact_id: "ct1", name: "x" }), "not_granted");
+      await expectMailError(adapter.deleteContact({ contact_ids: ["ct1"] }), "not_granted");
+      await expectMailError(adapter.createEvent({ title: "x", date: "2026-11-27" }), "not_granted");
+      await expectMailError(adapter.updateEvent({ event_id: "ev1", title: "x" }), "not_granted");
+      await expectMailError(adapter.deleteEvent({ event_ids: ["ev1"] }), "not_granted");
+      expect(fake.requests.length).toBe(before);
+    });
+
+    it("an unknownMethod answer to a write means not_granted after all", async () => {
+      fake.addMailbox(A);
+      const { id } = fake.addContact(A, { name: { full: "x" } });
+      const adapter = await adapterFor(A);
+      fake.restrictToMail(A);
+      await expectMailError(adapter.updateContact({ contact_id: id, name: "y" }), "not_granted");
+      await expectMailError(adapter.deleteContact({ contact_ids: [id] }), "not_granted");
+      await expectMailError(adapter.createContact({ name: "y" }), "not_granted");
+    });
+  });
+
+  describe("the fake Stalwart's /set", () => {
+    const setCall = async (args: Record<string, unknown>) => {
+      const { accessToken } = fake.tokensFor(A);
+      const session = await fetchSession(accessToken);
+      const [answer] = await jmapCall(
+        session,
+        accessToken,
+        [["ContactCard/set", { accountId: session.accountId, ...args }, "s"]],
+        { using: [CORE, CONTACTS] },
+      );
+      return { answer: answer![1], session };
+    };
+    const card = (book: string, extra: Record<string, unknown> = {}) => ({
+      "@type": "Card",
+      version: "1.0",
+      uid: "u1",
+      addressBookIds: { [book]: true },
+      ...extra,
+    });
+
+    it("refuses a card without @type, version, uid or an address book of this account, and unknown properties", async () => {
+      fake.addMailbox(A);
+      fake.addMailbox(B);
+      const book = fake.defaultAddressBookId(A);
+      const { answer } = await setCall({
+        create: {
+          noType: { ...card(book), "@type": undefined },
+          noVersion: { ...card(book), version: undefined },
+          noUid: { ...card(book), uid: undefined },
+          noBook: { "@type": "Card", version: "1.0", uid: "u" },
+          foreignBook: card(fake.defaultAddressBookId(B)),
+          unknown: card(book, { favouriteColour: "red" }),
+          badEmails: card(book, { emails: { e1: "x@example.org" } }),
+          fine: card(book),
+        },
+      });
+      const failed = answer.notCreated as Record<string, { type: string; properties: string[] }>;
+      expect(Object.keys(failed).sort()).toEqual(["badEmails", "foreignBook", "noBook", "noType", "noUid", "noVersion", "unknown"]);
+      expect(failed.noType).toEqual({ type: "invalidProperties", properties: ["@type"] });
+      expect(failed.noVersion!.properties).toEqual(["version"]);
+      expect(failed.noUid!.properties).toEqual(["uid"]);
+      expect(failed.noBook!.properties).toEqual(["addressBookIds"]);
+      expect(failed.foreignBook!.properties).toEqual(["addressBookIds"]);
+      expect(failed.unknown!.properties).toEqual(["favouriteColour"]);
+      expect(failed.badEmails!.properties).toEqual(["emails"]);
+      expect(Object.keys(answer.created as object)).toEqual(["fine"]);
+      expect(fake.contactsOf(A)).toHaveLength(1);
+    });
+
+    it("applies an update as a top-level property replacement and refuses unknown or nested keys", async () => {
+      fake.addMailbox(A);
+      const { id } = fake.addContact(A, ADA);
+      const { answer } = await setCall({
+        update: {
+          [id]: { name: { full: "Replaced" } },
+          nope: { name: { full: "x" } },
+        },
+      });
+      expect(answer.updated).toEqual({ [id]: null });
+      expect(answer.notUpdated).toEqual({ nope: { type: "notFound" } });
+      expect(fake.contactsOf(A)[0]!.name).toEqual({ full: "Replaced" });
+      const bad = (await setCall({ update: { [id]: { favouriteColour: "red", "name/full": "x" } } })).answer;
+      expect(bad.notUpdated).toEqual({ [id]: { type: "invalidProperties", properties: ["favouriteColour", "name/full"] } });
+      const noBook = (await setCall({ update: { [id]: { addressBookIds: null } } })).answer;
+      expect(noBook.notUpdated).toEqual({ [id]: { type: "invalidProperties", properties: ["addressBookIds"] } });
+      expect(fake.contactsOf(A)[0]!.name).toEqual({ full: "Replaced" });
+    });
+
+    it("answers notFound for ids of another account and for destroy twice", async () => {
+      fake.addMailbox(A);
+      fake.addMailbox(B);
+      const theirs = fake.addContact(B, { name: { full: "Bob" } });
+      const mine = fake.addContact(A, { name: { full: "Ann" } });
+      const { answer } = await setCall({ destroy: [theirs.id, mine.id, mine.id] });
+      // The second `mine.id` finds nothing: destroyed once.
+      expect(answer.destroyed).toEqual([mine.id]);
+      expect(answer.notDestroyed).toEqual({ [theirs.id]: { type: "notFound" }, [mine.id]: { type: "notFound" } });
+      expect(fake.contactsOf(B)).toHaveLength(1);
+    });
+
+    it("answers unknownMethod without the contacts capability in `using`", async () => {
+      fake.addMailbox(A);
+      const { accessToken } = fake.tokensFor(A);
+      const session = await fetchSession(accessToken);
+      const [answer] = await jmapCall(session, accessToken, [["ContactCard/set", { accountId: session.accountId, destroy: [] }, "s"]], {
+        using: [CORE],
+      });
+      expect(answer).toEqual(["error", { type: "unknownMethod" }, "s"]);
+    });
+  });
+});
+
+describe("reading the answer of a /set", () => {
+  it("created: the server id; a refusal is upstream_rejected, silence is upstream_unavailable", () => {
+    expect(createdOrThrow({ created: { c: { id: "ct9" } } }, "c")).toBe("ct9");
+    expect(() => createdOrThrow({ notCreated: { c: { type: "invalidProperties" } } }, "c")).toThrow(MailError);
+    // Neither created nor refused: nothing says what the server did, so the caller must decide.
+    expect(() => createdOrThrow({}, "c")).toThrow(expect.objectContaining({ code: "upstream_unavailable" }));
+    expect(() => createdOrThrow({ created: { c: { id: "../x" } } }, "c")).toThrow(expect.objectContaining({ code: "upstream_unavailable" }));
+    expect(() => createdOrThrow({ notCreated: { c: { type: "x" } } }, "c")).toThrow(expect.objectContaining({ code: "upstream_rejected" }));
+  });
+
+  it("update: updated is done, notFound or silence is not_found, any other refusal is upstream_rejected", () => {
+    const code = (fn: () => void) => {
+      try {
+        fn();
+      } catch (e) {
+        return (e as MailError).code;
+      }
+      return "done";
+    };
+    expect(code(() => requireUpdated({ updated: { x: null } }, "x"))).toBe("done");
+    expect(code(() => requireUpdated({ updated: { x: { a: 1 } } }, "x"))).toBe("done");
+    expect(code(() => requireUpdated({ notUpdated: { x: { type: "notFound" } } }, "x"))).toBe("not_found");
+    expect(code(() => requireUpdated({ notUpdated: { x: { type: "forbidden" } } }, "x"))).toBe("upstream_rejected");
+    expect(code(() => requireUpdated({ notUpdated: { x: { type: "invalidProperties" } } }, "x"))).toBe("upstream_rejected");
+    expect(code(() => requireUpdated({}, "x"))).toBe("not_found");
+    expect(code(() => requireUpdated({ updated: { y: null } }, "x"))).toBe("not_found");
+    expect(code(() => requireUpdated({ updated: 5 }, "x"))).toBe("upstream_rejected");
+  });
+
+  it("destroy: destroyed ids are deleted and the others named; none deleted is not_found only if every refusal is", () => {
+    const code = (fn: () => unknown) => {
+      try {
+        fn();
+      } catch (e) {
+        return (e as MailError).code;
+      }
+      return "done";
+    };
+    expect(destroyResult({ destroyed: ["x"] }, ["x"])).toEqual({ deleted: 1, not_deleted: [] });
+    expect(destroyResult({ destroyed: ["x", "z"], notDestroyed: { y: { type: "notFound" } } }, ["x", "y", "z"])).toEqual({
+      deleted: 2,
+      not_deleted: ["y"],
+    });
+    // Some deleted: the rest is named, whatever the reason; an id the answer does not mention stays too.
+    expect(destroyResult({ destroyed: ["x"], notDestroyed: { y: { type: "forbidden" } } }, ["x", "y", "w"])).toEqual({
+      deleted: 1,
+      not_deleted: ["y", "w"],
+    });
+    expect(code(() => destroyResult({ notDestroyed: { x: { type: "notFound" } } }, ["x"]))).toBe("not_found");
+    expect(code(() => destroyResult({ destroyed: null, notDestroyed: null }, ["x", "y"]))).toBe("not_found");
+    expect(code(() => destroyResult({ destroyed: ["y"] }, ["x"]))).toBe("not_found");
+    expect(code(() => destroyResult({ notDestroyed: { x: { type: "notFound" }, y: { type: "forbidden" } } }, ["x", "y"]))).toBe(
+      "upstream_rejected",
+    );
+    expect(code(() => destroyResult({ notDestroyed: { x: { type: "forbidden" } } }, ["x"]))).toBe("upstream_rejected");
+    expect(code(() => destroyResult({ destroyed: "x" }, ["x"]))).toBe("upstream_rejected");
+  });
+
+  it("the target of a create: the requested one if it is listed, else the default, else the first, else unsupported", () => {
+    const list = [{ id: "a" }, { id: "b", isDefault: true }, { id: "c", isDefault: false }];
+    expect(chooseTarget(list)).toBe("b");
+    expect(chooseTarget(list, "c")).toBe("c");
+    expect(chooseTarget([{ id: "a" }, { id: "c", isDefault: false }])).toBe("a");
+    expect(() => chooseTarget(list, "z")).toThrow(expect.objectContaining({ code: "not_found" }));
+    expect(() => chooseTarget([])).toThrow(expect.objectContaining({ code: "mailbox_unsupported" }));
+    expect(() => chooseTarget([], "a")).toThrow(expect.objectContaining({ code: "not_found" }));
+  });
+});
+
 afterAll(() => {
-  const names = allRequests.flatMap((r) =>
-    Array.isArray(r.body?.methodCalls) ? (r.body.methodCalls as [string][]).map((c) => c[0]) : [],
-  );
-  expect(names.length).toBeGreaterThan(0);
-  expect(names.filter((n) => /\/(set|copy|parse)$/.test(n))).toEqual([]);
-  // Only reads: every method these tests sent is a `/get` or a `/query`.
-  expect(names.filter((n) => !/\/(get|query)$/.test(n))).toEqual([]);
+  const names = (list: RecordedRequest[]) =>
+    list.flatMap((r) => (Array.isArray(r.body?.methodCalls) ? (r.body.methodCalls as [string][]).map((c) => c[0]) : []));
+  const sent = names([...allRequests, ...writeRequests]);
+  expect(sent.length).toBeGreaterThan(0);
+  // The only writes the adapter may send: `/set` of a contact card or a calendar event. Never
+  // `/copy` or `/parse`, never a `/set` of an address book or a calendar.
+  expect(sent.filter((n) => /\/(set|copy|parse)$/.test(n) && !["ContactCard/set", "CalendarEvent/set"].includes(n))).toEqual([]);
+  expect(sent).toContain("ContactCard/set");
+  // Everything else is a read.
+  expect(sent.filter((n) => !/\/(get|query|set)$/.test(n))).toEqual([]);
 });

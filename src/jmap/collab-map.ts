@@ -8,6 +8,8 @@ import {
   type CalendarInfo,
   COLLAB_LIMITS,
   type ContactDetail,
+  type CreateContactInputT,
+  type UpdateContactInputT,
   type ContactSummary,
   type EventDetail,
   type EventSummary,
@@ -15,7 +17,7 @@ import {
   type SearchEventsInputT,
 } from "../collab";
 import { cleanText, htmlToText } from "../content/sanitize";
-import { MailIdSchema } from "../mail";
+import { MailError, MailIdSchema } from "../mail";
 import { clean, trueKeys } from "./map";
 
 const LINE = COLLAB_LIMITS.lineChars;
@@ -73,6 +75,23 @@ export const JmapContactCard = z.object({
 type Card = z.infer<typeof JmapContactCard>;
 
 export const JmapAddressBook = z.object({ id: MailIdSchema });
+
+/** An address book or calendar as the write calls list it: its id and whether it is the default. */
+export const JmapTarget = z.object({ id: MailIdSchema, isDefault: z.boolean().nullish() });
+
+/**
+ * Where a new object goes: `requested` when it is one of `list` (else `not_found`), otherwise the
+ * default one, otherwise the first; an empty list is `mailbox_unsupported`.
+ */
+export function chooseTarget(list: { id: string; isDefault?: boolean | null }[], requested?: string): string {
+  if (requested !== undefined) {
+    if (!list.some((t) => t.id === requested)) throw new MailError("not_found");
+    return requested;
+  }
+  const target = list.find((t) => t.isDefault === true) ?? list[0];
+  if (!target) throw new MailError("mailbox_unsupported");
+  return target.id;
+}
 
 export const CONTACT_SUMMARY_PROPERTIES = ["id", "kind", "name", "emails", "phones", "organizations"] as const;
 export const CONTACT_DETAIL_PROPERTIES = [
@@ -222,6 +241,73 @@ export function toContactDetail(card: Card): ContactDetail {
     address_book_ids: idKeys(card.addressBookIds),
     updated: card.updated == null ? null : clean(card.updated, 64),
   };
+}
+
+// ---- contacts: writing ----
+
+type Fields = Omit<UpdateContactInputT, "contact_id">;
+
+const contexts = (label: "work" | "private" | undefined) => (label === undefined ? {} : { contexts: { [label]: true } });
+
+/** `name.full` is the input `name`, else the given name and surname joined; components for the parts given. */
+function nameProperty(f: Fields): Record<string, unknown> {
+  const parts = [
+    ...(f.given_name === undefined ? [] : [{ kind: "given", value: f.given_name }]),
+    ...(f.surname === undefined ? [] : [{ kind: "surname", value: f.surname }]),
+  ];
+  const full = f.name ?? parts.map((p) => p.value).join(" ");
+  return parts.length === 0 ? { full } : { full, components: parts, isOrdered: true };
+}
+
+const nameGiven = (f: Fields): boolean => f.name !== undefined || f.given_name !== undefined || f.surname !== undefined;
+
+function birthdayProperty(birthday: string): Record<string, unknown> {
+  const m = /^(?:(\d{4})|-)-(\d{2})-(\d{2})$/.exec(birthday)!;
+  const date = { ...(m[1] === undefined ? {} : { year: Number(m[1]) }), month: Number(m[2]), day: Number(m[3]) };
+  return { a1: { kind: "birth", date } };
+}
+
+const numbered = <T>(prefix: string, list: T[]): Record<string, T> =>
+  Object.fromEntries(list.map((item, i) => [`${prefix}${i + 1}`, item]));
+
+/** The JSContact properties of the fields that were given, each in the shape of a whole property. */
+function contactProperties(f: Fields, clearWith: null | undefined): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  if (nameGiven(f)) out.name = nameProperty(f);
+  if (f.emails !== undefined) {
+    out.emails =
+      f.emails.length === 0 ? clearWith : numbered("e", f.emails.map((e) => ({ address: e.address, ...contexts(e.label) })));
+  }
+  if (f.phones !== undefined) {
+    out.phones =
+      f.phones.length === 0 ? clearWith : numbered("p", f.phones.map((p) => ({ number: p.number, ...contexts(p.label) })));
+  }
+  if (f.organization !== undefined) out.organizations = f.organization === "" ? clearWith : { o1: { name: f.organization } };
+  if (f.job_title !== undefined) out.titles = f.job_title === "" ? clearWith : { t1: { name: f.job_title, kind: "title" } };
+  if (f.notes !== undefined) out.notes = f.notes === "" ? clearWith : { n1: { note: f.notes } };
+  if (f.birthday !== undefined) out.anniversaries = birthdayProperty(f.birthday);
+  return out;
+}
+
+/** A new JSContact Card (RFC 9553) in `addressBookId`; only the properties whose input was given. */
+export function newContactCard(input: CreateContactInputT, addressBookId: string): Record<string, unknown> {
+  const { address_book_id: _book, ...fields } = input;
+  const properties = contactProperties(fields, undefined);
+  for (const key of Object.keys(properties)) if (properties[key] === undefined) delete properties[key];
+  return {
+    "@type": "Card",
+    version: "1.0",
+    uid: crypto.randomUUID(),
+    kind: "individual",
+    addressBookIds: { [addressBookId]: true },
+    ...properties,
+  };
+}
+
+/** The PatchObject of an update: one top-level key per given field; an emptied list or text is `null`. */
+export function contactPatch(input: UpdateContactInputT): Record<string, unknown> {
+  const { contact_id: _id, ...fields } = input;
+  return contactProperties(fields, null);
 }
 
 /** Search input → JMAP `ContactCard/query` FilterCondition. */

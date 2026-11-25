@@ -3,7 +3,15 @@
  * and threads. An id that belongs to the other account answers `MailError("not_found")`, as the
  * real adapter does, and every call is recorded with the account id it ran against.
  */
-import type { CalendarInfo, ContactDetail, ContactSummary, EventDetail, EventSummary, Mailbox } from "../src/collab";
+import type {
+  CalendarInfo,
+  ContactDetail,
+  ContactSummary,
+  EventDetail,
+  EventSummary,
+  Mailbox,
+  UpdateContactInputT,
+} from "../src/collab";
 import {
   MailError,
   type MailFolder,
@@ -81,6 +89,44 @@ const summaryOfEvent = (e: EventDetail): EventSummary => ({
   status: e.status,
   recurring: e.recurring,
 });
+
+const emptyContact = (id: string, book: string): ContactDetail => ({
+  id,
+  kind: "individual",
+  name: "",
+  given_name: null,
+  surname: null,
+  nicknames: [],
+  emails: [],
+  phones: [],
+  organizations: [],
+  titles: [],
+  addresses: [],
+  birthday: null,
+  notes: "",
+  notes_truncated: false,
+  address_book_ids: [book],
+  updated: "2026-11-26T09:00:00Z",
+});
+
+/** The given fields replace the stored ones; the rest stays. A given name part rebuilds the name. */
+function applyContactFields(contact: ContactDetail, f: Omit<UpdateContactInputT, "contact_id">): ContactDetail {
+  const next = { ...contact };
+  if (f.name !== undefined || f.given_name !== undefined || f.surname !== undefined) {
+    next.given_name = f.given_name ?? null;
+    next.surname = f.surname ?? null;
+    next.name = f.name ?? [f.given_name, f.surname].filter((v) => v !== undefined).join(" ");
+  }
+  if (f.emails !== undefined) next.emails = f.emails.map((e) => ({ address: e.address, label: e.label ?? null }));
+  if (f.phones !== undefined) next.phones = f.phones.map((p) => ({ number: p.number, label: p.label ?? null }));
+  if (f.organization !== undefined) {
+    next.organizations = f.organization === "" ? [] : [{ name: f.organization, units: [] }];
+  }
+  if (f.job_title !== undefined) next.titles = f.job_title === "" ? [] : [f.job_title];
+  if (f.notes !== undefined) next.notes = f.notes;
+  if (f.birthday !== undefined) next.birthday = f.birthday;
+  return next;
+}
 
 function seedAccount(key: AccountKey): Account {
   const p = key.toLowerCase();
@@ -319,6 +365,75 @@ export function createFakeMailStore() {
         const event = account.events.find((e) => e.id === input.event_id);
         if (event === undefined) throw new MailError("not_found");
         return { event };
+      },
+      async createContact(input) {
+        record("createContact");
+        // Each account has one address book, `<a|b>-book-1`; another account's book is not found.
+        const ownBook = `${accountId.slice("acct-".length)}-book-1`;
+        const book = input.address_book_id ?? ownBook;
+        if (book !== ownBook) throw new MailError("not_found");
+        counter += 1;
+        const id = `${accountId}-contact-x${counter}`;
+        const { address_book_id: _book, ...fields } = input;
+        account.contacts.push(applyContactFields(emptyContact(id, book), fields));
+        return { contact_id: id, address_book_id: book };
+      },
+      async updateContact(input) {
+        record("updateContact");
+        const index = account.contacts.findIndex((c) => c.id === input.contact_id);
+        if (index < 0) throw new MailError("not_found");
+        const { contact_id: _id, ...fields } = input;
+        account.contacts[index] = applyContactFields(account.contacts[index]!, fields);
+        return { contact_id: input.contact_id };
+      },
+      async deleteContact(input) {
+        record("deleteContact");
+        const ids = [...new Set(input.contact_ids)];
+        const gone = ids.filter((id) => account.contacts.some((c) => c.id === id));
+        if (gone.length === 0) throw new MailError("not_found");
+        account.contacts = account.contacts.filter((c) => !gone.includes(c.id));
+        return { deleted: gone.length, not_deleted: ids.filter((id) => !gone.includes(id)) };
+      },
+      // The event writes keep it simple (part 2 refines): the title, location and description are
+      // stored as given, the time is not computed.
+      async createEvent(input) {
+        record("createEvent");
+        const calendar = input.calendar_id ?? account.calendars[0]!.id;
+        if (!account.calendars.some((c) => c.id === calendar)) throw new MailError("not_found");
+        counter += 1;
+        const id = `${accountId}-event-x${counter}`;
+        const base = account.events[0]!;
+        account.events.push({
+          ...base,
+          id,
+          calendar_ids: [calendar],
+          title: input.title ?? "",
+          location: input.location ?? null,
+          description: input.description ?? "",
+          participants: [],
+        });
+        return { event_id: id, calendar_id: calendar };
+      },
+      async updateEvent(input) {
+        record("updateEvent");
+        const event = account.events.find((e) => e.id === input.event_id);
+        if (event === undefined) throw new MailError("not_found");
+        if (input.calendar_id !== undefined && !account.calendars.some((c) => c.id === input.calendar_id)) {
+          throw new MailError("not_found");
+        }
+        if (input.title !== undefined) event.title = input.title;
+        if (input.location !== undefined) event.location = input.location === "" ? null : input.location;
+        if (input.description !== undefined) event.description = input.description;
+        if (input.calendar_id !== undefined) event.calendar_ids = [input.calendar_id];
+        return { event_id: input.event_id };
+      },
+      async deleteEvent(input) {
+        record("deleteEvent");
+        const ids = [...new Set(input.event_ids)];
+        const gone = ids.filter((id) => account.events.some((e) => e.id === id));
+        if (gone.length === 0) throw new MailError("not_found");
+        account.events = account.events.filter((e) => !gone.includes(e.id));
+        return { deleted: gone.length, not_deleted: ids.filter((id) => !gone.includes(id)) };
       },
     };
   }

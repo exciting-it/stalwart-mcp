@@ -81,6 +81,10 @@ export interface FakeStalwart {
   addContact(email: string, card?: Record<string, unknown>): { id: string; addressBookId: string };
   addAddressBook(email: string, name?: string): { id: string };
   defaultAddressBookId(email: string): string;
+  /** A copy of every ContactCard stored in `email`'s account, as the server holds it (with `id`). */
+  contactsOf(email: string): FakeContact[];
+  /** A copy of every CalendarEvent stored in `email`'s account. */
+  eventsOf(email: string): FakeEvent[];
   /** Adds a calendar (not the default one) to `email`'s account. `readOnly` gives no write rights. */
   addCalendar(
     email: string,
@@ -529,6 +533,8 @@ export function createFakeStalwart(): FakeStalwart {
       const id = nextId("ct");
       const stored: FakeContact = {
         "@type": "Card",
+        version: "1.0",
+        uid: nextId("uid-"),
         addressBookIds: { [defaultBook.id]: true },
         updated: state.nextReceivedAt(),
         ...card,
@@ -546,6 +552,8 @@ export function createFakeStalwart(): FakeStalwart {
       account.addressBooks.set(id, { id, name, isDefault: false });
       return { id };
     },
+    contactsOf: (email) => structuredClone([...accountFor(email).contacts.values()]),
+    eventsOf: (email) => structuredClone([...accountFor(email).events.values()]),
     defaultAddressBookId: (email) => [...accountFor(email).addressBooks.values()].find((b) => b.isDefault)!.id,
     addCalendar(email, name = "Calendar", options = {}) {
       const account = accountFor(email);

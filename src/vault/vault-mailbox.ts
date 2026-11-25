@@ -7,11 +7,17 @@ import type {
   CollabAdapter,
   CollabRequestT,
   CollabValue,
+  CreateContactInputT,
+  CreateEventInputT,
+  DeleteContactInputT,
+  DeleteEventInputT,
   Mailbox,
   ReadContactInputT,
   ReadEventInputT,
   SearchContactsInputT,
   SearchEventsInputT,
+  UpdateContactInputT,
+  UpdateEventInputT,
 } from "../collab";
 import {
   MAIL_ERROR_CODES,
@@ -87,6 +93,30 @@ export class VaultMailbox implements Mailbox {
 
   readEvent(input: ReadEventInputT) {
     return this.#collab<ReturnType<CollabAdapter["readEvent"]>>({ op: "read_event", input });
+  }
+
+  createContact(input: CreateContactInputT) {
+    return this.#collab<ReturnType<CollabAdapter["createContact"]>>({ op: "create_contact", input });
+  }
+
+  updateContact(input: UpdateContactInputT) {
+    return this.#collab<ReturnType<CollabAdapter["updateContact"]>>({ op: "update_contact", input });
+  }
+
+  deleteContact(input: DeleteContactInputT) {
+    return this.#collab<ReturnType<CollabAdapter["deleteContact"]>>({ op: "delete_contact", input });
+  }
+
+  createEvent(input: CreateEventInputT) {
+    return this.#collab<ReturnType<CollabAdapter["createEvent"]>>({ op: "create_event", input });
+  }
+
+  updateEvent(input: UpdateEventInputT) {
+    return this.#collab<ReturnType<CollabAdapter["updateEvent"]>>({ op: "update_event", input });
+  }
+
+  deleteEvent(input: DeleteEventInputT) {
+    return this.#collab<ReturnType<CollabAdapter["deleteEvent"]>>({ op: "delete_event", input });
   }
 
   /** One thin call of the vault's `collab`; `T` is the promise of the operation's result. */

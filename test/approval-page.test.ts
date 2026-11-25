@@ -111,18 +111,35 @@ describe("areas beyond mail on the approval page", () => {
   });
 
   it("adds one list entry for exactly each area that is switched on, after the mail entries", async () => {
-    expect(permissions(await page("en", ["contacts"])).slice(4)).toEqual(["Read your address book"]);
+    expect(permissions(await page("en", ["contacts"])).slice(4)).toEqual(["Read, create, change and delete your contacts"]);
     expect(await page("en", ["contacts"])).not.toMatch(/calendar/i);
-    expect(permissions(await page("en", ["calendars"])).slice(4)).toEqual(["Read your calendars and events"]);
+    expect(permissions(await page("en", ["calendars"])).slice(4)).toEqual(["Read, create, change and delete your calendar events"]);
     expect(await page("en", ["calendars"])).not.toMatch(/address book/i);
     expect(permissions(await page("en", ["calendars", "contacts"])).slice(4)).toEqual([
-      "Read your address book",
-      "Read your calendars and events",
+      "Read, create, change and delete your contacts",
+      "Read, create, change and delete your calendar events",
     ]);
     expect(permissions(await page("de", ["contacts", "calendars"])).slice(4)).toEqual([
-      "Dein Adressbuch lesen",
-      "Deine Kalender und Termine lesen",
+      "Kontakte lesen, anlegen, ändern und löschen",
+      "Termine lesen, anlegen, ändern und löschen",
     ]);
+  });
+
+  it("tells what deleting does, naming only the areas that are on", async () => {
+    const note = (html: string) => /<p class="never">([^<]*)<\/p>/.exec(html)?.[1];
+    // Mail only: the note is unchanged.
+    expect(note(await page("en"))).toBe("It never empties the trash.");
+    expect(note(await page("de", []))).toBe("Den Papierkorb leert sie nie.");
+    const trash = "Deleted mail goes to the trash, which it never empties.";
+    expect(note(await page("en", ["contacts"]))).toBe(`${trash} Deleted contacts are gone for good.`);
+    expect(note(await page("en", ["calendars"]))).toBe(`${trash} Deleted events are gone for good.`);
+    expect(note(await page("en", ["contacts", "calendars"]))).toBe(`${trash} Deleted contacts and events are gone for good.`);
+    const papierkorb = "Gelöschte E-Mails landen im Papierkorb, den sie nie leert.";
+    expect(note(await page("de", ["contacts"]))).toBe(`${papierkorb} Gelöschte Kontakte sind endgültig weg.`);
+    expect(note(await page("de", ["calendars"]))).toBe(`${papierkorb} Gelöschte Termine sind endgültig weg.`);
+    expect(note(await page("de", ["contacts", "calendars"]))).toBe(
+      `${papierkorb} Gelöschte Kontakte und Termine sind endgültig weg.`,
+    );
   });
 
   it("shows the permissions as a labelled list and not as form fields", async () => {

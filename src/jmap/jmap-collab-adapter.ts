@@ -1,9 +1,15 @@
 /**
- * `CollabAdapter` over JMAP for one mailbox: read-only contacts (RFC 9610) and calendars. Built
- * per call like `JmapMailboxAdapter`, with the mailbox's own access token and the account id
- * from the OAuth grant; every method call carries that account id. It sends `/get` and `/query`
- * methods only, never `/set`, `/copy` or `/parse`. A method starts by checking that the token's
- * scopes include its area; without them nothing is sent (`not_granted`).
+ * `CollabAdapter` over JMAP for one mailbox: contacts (RFC 9610) and calendars, reading and
+ * writing. Built per call like `JmapMailboxAdapter`, with the mailbox's own access token and the
+ * account id from the OAuth grant; every method call carries that account id. It sends `/get` and
+ * `/query`, and `/set` only for `ContactCard` and `CalendarEvent`: never `/copy`, `/parse` or a
+ * `/set` of an address book or calendar. A method starts by checking that the token's scopes
+ * include its area; without them nothing is sent (`not_granted`).
+ *
+ * A write is never repeated: the vault retries only after a 401 (the server refused the request
+ * without processing it). Every write request is sent with `outcomeUnknown: "upstream_unavailable"`,
+ * so a network error, timeout, 5xx or unreadable answer after which the server may have acted
+ * leaves as `upstream_unavailable` and the caller decides whether to try again.
  */
 import { z } from "zod";
 import {
@@ -11,19 +17,27 @@ import {
   type CollabAdapter,
   type ContactDetail,
   type ContactSummary,
+  type CreateContactInputT,
+  type CreateEventInputT,
+  type DeleteContactInputT,
+  type DeleteEventInputT,
   type EventDetail,
   type EventSummary,
   type ReadContactInputT,
   type ReadEventInputT,
   type SearchContactsInputT,
   type SearchEventsInputT,
+  type UpdateContactInputT,
+  type UpdateEventInputT,
 } from "../collab";
 import { MailError } from "../mail";
 import {
   CALENDAR_PROPERTIES,
   CONTACT_DETAIL_PROPERTIES,
   CONTACT_SUMMARY_PROPERTIES,
+  chooseTarget,
   contactFilter,
+  contactPatch,
   eventFilter,
   EVENT_DETAIL_PROPERTIES,
   EVENT_SUMMARY_REQUEST,
@@ -32,6 +46,8 @@ import {
   JmapCalendar,
   JmapCalendarEvent,
   JmapContactCard,
+  JmapTarget,
+  newContactCard,
   toCalendarInfo,
   toContactDetail,
   toContactSummary,
@@ -39,7 +55,7 @@ import {
   toEventSummary,
 } from "./collab-map";
 import { jmapCall, methodResult, type JmapInvocation, type JmapSession } from "./jmap-client";
-import { getResult, parseUpstream } from "./map";
+import { createdOrThrow, destroyResult, getResult, parseUpstream, requireUpdated } from "./map";
 
 type Call = [name: string, args: Record<string, unknown>, callId: string];
 
@@ -69,12 +85,12 @@ export class JmapCollabAdapter implements CollabAdapter {
   }
 
   /** The single exit to JMAP: the constructor's account id overrides anything in `args`. */
-  #call(area: CollabArea, calls: Call[]): Promise<JmapInvocation[]> {
+  #call(area: CollabArea, calls: Call[], { write = false }: { write?: boolean } = {}): Promise<JmapInvocation[]> {
     return jmapCall(
       this.#session,
       this.#accessToken,
       calls.map(([name, args, callId]) => [name, { ...args, accountId: this.#accountId }, callId]),
-      { using: [CORE, AREA_CAPABILITY[area]] },
+      { using: [CORE, AREA_CAPABILITY[area]], ...(write ? { outcomeUnknown: "upstream_unavailable" as const } : {}) },
     );
   }
 
@@ -88,6 +104,21 @@ export class JmapCollabAdapter implements CollabAdapter {
     const answer = responses.find((r) => r[2] === callId && r[0] === "error");
     if (answer?.[1].type === "unknownMethod") throw new MailError("not_granted");
     return methodResult(responses, callId, name, options);
+  }
+
+  /**
+   * The answer to a write's `/set`: like `#result`, except that no answer at all and a `serverFail`
+   * are an unknown outcome (the write may have happened), so `upstream_unavailable`, not a refusal.
+   */
+  #writeResult(
+    responses: JmapInvocation[],
+    callId: string,
+    name: string,
+    options: { idsFromInput?: boolean } = {},
+  ): Record<string, unknown> {
+    const answer = responses.find((r) => r[2] === callId && (r[0] === name || r[0] === "error"));
+    if (!answer || (answer[0] === "error" && answer[1].type === "serverFail")) throw new MailError("upstream_unavailable");
+    return this.#result(responses, callId, name, options);
   }
 
   async searchContacts(
@@ -224,5 +255,53 @@ export class JmapCollabAdapter implements CollabAdapter {
     const event = list.find((e) => e.id === input.event_id);
     if (!event || notFound.includes(input.event_id)) throw new MailError("not_found");
     return { event: toEventDetail(event) };
+  }
+
+  async createContact(input: CreateContactInputT): Promise<{ contact_id: string; address_book_id: string }> {
+    this.#require("contacts");
+    const books = await this.#call("contacts", [["AddressBook/get", { ids: null, properties: ["id", "isDefault"] }, "b"]]);
+    const target = chooseTarget(getResult(JmapTarget, this.#result(books, "b", "AddressBook/get")).list, input.address_book_id);
+    const responses = await this.#call(
+      "contacts",
+      [["ContactCard/set", { create: { c: newContactCard(input, target) } }, "s"]],
+      { write: true },
+    );
+    const id = createdOrThrow(this.#writeResult(responses, "s", "ContactCard/set"), "c");
+    return { contact_id: id, address_book_id: target };
+  }
+
+  async updateContact(input: UpdateContactInputT): Promise<{ contact_id: string }> {
+    this.#require("contacts");
+    const responses = await this.#call(
+      "contacts",
+      [["ContactCard/set", { update: { [input.contact_id]: contactPatch(input) } }, "s"]],
+      { write: true },
+    );
+    requireUpdated(this.#writeResult(responses, "s", "ContactCard/set", { idsFromInput: true }), input.contact_id);
+    return { contact_id: input.contact_id };
+  }
+
+  /** Permanent: JMAP has no trash for contacts. Duplicate ids count once; the others are named when refused. */
+  async deleteContact(input: DeleteContactInputT): Promise<{ deleted: number; not_deleted: string[] }> {
+    this.#require("contacts");
+    const ids = [...new Set(input.contact_ids)];
+    const responses = await this.#call("contacts", [["ContactCard/set", { destroy: ids }, "s"]], { write: true });
+    return destroyResult(this.#writeResult(responses, "s", "ContactCard/set", { idsFromInput: true }), ids);
+  }
+
+  // Part 2 implements the three event writes; until then they stop after the permission check.
+  async createEvent(_input: CreateEventInputT): Promise<{ event_id: string; calendar_id: string }> {
+    this.#require("calendars");
+    throw new MailError("mailbox_unsupported");
+  }
+
+  async updateEvent(_input: UpdateEventInputT): Promise<{ event_id: string }> {
+    this.#require("calendars");
+    throw new MailError("mailbox_unsupported");
+  }
+
+  async deleteEvent(_input: DeleteEventInputT): Promise<{ deleted: number; not_deleted: string[] }> {
+    this.#require("calendars");
+    throw new MailError("mailbox_unsupported");
   }
 }

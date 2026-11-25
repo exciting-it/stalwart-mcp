@@ -4,7 +4,12 @@ import { beforeEach, describe, expect, it } from "vitest";
 import type { AuditEntry } from "../src/audit";
 import type { Grant, Tool, ToolDeps } from "../src/tools/define-tool";
 import { toolsFor, TOOLS } from "../src/tools";
-import { COLLAB_CONTENT_NOTICE, SearchEventsInputBase } from "../src/collab";
+import {
+  COLLAB_CONTENT_NOTICE,
+  CreateContactInputBase,
+  SearchEventsInputBase,
+  UpdateContactInputBase,
+} from "../src/collab";
 import { createFakeMailStore, type FakeMailStore } from "./fake-mailbox";
 
 let store: FakeMailStore;
@@ -60,6 +65,9 @@ const validInputFor = (tool: Tool): Record<string, unknown> =>
     list_calendars: {},
     search_events: { ...DAY, calendar_id: store.b.calendarId, text: "Meeting" },
     read_event: { event_id: store.b.eventId },
+    create_contact: { name: "New Person", address_book_id: store.b.addressBookId },
+    update_contact: { contact_id: store.b.contactId, name: "Renamed" },
+    delete_contact: { contact_ids: [store.b.contactId] },
   })[tool.spec.name]!;
 
 // The same calls with A's own ids, where a tool needs an id that exists.
@@ -71,6 +79,9 @@ const ownInputFor = (tool: Tool): Record<string, unknown> =>
     read_contact: { contact_id: store.a.contactId },
     search_events: DAY,
     read_event: { event_id: store.a.eventId },
+    create_contact: { name: "New Person", emails: [{ address: "new@elsewhere.example", label: "work" }] },
+    update_contact: { contact_id: store.a.contactId, organization: "Other Org" },
+    delete_contact: { contact_ids: [store.a.contactId] },
   })[tool.spec.name] ?? validInputFor(tool);
 
 /** The tools of the always-offered mail part; the contacts and calendar tools are tested apart. */
@@ -90,6 +101,9 @@ describe("tools", () => {
     expect(TOOLS.filter((t) => t.spec.area === "contacts").map((t) => t.spec.name)).toEqual([
       "search_contacts",
       "read_contact",
+      "create_contact",
+      "update_contact",
+      "delete_contact",
     ]);
     expect(TOOLS.filter((t) => t.spec.area === "calendars").map((t) => t.spec.name)).toEqual([
       "list_calendars",
@@ -311,7 +325,14 @@ describe("tools", () => {
     const names = (areas: Parameters<typeof toolsFor>[0]) => toolsFor(areas).map((t) => t.spec.name);
     const mail = MAIL_TOOLS.map((t) => t.spec.name);
     expect(names(new Set())).toEqual(mail);
-    expect(names(new Set(["contacts"]))).toEqual([...mail, "search_contacts", "read_contact"]);
+    expect(names(new Set(["contacts"]))).toEqual([
+      ...mail,
+      "search_contacts",
+      "read_contact",
+      "create_contact",
+      "update_contact",
+      "delete_contact",
+    ]);
     expect(names(new Set(["contacts"]))).not.toContain("list_calendars");
     expect(names(new Set(["calendars"]))).toEqual([...mail, "list_calendars", "search_events", "read_event"]);
     expect(names(new Set(["contacts", "calendars"]))).toEqual(TOOLS.map((t) => t.spec.name));
@@ -373,6 +394,103 @@ describe("tools", () => {
       const r = await byName("search_contacts").execute(deps, grantA, {});
       expect(r).toEqual({ isError: true, content: [{ type: "text", text: MAIL_ERROR_MESSAGES.not_granted }] });
       expect(audits.at(-1)).toMatchObject({ tool: "search_contacts", outcome: "refused", errorCode: "not_granted" });
+    });
+  });
+
+  describe("contact write tools", () => {
+    const WRITE = ["create_contact", "update_contact", "delete_contact"];
+    const base = () => ({ event: "tool_call", accountId: grantA.accountId, email: grantA.email, clientId: "client-1" });
+
+    it("are create, update and destroy tools of the contacts area without an account parameter", () => {
+      expect(WRITE.map((n) => byName(n).spec.kind)).toEqual(["create", "update", "destroy"]);
+      for (const name of WRITE) {
+        const { spec } = byName(name);
+        expect(spec.area).toBe("contacts");
+        expect(spec.description).toContain("Confirm with the user first.");
+        const input = { create_contact: CreateContactInputBase, update_contact: UpdateContactInputBase }[name] ?? spec.input;
+        for (const key of Object.keys((input as { shape: Record<string, unknown> }).shape)) {
+          expect(key).not.toMatch(/account|sender|identity|from/i);
+        }
+      }
+      const description = byName("delete_contact").spec.description;
+      expect(description).toContain("removed for good and cannot be brought back");
+      expect(description).toContain("up to 50 per call");
+    });
+
+    it("delete_contact takes a list of 1 to 50 ids and nothing else", async () => {
+      expect(Object.keys((byName("delete_contact").spec.input as { shape: object }).shape)).toEqual(["contact_ids"]);
+      const many = Array.from({ length: 51 }, (_, i) => `ct${i}`);
+      for (const input of [
+        {},
+        { contact_ids: [] },
+        { contact_ids: many },
+        { contact_ids: [store.a.contactId], account_id: store.b.accountId },
+        { contact_id: store.a.contactId },
+        { contact_ids: store.a.contactId },
+      ]) {
+        expect(text(await byName("delete_contact").execute(deps, grantA, input))).toBe(MAIL_ERROR_MESSAGES.invalid_input);
+      }
+      expect(store.calls).toEqual([]);
+    });
+
+    it("delete_contact deletes a batch, names the ids that stayed and audits the number deleted", async () => {
+      const mailbox = store.mailboxFor(store.a.accountId);
+      const second = await mailbox.createContact({ name: "Second" });
+      store.calls.length = 0;
+      const r = await byName("delete_contact").execute(deps, grantA, {
+        contact_ids: [store.a.contactId, second.contact_id, store.b.contactId, store.a.contactId],
+      });
+      expect(r.structuredContent).toEqual({ deleted: 2, not_deleted: [store.b.contactId] });
+      expect(audits).toEqual([{ ...base(), tool: "delete_contact", outcome: "ok", resultCount: 2 }]);
+      expect(store.mailboxFor(store.b.accountId)).toBeDefined();
+      expect((await store.mailboxFor(store.b.accountId).readContact({ contact_id: store.b.contactId })).contact.id).toBe(store.b.contactId);
+    });
+
+    it("answer with ids only (no content notice) and audit with a count of 1 and no content", async () => {
+      const created = await byName("create_contact").execute(deps, grantA, {
+        name: "Secret Name",
+        emails: [{ address: "secret@elsewhere.example" }],
+        notes: "secret notes",
+      });
+      const { contact_id } = created.structuredContent as { contact_id: string; address_book_id: string };
+      expect(created.structuredContent).toEqual({ contact_id, address_book_id: store.a.addressBookId });
+      const updated = await byName("update_contact").execute(deps, grantA, { contact_id, job_title: "Boss" });
+      expect(updated.structuredContent).toEqual({ contact_id });
+      const deleted = await byName("delete_contact").execute(deps, grantA, { contact_ids: [contact_id] });
+      expect(deleted.structuredContent).toEqual({ deleted: 1, not_deleted: [] });
+      expect(audits).toEqual([
+        { ...base(), tool: "create_contact", outcome: "ok", resultCount: 1 },
+        { ...base(), tool: "update_contact", outcome: "ok", resultCount: 1 },
+        { ...base(), tool: "delete_contact", outcome: "ok", resultCount: 1 },
+      ]);
+      expect(JSON.stringify(audits)).not.toMatch(/Secret|secret|Boss/);
+      expect(audits.every((a) => !("messageId" in a))).toBe(true);
+    });
+
+    it("refuse a bad input before the mailbox is touched", async () => {
+      for (const [name, input] of [
+        ["create_contact", {}],
+        ["create_contact", { name: "x", account_id: store.b.accountId }],
+        ["create_contact", { name: "x", birthday: "1990-02-30" }],
+        ["update_contact", { contact_id: store.a.contactId }],
+        ["update_contact", { name: "x" }],
+      ] as const) {
+        expect(text(await byName(name).execute(deps, grantA, input))).toBe(MAIL_ERROR_MESSAGES.invalid_input);
+      }
+      expect(store.calls).toEqual([]);
+    });
+
+    it("reach only the grant's own account: B's contact and address book answer not found", async () => {
+      for (const [name, input] of [
+        ["create_contact", { name: "x", address_book_id: store.b.addressBookId }],
+        ["update_contact", { contact_id: store.b.contactId, name: "Renamed" }],
+        ["delete_contact", { contact_ids: [store.b.contactId] }],
+      ] as const) {
+        expect(text(await byName(name).execute(deps, grantA, input))).toBe(MAIL_ERROR_MESSAGES.not_found);
+      }
+      expect(store.calls.every((c) => c.accountId === grantA.accountId)).toBe(true);
+      const b = await store.mailboxFor(store.b.accountId).readContact({ contact_id: store.b.contactId });
+      expect(b.contact.name).toBe("Contact of B");
     });
   });
 

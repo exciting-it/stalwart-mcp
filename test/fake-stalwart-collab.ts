@@ -4,12 +4,16 @@
  * and the calendar ones (draft-ietf-jmap-calendars: `Calendar/get`, `CalendarEvent/query`,
  * `CalendarEvent/get`, with `expandRecurrences` for daily and weekly rules and `utcStart` / `utcEnd`).
  *
+ * and the write side, one shared `/set` engine (`applySet`: `create`, `update` as a PatchObject of
+ * top-level properties, `destroy`) with a spec per type; `ContactCard/set` is the first user.
+ *
  * Everything is scoped to the request's account: another account's ids are `notFound`.
  */
 import type { FakeAccount, FakeContact, FakeEvent } from "./fake-stalwart-state";
 import {
   type Args,
   contains,
+  type Ctx,
   type Handler,
   ids,
   isObject,
@@ -472,6 +476,155 @@ const calendarEventGet: Handler = (args, { account, callId, out }) => {
   out.push(["CalendarEvent/get", { accountId: account.accountId, state: "ce-state", list, notFound }, callId]);
 };
 
+// ---- /set: the engine shared by ContactCard/set and (part 2) CalendarEvent/set ----
+
+type Stored = Record<string, unknown> & { id: string };
+
+interface SetSpec {
+  store: Map<string, Stored>;
+  /** Prefix of the ids the fake hands out (`nextId`). */
+  idPrefix: string;
+  /** The properties a client may write; anything else is `invalidProperties`. */
+  writable: ReadonlySet<string>;
+  /** The invalid properties of a whole object (after the patch, for an update); empty when it is fine. */
+  invalid(object: Record<string, unknown>, account: FakeAccount): string[];
+  /** Server-set properties, written after every create and update. */
+  stamp(object: Stored, ctx: Ctx): void;
+}
+
+const notFoundError = { type: "notFound" };
+const invalidProperties = (properties: string[]) => ({ type: "invalidProperties", properties });
+
+/**
+ * The answer of a `/set` call (RFC 8620 §5.3) for `create`, `update` and `destroy`. An update is a
+ * PatchObject: each key names one top-level property and replaces it, `null` removes it; a key with
+ * a `/` (a deeper path) is not supported and refused. Ids of other accounts are `notFound`.
+ */
+function applySet(args: Args, ctx: Ctx, spec: SetSpec): Args {
+  const { account } = ctx;
+  const created: Args = {};
+  const notCreated: Args = {};
+  const updated: Args = {};
+  const notUpdated: Args = {};
+  const destroyed: string[] = [];
+  const notDestroyed: Args = {};
+  for (const key of ["create", "update"] as const) {
+    if (args[key] !== undefined && args[key] !== null && !isObject(args[key])) throw new MethodError("invalidArguments");
+  }
+  if (args.destroy !== undefined && args.destroy !== null && (!Array.isArray(args.destroy) || !args.destroy.every((d) => typeof d === "string"))) {
+    throw new MethodError("invalidArguments");
+  }
+
+  for (const [cid, object] of Object.entries((args.create as Args | undefined) ?? {})) {
+    if (!isObject(object)) {
+      notCreated[cid] = invalidProperties([]);
+      continue;
+    }
+    const unknown = Object.keys(object).filter((k) => !spec.writable.has(k));
+    const bad = unknown.length > 0 ? unknown : spec.invalid(object, account);
+    if (bad.length > 0) {
+      notCreated[cid] = invalidProperties(bad);
+      continue;
+    }
+    const id = ctx.state.nextId(spec.idPrefix);
+    const stored: Stored = { ...structuredClone(object), id };
+    spec.stamp(stored, ctx);
+    spec.store.set(id, stored);
+    ctx.createdIds.set(cid, id);
+    created[cid] = { id };
+  }
+
+  for (const [id, patch] of Object.entries((args.update as Args | undefined) ?? {})) {
+    const current = spec.store.get(id);
+    if (!current) {
+      notUpdated[id] = notFoundError;
+      continue;
+    }
+    if (!isObject(patch)) {
+      notUpdated[id] = invalidProperties([]);
+      continue;
+    }
+    const unknown = Object.keys(patch).filter((k) => !spec.writable.has(k));
+    if (unknown.length > 0) {
+      notUpdated[id] = invalidProperties(unknown);
+      continue;
+    }
+    const merged: Record<string, unknown> = structuredClone(current);
+    for (const [k, v] of Object.entries(patch)) {
+      if (v === null) delete merged[k];
+      else merged[k] = structuredClone(v);
+    }
+    const bad = spec.invalid(merged, account);
+    if (bad.length > 0) {
+      notUpdated[id] = invalidProperties(bad);
+      continue;
+    }
+    const stored = merged as Stored;
+    spec.stamp(stored, ctx);
+    spec.store.set(id, stored);
+    updated[id] = null;
+  }
+
+  for (const id of (args.destroy as string[] | undefined) ?? []) {
+    if (!spec.store.delete(id)) notDestroyed[id] = notFoundError;
+    else destroyed.push(id);
+  }
+
+  return {
+    accountId: account.accountId,
+    oldState: "set-old",
+    newState: "set-new",
+    created: Object.keys(created).length > 0 ? created : null,
+    notCreated: Object.keys(notCreated).length > 0 ? notCreated : null,
+    updated: Object.keys(updated).length > 0 ? updated : null,
+    notUpdated: Object.keys(notUpdated).length > 0 ? notUpdated : null,
+    destroyed: destroyed.length > 0 ? destroyed : null,
+    notDestroyed: Object.keys(notDestroyed).length > 0 ? notDestroyed : null,
+  };
+}
+
+// ---- ContactCard/set ----
+
+const CONTACT_WRITABLE = new Set([
+  "@type", "version", "uid", "kind", "name", "nicknames", "emails", "phones", "organizations", "titles",
+  "addresses", "notes", "anniversaries", "addressBookIds",
+]);
+
+/** The properties of a card that are keyed maps of objects (JSContact `Id[Object]`). */
+const CONTACT_MAPS = ["nicknames", "emails", "phones", "organizations", "titles", "addresses", "notes", "anniversaries"];
+
+function invalidCardProperties(card: Record<string, unknown>, account: FakeAccount): string[] {
+  const bad: string[] = [];
+  if (card["@type"] !== "Card") bad.push("@type");
+  if (typeof card.version !== "string") bad.push("version");
+  if (typeof card.uid !== "string" || card.uid === "") bad.push("uid");
+  const books = card.addressBookIds;
+  const bookIds = isObject(books) ? Object.keys(books) : [];
+  if (!isObject(books) || bookIds.length === 0 || !bookIds.every((b) => books[b] === true && account.addressBooks.has(b))) {
+    bad.push("addressBookIds");
+  }
+  if (card.name !== undefined && !isObject(card.name)) bad.push("name");
+  if (isObject(card.name) && card.name.full !== undefined && typeof card.name.full !== "string") bad.push("name");
+  for (const key of CONTACT_MAPS) {
+    const value = card[key];
+    if (value !== undefined && !(isObject(value) && Object.values(value).every(isObject))) bad.push(key);
+  }
+  return [...new Set(bad)];
+}
+
+const contactSet: Handler = (args, ctx) => {
+  const spec: SetSpec = {
+    store: ctx.account.contacts,
+    idPrefix: "ct",
+    writable: CONTACT_WRITABLE,
+    invalid: invalidCardProperties,
+    stamp: (object, c) => {
+      object.updated = c.state.nextReceivedAt();
+    },
+  };
+  ctx.out.push(["ContactCard/set", applySet(args, ctx, spec), ctx.callId]);
+};
+
 // ---- data helpers for `createFakeStalwart` ----
 
 /** The default calendar every account has; created with the account. */
@@ -491,7 +644,9 @@ export const COLLAB_METHODS: Record<string, MethodEntry> = {
   "AddressBook/get": { capability: CONTACTS, area: "contacts", handler: addressBookGet },
   "ContactCard/query": { capability: CONTACTS, area: "contacts", handler: contactQuery },
   "ContactCard/get": { capability: CONTACTS, area: "contacts", handler: contactGet },
+  "ContactCard/set": { capability: CONTACTS, area: "contacts", handler: contactSet },
   "Calendar/get": { capability: CALENDARS, area: "calendars", handler: calendarGet },
   "CalendarEvent/query": { capability: CALENDARS, area: "calendars", handler: calendarEventQuery },
   "CalendarEvent/get": { capability: CALENDARS, area: "calendars", handler: calendarEventGet },
+  // Part 2: "CalendarEvent/set" goes here, built on `applySet` with its own `SetSpec`.
 };

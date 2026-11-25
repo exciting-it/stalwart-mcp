@@ -41,10 +41,12 @@ const APPROVAL_COPY = {
       drafts: "Save drafts",
       send: "Send email in your name (at most 50 messages per day)",
       move: "Move messages to other folders and to the trash",
-      contacts: "Read your address book",
-      calendars: "Read your calendars and events",
+      contacts: "Read, create, change and delete your contacts",
+      calendars: "Read, create, change and delete your calendar events",
     },
     never: "It never empties the trash.",
+    neverWithAreas: (gone: string) => `Deleted mail goes to the trash, which it never empties. Deleted ${gone} are gone for good.`,
+    gone: { contacts: "contacts", calendars: "events", both: "contacts and events" },
     wrongMailbox: (email: string) => `Not ${email}? Choose Deny, sign out of your mailbox and try again.`,
     caution: "Only allow this if you started the connection yourself just now.",
     allow: "Allow",
@@ -59,10 +61,12 @@ const APPROVAL_COPY = {
       drafts: "Entwürfe speichern",
       send: "E-Mails in deinem Namen senden (höchstens 50 Nachrichten pro Tag)",
       move: "Nachrichten in andere Ordner und in den Papierkorb verschieben",
-      contacts: "Dein Adressbuch lesen",
-      calendars: "Deine Kalender und Termine lesen",
+      contacts: "Kontakte lesen, anlegen, ändern und löschen",
+      calendars: "Termine lesen, anlegen, ändern und löschen",
     },
     never: "Den Papierkorb leert sie nie.",
+    neverWithAreas: (gone: string) => `Gelöschte E-Mails landen im Papierkorb, den sie nie leert. Gelöschte ${gone} sind endgültig weg.`,
+    gone: { contacts: "Kontakte", calendars: "Termine", both: "Kontakte und Termine" },
     wrongMailbox: (email: string) =>
       `Nicht ${email}? Wähle „Ablehnen“, melde dich im Postfach ab und versuche es erneut.`,
     caution: "Erlaube das nur, wenn du die Verbindung gerade selbst gestartet hast.",
@@ -235,6 +239,11 @@ export function renderApprovalPage(p: {
   const permissions = granted
     .map((key) => `<li><span class="tick" aria-hidden="true"></span><span>${escapeHtml(t.permissions[key])}</span></li>`)
     .join("\n");
+  const [withContacts, withCalendars] = AREA_PERMISSIONS.map((area) => p.areas?.has(area) ?? false);
+  const never =
+    withContacts || withCalendars
+      ? t.neverWithAreas(t.gone[withContacts && withCalendars ? "both" : withContacts ? "contacts" : "calendars"])
+      : t.never;
   const client = escapeHtml(p.clientName);
   const host = escapeHtml(p.redirectHost);
   const email = escapeHtml(p.email);
@@ -244,7 +253,7 @@ export function renderApprovalPage(p: {
 <ul class="perms" aria-labelledby="may">
 ${permissions}
 </ul>
-<p class="never">${escapeHtml(t.never)}</p>
+<p class="never">${escapeHtml(never)}</p>
 <p class="caution">${escapeHtml(t.caution)}</p>
 <form method="post" action="/approve">
 <input type="hidden" name="h" value="${escapeHtml(p.handle)}">
