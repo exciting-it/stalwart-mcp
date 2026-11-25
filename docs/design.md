@@ -108,7 +108,7 @@ call.
 
 | Tool | Kind | What it does |
 |---|---|---|
-| `list_mailboxes` | read | Folders with role, total and unread counts |
+| `list_mailboxes` | read | Folders with role, total and unread counts, and the connected mailbox's address |
 | `search_mail` | read | Filter by text, from, to, subject, date range, folder, unread, has attachment; newest first; summaries with a short preview |
 | `read_thread` | read | All messages of a conversation as plain text with headers, attachment names and sizes; long bodies are cut with a marker |
 | `create_draft` | write | New mail or reply, saved in Drafts |
@@ -120,6 +120,9 @@ Rules that hold for every tool:
   grant; From is always the mailbox's own primary address, taken from Stalwart (`Identity/get`).
 - Ids supplied by the AI tool (message, thread, folder) are only ever used inside the grant's
   own account, so a foreign id answers "not found".
+- The server tells the AI tool which mailbox it is connected to (in its instructions and in
+  `list_mailboxes`), taken from the grant. An address the user mentions is only ever a search
+  filter, so a mistyped address shows up as "no results in mailbox X" instead of silence.
 - Read tools carry `readOnlyHint`; `create_draft` and `send_mail` do not, and `send_mail`
   carries `openWorldHint`, so AI tools ask the user before sending.
 - Every tool runs through one wrapper, `defineTool`: **validate → authorize (grant, off switch,

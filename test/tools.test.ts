@@ -222,6 +222,18 @@ describe("tools", () => {
       listMailboxes: async () => ({ folders: [], token: "leak" }) as never,
     });
     const r = await byName("list_mailboxes").execute(deps, grantA, {});
-    expect(r.structuredContent).toEqual({ folders: [] });
+    expect(r.structuredContent).toEqual({ address: grantA.email, folders: [] });
+  });
+
+  it("list_mailboxes names the grant's own mailbox, whatever the adapter or the input says", async () => {
+    deps.mailbox = () => ({
+      ...store.mailboxFor(grantA.accountId),
+      listMailboxes: async () => ({ address: store.b.email, folders: [] }) as never,
+    });
+    const r = await byName("list_mailboxes").execute(deps, grantA, {});
+    expect(r.structuredContent).toEqual({ address: grantA.email, folders: [] });
+    // An input that tries to name a mailbox is refused: the tool takes no arguments.
+    const refused = await byName("list_mailboxes").execute(deps, grantA, { address: store.b.email });
+    expect(refused.isError).toBe(true);
   });
 });

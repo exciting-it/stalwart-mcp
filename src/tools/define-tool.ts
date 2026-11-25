@@ -40,7 +40,8 @@ export interface ToolSpec<I extends z.ZodTypeAny, O extends z.ZodTypeAny> {
   kind: "read" | "draft" | "send";
   input: I;
   output: O;
-  run(mailbox: MailboxAdapter, input: z.infer<I>): Promise<z.infer<O>>;
+  /** `grant` is the verified connection: its address may be shown, never chosen by the input. */
+  run(mailbox: MailboxAdapter, input: z.infer<I>, grant: Grant): Promise<z.infer<O>>;
   count?(result: z.infer<O>): number;
 }
 
@@ -88,7 +89,7 @@ export function defineTool<I extends z.ZodTypeAny, O extends z.ZodTypeAny>(spec:
       if (!input.success) throw new MailError("invalid_input");
       if (!deps.enabled()) throw new MailError("disabled");
       if (await deps.blocked(grant)) throw new MailError("blocked");
-      const output = spec.output.safeParse(await spec.run(deps.mailbox(grant), input.data));
+      const output = spec.output.safeParse(await spec.run(deps.mailbox(grant), input.data, grant));
       if (!output.success) throw new MailError("internal");
       return { ok: true, result: noticeFirst(output.data as Record<string, unknown>) };
     } catch (error) {

@@ -202,9 +202,14 @@ describe("mail contract", () => {
     ).toBe(false);
     expect(
       ListMailboxesResult.safeParse({
+        address: "a@x.example",
         folders: [{ id: "i", name: "Inbox", role: "inbox", parent_id: null, total: 3, unread: 1 }],
       }).success,
     ).toBe(true);
+    // The connected mailbox's address is part of the result, and it is a bare address.
+    const folders = [{ id: "i", name: "Inbox", role: "inbox", parent_id: null, total: 3, unread: 1 }];
+    expect(ListMailboxesResult.safeParse({ folders }).success).toBe(false);
+    expect(ListMailboxesResult.safeParse({ address: "A <a@x.example>", folders }).success).toBe(false);
   });
 
   it("has a message for every error code and none contains a placeholder", () => {

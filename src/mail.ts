@@ -186,7 +186,8 @@ export type ReadThreadInputT = z.infer<typeof ReadThreadInput>;
 
 const ContentNotice = z.literal(UNTRUSTED_CONTENT_NOTICE);
 
-export const ListMailboxesResult = z.object({ folders: z.array(MailFolderSchema) });
+/** `address` is the connected mailbox's own address: the only mailbox this connection can reach. */
+export const ListMailboxesResult = z.object({ address: EmailAddressSchema, folders: z.array(MailFolderSchema) });
 
 export const SearchMailResult = z.object({
   messages: z.array(MailSummarySchema),
