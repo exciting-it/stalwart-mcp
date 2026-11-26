@@ -99,7 +99,9 @@ export const isCleanText = (value: string): boolean => !UNSAFE_IN_TEXT.test(valu
  * and SVG files in a browser, so those go too; `text/html` as a content type stays allowed for a
  * file with another name. Macro-enabled Office files (`.docm`, `.xlsm`, `.pptm` and their
  * templates and add-ins) are on the list on purpose: their macros are programs. Scripts for
- * interpreters that are often installed (Python, Perl, Ruby, PHP) are too.
+ * interpreters that are often installed (Python, Perl, Ruby, PHP, Node, shells) are too, and so
+ * are app packages and the link and automation files of Windows, macOS and Linux desktops.
+ * `.xml` is not on it on purpose: electronic invoices (XRechnung) are XML attachments.
  */
 export const EXECUTABLE_EXTENSIONS = [
   ".exe", ".com", ".bat", ".cmd", ".scr", ".pif", ".msi", ".msp", ".js", ".jse", ".vbs", ".vbe",
@@ -109,6 +111,8 @@ export const EXECUTABLE_EXTENSIONS = [
   ".application", ".appref-ms", ".xll", ".xlam", ".docm", ".dotm", ".xlsm", ".xltm", ".pptm",
   ".potm", ".ppsm", ".mht", ".mhtml", ".svgz", ".ps1xml", ".psm1", ".psd1", ".psc1", ".vb", ".ws",
   ".cab", ".diagcab", ".ade", ".adp", ".mde", ".accde", ".py", ".pyc", ".pl", ".rb", ".php",
+  ".appx", ".appxbundle", ".msix", ".msixbundle", ".shtml", ".xht", ".pyw", ".mjs", ".cjs", ".bash",
+  ".zsh", ".desktop", ".terminal", ".webloc", ".inetloc", ".workflow", ".action",
 ] as const;
 
 /**

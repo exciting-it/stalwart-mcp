@@ -327,7 +327,11 @@ describe("attachments: file names", () => {
       ".gadget", ".inf", ".application", ".appref-ms", ".xll", ".xlam", ".docm", ".dotm", ".xlsm", ".xltm", ".pptm",
       ".potm", ".ppsm", ".mht", ".mhtml", ".svgz", ".ps1xml", ".psm1", ".psd1", ".psc1", ".vb", ".ws", ".cab",
       ".diagcab", ".ade", ".adp", ".mde", ".accde", ".py", ".pyc", ".pl", ".rb", ".php",
+      ".appx", ".appxbundle", ".msix", ".msixbundle", ".shtml", ".xht", ".pyw", ".mjs", ".cjs", ".bash", ".zsh",
+      ".desktop", ".terminal", ".webloc", ".inetloc", ".workflow", ".action",
     ]);
+    // An XML file stays allowed on purpose: electronic invoices (XRechnung) are XML attachments.
+    expect(SendMailInput.safeParse({ ...msg, attachments: [{ filename: "rechnung.xml", text: "<x/>" }] }).success).toBe(true);
     const { box } = await signIn(A);
     const before = fake.requests.length;
     for (const ext of EXECUTABLE_EXTENSIONS) {

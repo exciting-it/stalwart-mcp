@@ -263,7 +263,7 @@ has no attachment with that id, is `not_found` before anything is uploaded or se
 keep the damage of a mistake small:
 
 - No file type that runs when opened, in all three ways (for way 1 judged by the last path segment
-  of the stored name, both as stored and as it goes out): a name ending in one of the 76 endings of
+  of the stored name, both as stored and as it goes out): a name ending in one of the 93 endings of
   `EXECUTABLE_EXTENSIONS` in `src/mail.ts` is `invalid_input`: programs and installers (`.exe`,
   `.msi`, `.dll`, `.app`, `.apk`, `.dmg`, `.pkg`, `.application`, ...), scripts (`.js`, `.vbs`,
   `.ps1`, `.psm1`, `.sh`, `.py`, `.pl`, `.rb`, `.php`, ...), shortcuts and system files (`.lnk`,
