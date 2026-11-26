@@ -89,8 +89,11 @@ export const SearchMailInput = z
 
 export const ReadThreadInput = z.object({ thread_id: MailIdSchema }).strict();
 
-/** The JMAP `partId` of an attachment as `read_thread` lists it. No path or URL characters other than dots. */
-export const AttachmentIdSchema = z.string().regex(/^[A-Za-z0-9._-]{1,64}$/);
+/**
+ * The JMAP `partId` of an attachment as `read_thread` lists it. No path or URL characters other
+ * than dots, and never `.` or `..`: it starts with a letter, digit, `_` or `-`.
+ */
+export const AttachmentIdSchema = z.string().regex(/^[A-Za-z0-9_-][A-Za-z0-9._-]{0,63}$/);
 
 /** One attachment of one message; `offset` and `max_chars` page through a text file. */
 export const ReadAttachmentInput = z

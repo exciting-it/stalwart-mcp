@@ -355,6 +355,9 @@ describe("tools", () => {
       for (const input of [
         { message_id: id },
         { message_id: id, attachment_id: "../1" },
+        { message_id: id, attachment_id: ".." },
+        { message_id: id, attachment_id: "." },
+        { message_id: id, attachment_id: ".1" },
         { message_id: id, attachment_id: "a/b" },
         { message_id: id, attachment_id: "x".repeat(65) },
         { message_id: "../m", attachment_id: "1" },

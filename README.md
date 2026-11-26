@@ -380,7 +380,7 @@ These need the OAuth client and a test mailbox on your server:
 - [ ] `read_attachment` against the real server: the session's `downloadUrl` is on the server's
   origin and names `{accountId}`, `{blobId}`, `{name}` and `{type}`; `Email/get` with
   `bodyProperties` lists each attachment with `partId` and `blobId` (and the `partId` matches
-  `^[A-Za-z0-9._-]{1,64}$`, else `read_thread` shows the id as null); the download answers the
+  `^[A-Za-z0-9_-][A-Za-z0-9._-]{0,63}$`, else `read_thread` shows the id as null); the download answers the
   bytes with the bearer token and refuses another account's id in the path.
 - [ ] Through Claude (claude.ai and Claude Code): a text file, an image and a PDF from a real mail,
   each read with `read_attachment`; whether the model sees the image and can read the PDF.

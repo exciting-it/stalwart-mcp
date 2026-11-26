@@ -216,7 +216,7 @@ is left out with one. Without `html` the request is exactly what it was before.
 ### Attachments (`read_attachment`)
 
 `read_thread` lists each attachment with an `id`: the JMAP `partId` of that body part when it
-matches `^[A-Za-z0-9._-]{1,64}$`, else null (such an attachment cannot be fetched).
+matches `^[A-Za-z0-9_-][A-Za-z0-9._-]{0,63}$`, else null (such an attachment cannot be fetched).
 `read_attachment` takes that id and the message id and delivers the file. The connector does not
 interpret files: the deployment runs on the Workers Free plan (10 ms of CPU per Worker request),
 which leaves no room for PDF or Office parsing, and the AI tools read such files themselves.
