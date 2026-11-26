@@ -5,6 +5,7 @@
  * or upstream text. The pages run no script and load only this origin's own fonts and images.
  */
 import type { Area } from "../config";
+import { KEEP_REST, type ConnectedTools, type ToolEntry } from "./connected-tools";
 import { THEME } from "./theme";
 
 export type PageLanguage = "de" | "en";
@@ -48,6 +49,16 @@ const APPROVAL_COPY = {
     caution: "Only allow this if you started the connection yourself just now.",
     allow: "Allow",
     deny: "Deny",
+    tools: {
+      heading: "These tools already have access to this mailbox:",
+      unnamed: "Unnamed tool",
+      stays: "stays connected",
+      since: (date: string) => `Connected since ${date}`,
+      replaced: (date: string) => `This tool's earlier connection, since ${date}. Allowing replaces it.`,
+      rest: (n: number) => `${n} more tools`,
+      restStay: "stay connected",
+      untick: "A tool you untick loses its access when you allow this connection.",
+    },
   },
   de: {
     title: "Postfach verbinden",
@@ -66,6 +77,16 @@ const APPROVAL_COPY = {
     caution: "Erlaube das nur, wenn du die Verbindung gerade selbst gestartet hast.",
     allow: "Erlauben",
     deny: "Ablehnen",
+    tools: {
+      heading: "Diese Werkzeuge haben schon Zugriff auf dieses Postfach:",
+      unnamed: "Unbenanntes Werkzeug",
+      stays: "bleibt verbunden",
+      since: (date: string) => `Verbunden seit ${date}`,
+      replaced: (date: string) => `Frühere Verbindung dieses Werkzeugs, seit ${date}. Erlauben ersetzt sie.`,
+      rest: (n: number) => `${n} weitere Werkzeuge`,
+      restStay: "bleiben verbunden",
+      untick: "Ein Werkzeug ohne Haken verliert seinen Zugriff, wenn du diese Verbindung erlaubst.",
+    },
   },
 } as const;
 
@@ -174,6 +195,22 @@ const STYLE = [
   "@media (prefers-reduced-motion:reduce){.art img{animation:none;transform:scale(1.02)}}",
 ].join("");
 
+/**
+ * Only on a page that lists connected tools, so that the page without them stays exactly as it
+ * was. The form wraps: the list takes a full row above the two buttons.
+ */
+const TOOLS_STYLE = [
+  "form{flex-wrap:wrap}",
+  ".tools{flex:1 0 100%;min-width:0;margin:0 0 .5rem;padding:0;border:0}",
+  ".tools .may{margin:0;padding:0}",
+  ".tools input{flex:none;width:1.125rem;height:1.125rem;margin:.0625rem 0 0;accent-color:" + THEME.colors.primary + "}",
+  ".tools label{flex:1;min-width:0;cursor:pointer;overflow-wrap:anywhere}",
+  ".tools .entry{flex:1;min-width:0;overflow-wrap:anywhere}",
+  ".tools .name{font-weight:600}",
+  `.tools .when{display:block;margin-top:.125rem;font-size:.75rem;color:${THEME.colors.muted}}`,
+  `.tools .same{flex:none;width:1.125rem;height:1.125rem;margin-top:.0625rem;border:1px solid ${THEME.colors.border};border-radius:.3125rem}`,
+].join("");
+
 const DOT = '<span class="dot">.</span>';
 const WORDMARK = `${escapeHtml(THEME.wordmark).replace(/ /g, "&nbsp;")}${DOT}`;
 
@@ -189,8 +226,8 @@ function artwork(lang: PageLanguage): string {
 </div>`;
 }
 
-/** `body` is trusted markup; every value in it must already be escaped. */
-function htmlResponse(lang: PageLanguage, title: string, body: string, status: number): Response {
+/** `body` and `extraStyle` are trusted markup; every value in them must already be escaped. */
+function htmlResponse(lang: PageLanguage, title: string, body: string, status: number, extraStyle = ""): Response {
   const html = `<!doctype html>
 <html lang="${lang}">
 <head>
@@ -198,7 +235,7 @@ function htmlResponse(lang: PageLanguage, title: string, body: string, status: n
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${escapeHtml(title)} — ${escapeHtml(THEME.wordmark)}</title>
 <link rel="icon" href="${escapeHtml(THEME.icon)}">
-<style>${STYLE}</style>
+<style>${STYLE}${extraStyle}</style>
 </head>
 <body>
 <div class="page">
@@ -219,6 +256,53 @@ ${artwork(lang)}
   return new Response(html, { status, headers: HTML_HEADERS });
 }
 
+/** A date as the page's language writes it, in UTC ("3 March 2026", "3. März 2026"). */
+function formatDate(lang: PageLanguage, epochSeconds: number): string {
+  return new Intl.DateTimeFormat(lang === "de" ? "de-DE" : "en-GB", { dateStyle: "long", timeZone: "UTC" }).format(
+    new Date(epochSeconds * 1000),
+  );
+}
+
+const hidden = (name: string, value: string): string =>
+  `<input type="hidden" name="${name}" value="${escapeHtml(value)}">`;
+
+/**
+ * The tools that already have access, as one fieldset inside the form: every entry posts its key
+ * as shown, and a ticked box posts it as kept. Empty when there is no such tool.
+ */
+function connectedToolsSection(lang: PageLanguage, tools: ConnectedTools | undefined): string {
+  if (!tools || (tools.replaced === null && tools.others.length === 0 && tools.rest.length === 0)) return "";
+  const t = APPROVAL_COPY[lang].tools;
+  const name = (e: ToolEntry) => `<span class="name">${escapeHtml(e.name === "" ? t.unnamed : e.name)}</span>`;
+  const items: string[] = [];
+  if (tools.replaced) {
+    const e = tools.replaced;
+    items.push(
+      `<li><span class="same" aria-hidden="true"></span><span class="entry">${name(e)}<span class="when">${escapeHtml(t.replaced(formatDate(lang, e.since)))}</span></span>${hidden("shown", e.key)}</li>`,
+    );
+  }
+  tools.others.forEach((e, i) => {
+    const id = `tool-${i + 1}`;
+    items.push(
+      `<li>${hidden("shown", e.key)}<input type="checkbox" id="${id}" name="keep" value="${escapeHtml(e.key)}" checked><label for="${id}">${name(e)} ${escapeHtml(t.stays)}<span class="when">${escapeHtml(t.since(formatDate(lang, e.since)))}</span></label></li>`,
+    );
+  });
+  if (tools.rest.length > 0) {
+    const keys = tools.rest.map((key) => `${hidden("shown", key)}${hidden("rest", key)}`).join("");
+    items.push(
+      `<li>${keys}<input type="checkbox" id="tool-rest" name="keep" value="${KEEP_REST}" checked><label for="tool-rest"><span class="name">${escapeHtml(t.rest(tools.rest.length))}</span> ${escapeHtml(t.restStay)}</label></li>`,
+    );
+  }
+  const untick = tools.others.length > 0 || tools.rest.length > 0 ? `\n<p class="never">${escapeHtml(t.untick)}</p>` : "";
+  return `<fieldset class="tools">
+<legend class="may">${escapeHtml(t.heading)}</legend>
+<ul class="perms">
+${items.join("\n")}
+</ul>${untick}
+</fieldset>
+`;
+}
+
 export function renderApprovalPage(p: {
   lang: PageLanguage;
   clientName: string;
@@ -227,6 +311,8 @@ export function renderApprovalPage(p: {
   handle: string;
   /** The areas beyond mail this deployment asks for; the page names each of them. */
   areas?: ReadonlySet<Area>;
+  /** The tools that already have access to this mailbox; without any, the page has no such section. */
+  tools?: ConnectedTools;
 }): Response {
   const t = APPROVAL_COPY[p.lang];
   const granted = [...MAIL_PERMISSIONS, ...AREA_PERMISSIONS.filter((area) => p.areas?.has(area) ?? false)];
@@ -241,6 +327,7 @@ export function renderApprovalPage(p: {
   const client = escapeHtml(p.clientName);
   const host = escapeHtml(p.redirectHost);
   const email = escapeHtml(p.email);
+  const tools = connectedToolsSection(p.lang, p.tools);
   const body = `<p class="sub">${t.lead(client, host)}</p>
 <p class="mailbox">${email}</p>
 <p class="may" id="may">${escapeHtml(t.may)}</p>
@@ -251,11 +338,11 @@ ${permissions}
 <p class="caution">${escapeHtml(t.caution)}</p>
 <form method="post" action="/approve">
 <input type="hidden" name="h" value="${escapeHtml(p.handle)}">
-<button type="submit" name="decision" value="allow">${escapeHtml(t.allow)}</button>
+${tools}<button type="submit" name="decision" value="allow">${escapeHtml(t.allow)}</button>
 <button type="submit" name="decision" value="deny">${escapeHtml(t.deny)}</button>
 </form>
 <p class="note">${t.wrongMailbox(email)}</p>`;
-  return htmlResponse(p.lang, t.title, body, 200);
+  return htmlResponse(p.lang, t.title, body, 200, tools === "" ? "" : TOOLS_STYLE);
 }
 
 /**

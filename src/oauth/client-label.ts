@@ -13,6 +13,11 @@ export function redirectHostOf(redirectUri: string): string {
   }
 }
 
+/** A tool's self-chosen name as the pages show it: invisible and control characters removed, cut, trimmed. */
+export function cleanClientName(raw: string): string {
+  return cleanText(raw, CLIENT_NAME_MAX).text.trim();
+}
+
 /** The tool's self-chosen name, cleaned and cut; its redirect host when it gave none. */
 export async function clientLabel(
   api: OAuthHelpers,
@@ -20,6 +25,6 @@ export async function clientLabel(
 ): Promise<{ clientName: string; redirectHost: string }> {
   const redirectHost = redirectHostOf(authRequest.redirectUri);
   const client = await api.lookupClient(authRequest.clientId);
-  const name = cleanText(client?.clientName ?? "", CLIENT_NAME_MAX).text.trim();
+  const name = cleanClientName(client?.clientName ?? "");
   return { clientName: name === "" ? redirectHost : name, redirectHost };
 }

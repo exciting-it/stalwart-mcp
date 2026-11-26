@@ -97,7 +97,8 @@ export class MailboxVault extends DurableObject<Env> {
    * Called once by the sign-in flow with fresh tokens. A second sign-in for the same address
    * replaces them and keeps the mailbox's Worker grants (a second AI tool). A connection that is
    * new, or for another address, never inherits grants: every Worker grant of the account is
-   * revoked first, and if that fails nothing is stored.
+   * revoked first, and if that fails nothing is stored. Whether the earlier tools keep their
+   * grants is the user's decision on the approval page, which names them.
    */
   async storeTokens(input: { accountId: string; email: string; origin: string } & UpstreamTokens): Promise<void> {
     return mailErrorsOnly(async () => {

@@ -1,5 +1,10 @@
 /** Options of the OAuth server this worker presents to AI tools, and the grant directory built on it. */
-import { getOAuthApi, type OAuthHelpers, type OAuthProviderOptions } from "@cloudflare/workers-oauth-provider";
+import {
+  getOAuthApi,
+  type GrantSummary,
+  type OAuthHelpers,
+  type OAuthProviderOptions,
+} from "@cloudflare/workers-oauth-provider";
 import { MAIL_LIMITS } from "../mail";
 import { connectorName } from "../config";
 import type { Env } from "../env";
@@ -45,6 +50,18 @@ export interface GrantDirectory {
 
 const DEFAULT_PAGE_SIZE = 100;
 
+/** Every Worker grant of the account, paged through once (a mailbox has a handful). */
+export async function listGrants(api: OAuthHelpers, accountId: string, limit = DEFAULT_PAGE_SIZE): Promise<GrantSummary[]> {
+  const grants: GrantSummary[] = [];
+  let cursor: string | undefined;
+  do {
+    const page = await api.listUserGrants(accountId, { limit, cursor });
+    grants.push(...page.items);
+    cursor = page.cursor;
+  } while (cursor);
+  return grants;
+}
+
 export function grantDirectory(env: Env, origin: string, options: { pageSize?: number } = {}): GrantDirectory {
   const api = oauthApi(env, origin);
   const limit = options.pageSize ?? DEFAULT_PAGE_SIZE;
@@ -63,13 +80,7 @@ export function grantDirectory(env: Env, origin: string, options: { pageSize?: n
     async revokeAll(accountId) {
       let revoked = 0;
       // Revoking while paging could skip entries, so first collect every id, then revoke.
-      const ids: string[] = [];
-      let cursor: string | undefined;
-      do {
-        const page = await api.listUserGrants(accountId, { limit, cursor });
-        ids.push(...page.items.map((g) => g.id));
-        cursor = page.cursor;
-      } while (cursor);
+      const ids = (await listGrants(api, accountId, limit)).map((g) => g.id);
       for (const id of ids) {
         await api.revokeGrant(id, accountId);
         revoked++;

@@ -68,7 +68,10 @@ export async function send(
   return res;
 }
 
-export const postForm = (url: string, fields: Record<string, string>, init: { jar?: CookieJar; ip?: string } = {}) =>
+/** Form fields as an object, or as name/value pairs when a name repeats. */
+export type FormFields = Record<string, string> | [string, string][];
+
+export const postForm = (url: string, fields: FormFields, init: { jar?: CookieJar; ip?: string } = {}) =>
   send(url, {
     ...init,
     method: "POST",
@@ -129,11 +132,14 @@ export interface Flow {
   stalwartUrl: string;
 }
 
-/** Registers a client and runs `/authorize`; the browser now stands at our intro page, one click from Stalwart's sign-in. */
-export async function beginFlow(opts: { clientName?: string } = {}): Promise<Flow> {
+/**
+ * Registers a client (or reuses `clientId`, the same tool connecting again) and runs `/authorize`;
+ * the browser now stands at our intro page, one click from Stalwart's sign-in.
+ */
+export async function beginFlow(opts: { clientName?: string; clientId?: string } = {}): Promise<Flow> {
   const ip = nextIp();
   const jar = new CookieJar();
-  const clientId = await registerClient(opts.clientName ?? "Test Tool", ip);
+  const clientId = opts.clientId ?? (await registerClient(opts.clientName ?? "Test Tool", ip));
   const { verifier, challenge } = await pkce();
   const res = await send(authorizeUrl(clientId, challenge), { jar, ip });
   if (res.status !== 200) throw new Error(`authorize answered ${res.status}`);
@@ -143,12 +149,35 @@ export async function beginFlow(opts: { clientName?: string } = {}): Promise<Flo
   return { jar, ip, clientId, verifier, responses: [res], stalwartUrl: href.replaceAll("&amp;", "&") };
 }
 
+const unescapeHtml = (s: string): string =>
+  s.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, "&");
+
+/**
+ * What a browser posts from the approval page's form, without the decision button: every hidden
+ * field and every ticked checkbox, except the tools named in `untick` (by the name shown).
+ */
+export function approvalFields(html: string, untick: readonly string[] = []): [string, string][] {
+  const form = /<form method="post" action="\/approve">([\s\S]*?)<\/form>/.exec(html)?.[1];
+  if (form === undefined) throw new Error("the approval page has no form");
+  const fields: [string, string][] = [];
+  for (const m of form.matchAll(/<input type="(hidden|checkbox)"(?: id="([^"]+)")? name="([^"]+)" value="([^"]*)"( checked)?>/g)) {
+    const [, type, id, name, value, checked] = m;
+    if (type === "checkbox") {
+      if (checked === undefined) continue;
+      const label = new RegExp(`<label for="${id}"><span class="name">([^<]*)</span>`).exec(form)?.[1];
+      if (label !== undefined && untick.includes(unescapeHtml(label))) continue;
+    }
+    fields.push([name!, unescapeHtml(value!)]);
+  }
+  return fields;
+}
+
 export async function connect(
   fake: FakeStalwart,
   email: string,
-  opts: { decision?: "allow" | "deny"; clientName?: string } = {},
+  opts: { decision?: "allow" | "deny"; clientName?: string; clientId?: string; untick?: readonly string[] } = {},
 ): Promise<{ accessToken?: string; refreshToken?: string; clientId: string; responses: Response[] }> {
-  const flow = await beginFlow({ clientName: opts.clientName });
+  const flow = await beginFlow({ clientName: opts.clientName, clientId: opts.clientId });
   const { jar, ip, clientId, responses } = flow;
   const done = () => ({ clientId, responses });
 
@@ -161,8 +190,9 @@ export async function connect(
   responses.push(page);
   if (page.status !== 200) return done();
 
-  const handle = new URL(approveAt).searchParams.get("h")!;
-  const decided = await postForm("/approve", { h: handle, decision: opts.decision ?? "allow" }, { jar, ip });
+  // As a browser does: the page's own form, with the tools in `untick` unticked.
+  const fields = approvalFields(await page.clone().text(), opts.untick);
+  const decided = await postForm("/approve", [...fields, ["decision", opts.decision ?? "allow"]], { jar, ip });
   responses.push(decided);
   const back = decided.headers.get("location");
   const code = back ? new URL(back).searchParams.get("code") : null;

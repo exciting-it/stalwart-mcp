@@ -430,7 +430,7 @@ These need the OAuth client and a test mailbox on your server:
   on the Workers Free plan (see Known limits).
 - [ ] Whether the server empties Trash on its own (Stalwart's auto-expunge), and whether that is what you want now that an AI tool can move mail there.
 - [ ] Whether Stalwart ever reuses an account id (a reused id would meet the old vault).
-- [ ] Remove the application and reconnect with two AI tools: do the earlier tools regain access (see "Known limits")?
+- [ ] Remove the application at Stalwart with two AI tools connected, then connect one of them again: the approval page names the other tool, and after unticking it and allowing, the other tool's next call is refused while the reconnected one works.
 - [ ] How long an issued Stalwart access token keeps working after the application is removed, and after the OAuth client is deleted.
 
 For contacts and calendars (unless both are switched off), also these (the tests cannot tell, because the stand-in is written from the
@@ -532,13 +532,16 @@ mailbox grant (otherwise one wrong secret would wipe every mailbox). Tool calls 
 a temporary error until the client exists again.
 
 **A user disconnects.** Any one of: remove the connector in the AI tool; remove the application
-under Connected Applications in their Stalwart account; change the mailbox password.
+under Connected Applications in their Stalwart account; change the mailbox password. To end one
+AI tool's access while connecting another, untick it on the approval page.
 
 **Where to look when something fails.** Table `audit_log` in D1. Columns: `at` (unix seconds),
 `event`, `account_id`, `email`, `client_id`, `client_name`, `tool`, `outcome` (`ok`, `refused`,
 `error`), `error_code`, `result_count`, `recipient_count`, `message_id`. Events: `sign_in`,
 `sign_in_refused`, `approval_allowed`, `approval_denied`, `tool_call`, `upstream_revoked`,
-`connection_wiped`. The log never holds subjects, bodies, search terms or recipient addresses.
+`connection_wiped`, `connection_removed` (one row per AI tool the user disconnected on the
+approval page: its client id and name, and the number of its grants in `result_count`). The log
+never holds subjects, bodies, search terms or recipient addresses.
 The worker's `console` output holds only fixed markers such as `oauth_error <code>` and
 `config_error <setting>`. Invocation logs are switched off in `wrangler.jsonc`, because they
 record request URLs, and `/callback?code=…&state=…` and `/approve?h=…` carry codes and handles.
@@ -570,8 +573,12 @@ production a request under a host other than `PUBLIC_ORIGIN` answers 404.
 - A connection the user removed at Stalwart is noticed at its next tool call, which also ends
   that tool's grant; the daily alarm checks only worker grants and idle time and never asks
   Stalwart.
-- After a user removes the application at Stalwart and later connects one AI tool again, the
-  earlier tools' grants for the same mailbox work again, without appearing on the approval page.
+- After a user removes the application at Stalwart and later connects one AI tool again before
+  the other tools made a call, the vault holds a working connection for the same address again.
+  The approval page therefore names every AI tool that already has access to the mailbox (at
+  most 20 by name, the rest as one entry), and a tool stays connected only if the user leaves it
+  ticked; Allow disconnects the unticked ones. The connecting tool's own earlier connection is
+  replaced on Allow. Deny changes nothing.
 - `delete_mail` moves messages to Trash and the connector never empties it. Whether Trash is
   emptied after some time is your server's setting (Stalwart's auto-expunge), not the
   connector's: with it switched on, a deleted message does disappear later.

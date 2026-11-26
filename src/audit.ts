@@ -8,7 +8,8 @@ export type AuditEvent =
   | "approval_denied"
   | "tool_call"
   | "upstream_revoked"
-  | "connection_wiped";
+  | "connection_wiped"
+  | "connection_removed";
 
 // No field here can hold a subject, body, search term or recipient address.
 export interface AuditEntry {

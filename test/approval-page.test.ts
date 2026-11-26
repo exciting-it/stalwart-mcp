@@ -271,3 +271,111 @@ describe("pageLanguage", () => {
     expect(lang(null)).toBe("en");
   });
 });
+
+describe("tools already connected, on the approval page", () => {
+  const sha256 = async (text: string) =>
+    [...new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text)))]
+      .map((b) => b.toString(16).padStart(2, "0"))
+      .join("");
+  const KEY_N8N = "a".repeat(32);
+  const KEY_EMPTY = "b".repeat(32);
+  const KEY_LONG = "c".repeat(32);
+  const KEY_SELF = "d".repeat(32);
+  const MARCH_3 = Date.UTC(2026, 2, 3, 12) / 1000;
+  const JUNE_20 = Date.UTC(2026, 5, 20, 12) / 1000;
+  const tools = {
+    replaced: { key: KEY_SELF, name: "Claude", since: JUNE_20 },
+    others: [
+      { key: KEY_N8N, name: "<script>alert(1)</script>", since: MARCH_3 },
+      { key: KEY_EMPTY, name: "", since: MARCH_3 },
+      { key: KEY_LONG, name: "n8n", since: JUNE_20 },
+    ],
+    rest: [],
+  };
+  /** The fields a browser would post, as [name, value] pairs. */
+  const fields = (html: string) =>
+    [...html.matchAll(/<input type="(hidden|checkbox)"(?: id="[^"]+")? name="([^"]+)" value="([^"]*)"( checked)?>/g)].map(
+      (m) => [m[1], m[2], m[3], m[4] !== undefined] as const,
+    );
+
+  it("is byte for byte today's page when no other tool has access", async () => {
+    const today = "b3f66586c18eeafca8efa5547f0c6f0ce0bb65026002f8103f0fbf404b7210c1";
+    const plain = { lang: "en" as const, ...base };
+    expect(await sha256(await renderApprovalPage(plain).text())).toBe(today);
+    const empty = await renderApprovalPage({ ...plain, tools: { replaced: null, others: [], rest: [] } }).text();
+    expect(await sha256(empty)).toBe(today);
+  });
+
+  it("lists the tools between the permissions and the buttons, inside the form, with ticked, labelled checkboxes", async () => {
+    const html = await renderApprovalPage({ lang: "en", ...base, tools }).text();
+    const form = /<form method="post" action="\/approve">([\s\S]*?)<\/form>/.exec(html)![1]!;
+    expect(html.indexOf('<ul class="perms" aria-labelledby="may">')).toBeLessThan(html.indexOf('<fieldset class="tools">'));
+    expect(form.indexOf("</fieldset>")).toBeLessThan(form.indexOf("<button"));
+    expect(form).toContain('<legend class="may">These tools already have access to this mailbox:</legend>');
+    expect(form).toContain('<p class="never">A tool you untick loses its access when you allow this connection.</p>');
+
+    const boxes = [...form.matchAll(/<input type="checkbox" id="([^"]+)" name="keep" value="([^"]+)" checked>/g)];
+    expect(boxes.map((m) => m[2])).toEqual([KEY_N8N, KEY_EMPTY, KEY_LONG]);
+    // Every checkbox has its own label, bound by id.
+    for (const [, id] of boxes) expect(form.match(new RegExp(`<label for="${id}">`, "g"))).toHaveLength(1);
+    expect(new Set(boxes.map((m) => m[1])).size).toBe(3);
+    // Every entry posts its key as shown; the connecting tool's own earlier connection has no checkbox.
+    expect(fields(form).filter(([type, name]) => type === "hidden" && name === "shown").map(([, , v]) => v)).toEqual([
+      KEY_SELF,
+      KEY_N8N,
+      KEY_EMPTY,
+      KEY_LONG,
+    ]);
+    expect(form).not.toContain(`name="keep" value="${KEY_SELF}"`);
+  });
+
+  it("escapes the names, uses a fixed name for a tool without one and shows the dates in the page's language", async () => {
+    const en = await renderApprovalPage({ lang: "en", ...base, tools }).text();
+    expect(en).not.toContain("<script>");
+    expect(en).toContain('<span class="name">&lt;script&gt;alert(1)&lt;/script&gt;</span> stays connected');
+    expect(en).toContain('<span class="name">Unnamed tool</span> stays connected');
+    expect(en).toContain('<span class="when">Connected since 3 March 2026</span>');
+    expect(en).toContain('<span class="when">Connected since 20 June 2026</span>');
+    expect(en).toContain(
+      '<span class="name">Claude</span><span class="when">This tool&#39;s earlier connection, since 20 June 2026. Allowing replaces it.</span>',
+    );
+
+    const de = await renderApprovalPage({ lang: "de", ...base, tools }).text();
+    expect(de).toContain('<legend class="may">Diese Werkzeuge haben schon Zugriff auf dieses Postfach:</legend>');
+    expect(de).toContain('<span class="name">Unbenanntes Werkzeug</span> bleibt verbunden');
+    expect(de).toContain('<span class="when">Verbunden seit 3. März 2026</span>');
+    expect(de).toContain(
+      '<span class="name">Claude</span><span class="when">Frühere Verbindung dieses Werkzeugs, seit 20. Juni 2026. Erlauben ersetzt sie.</span>',
+    );
+    expect(de).toContain(
+      '<p class="never">Ein Werkzeug ohne Haken verliert seinen Zugriff, wenn du diese Verbindung erlaubst.</p>',
+    );
+  });
+
+  it("decides the tools beyond the first 20 as one entry", async () => {
+    const rest = ["1", "2", "3"].map((c) => c.repeat(32));
+    const html = await renderApprovalPage({ lang: "en", ...base, tools: { replaced: null, others: tools.others, rest } }).text();
+    expect(html).toContain('<input type="checkbox" id="tool-rest" name="keep" value="rest" checked>');
+    expect(html).toContain('<label for="tool-rest"><span class="name">3 more tools</span> stay connected</label>');
+    const posted = fields(html);
+    for (const key of rest) {
+      expect(posted).toContainEqual(["hidden", "shown", key, false]);
+      expect(posted).toContainEqual(["hidden", "rest", key, false]);
+    }
+    const de = await renderApprovalPage({ lang: "de", ...base, tools: { replaced: null, others: [], rest } }).text();
+    expect(de).toContain('<label for="tool-rest"><span class="name">3 weitere Werkzeuge</span> bleiben verbunden</label>');
+  });
+
+  it("without other tools, the connecting tool's earlier connection is named but nothing asks to untick", async () => {
+    const html = await renderApprovalPage({ lang: "en", ...base, tools: { replaced: tools.replaced, others: [], rest: [] } }).text();
+    expect(html).toContain('<fieldset class="tools">');
+    expect(html).not.toContain('type="checkbox"');
+    expect(html).not.toContain("untick");
+  });
+
+  it("keeps the page free of script and of foreign addresses", async () => {
+    const html = await renderApprovalPage({ lang: "de", ...base, tools }).text();
+    expect(html).not.toMatch(/<script|javascript:|\son[a-z]+=/i);
+    expect(html).not.toMatch(/https?:\/\//);
+  });
+});

@@ -86,6 +86,32 @@ AI tool ◄──(5) on Allow: the worker's own access/refresh token
   client-supplied text, is bound to the request by a `__Host-` cookie and cannot be framed. It
   is shown **every time** a tool connects; approval is never remembered. No worker token is
   issued without Allow.
+- Step 4 also names the AI tools that already have access to the mailbox (its Worker grants,
+  grouped by client id: the tool's name, the date of its first grant, at most 20 entries and
+  one further entry for the rest), each with a checkbox that is ticked, "stays connected". On
+  Allow, after the existing checks and before the new grant is created, the worker revokes
+  every grant of each tool the user unticked and writes one `connection_removed` audit row per
+  tool; if a revocation fails, nothing is granted. Deny revokes nothing. The connecting tool's
+  own earlier connection is listed without a checkbox, as replaced: the OAuth library already
+  revokes a client's earlier grants for the same user when it creates the new one
+  (`revokeExistingGrants`, on by default; for a Client ID Metadata Document client only those
+  with the same redirect URI), and the worker revokes the rest of that tool's listed grants
+  too, so the page's "Allowing replaces it" is exact.
+  - Why: one mailbox serves several AI tools through one Stalwart connection in the vault. A
+    user who removed the application at Stalwart to cut every tool off, and who connects one
+    tool again before the others made a call, gives the vault a fresh connection for the same
+    address, and the earlier tools' Worker grants would work again unseen.
+  - Why not revoke every earlier grant at each sign-in: then nobody could use two tools, each
+    connect would throw the other out. Why not test whether the old Stalwart connection was
+    still alive: presenting a superseded refresh token deletes the whole grant at Stalwart.
+    Showing the tools and letting the user decide makes the case visible instead of guessed.
+  - Why keys and not ids: the page carries neither grant ids nor client ids. Each entry has a
+    key, the first 16 bytes (hex) of SHA-256 over the account id, the consent handle and the
+    client id. At `POST` the worker lists the account (from the pending row, never from the
+    form) afresh, derives each grant's key again and revokes only grants whose key was posted
+    as shown and not as kept, each with `revokeGrant(id, accountId)`. A forged key matches
+    nothing, a key of another account or another handle cannot match, and a grant created
+    after the page was rendered was not shown and stays.
 - The Stalwart tokens from step 3 go to the mailbox vault whether the user then allows or
   denies: the code exchange may supersede the refresh token the vault already holds for other
   connected tools, so dropping the new one would cut those off. Deny only means the new tool
