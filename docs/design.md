@@ -215,7 +215,7 @@ like mail: reading, creating, changing and deleting.
   session and otherwise answers `not_granted` without any request; a method error
   `unknownMethod` from Stalwart is mapped to `not_granted` too. A mailbox connected while the
   area was switched off has a token without the scope and has to connect again. The approval page
-  names the areas (for calendars: "and send invitations"), and the server's MCP instructions get
+  names the areas in one line each, in the words of the mail server's own consent page, and the server's MCP instructions get
   sentences about them: third-party text, permanent deletion, and that an event write with
   participants makes the mail server send them mail, so the AI tool asks first.
 - **What the scope reaches.** As with mail, the scope is Stalwart's: a vault token with the

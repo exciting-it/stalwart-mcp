@@ -1,4 +1,3 @@
-import { MAIL_LIMITS } from "../src/mail";
 import { describe, expect, it } from "vitest";
 import { pageLanguage, renderApprovalPage, renderIntroPage, renderMessagePage } from "../src/oauth/approval-page";
 
@@ -54,12 +53,7 @@ describe("approval page", () => {
     expect(en).toContain("Connect your mailbox");
     expect(en).toContain("Claude (claude.ai) wants to access this mailbox:");
     expect(en).toContain('<p class="mailbox">a@test.example</p>');
-    expect(permissions(en)).toEqual([
-      "Read and search your email",
-      "Save drafts",
-      "Send email in your name (at most 50 messages per day)",
-      "Move messages to other folders and to the trash",
-    ]);
+    expect(permissions(en)).toEqual(["Read, send and manage your email"]);
     expect(en).toContain('<p class="never">It never empties the trash.</p>');
     expect(en).toContain("Not a@test.example? Choose Deny, sign out of your mailbox and try again.");
     expect(en).toContain("Only allow this if you started the connection yourself just now.");
@@ -71,12 +65,7 @@ describe("approval page", () => {
     expect(de).toContain("Postfach verbinden");
     expect(de).toContain("Claude (claude.ai) möchte auf dieses Postfach zugreifen:");
     expect(de).toContain('<p class="mailbox">a@test.example</p>');
-    expect(permissions(de)).toEqual([
-      "E-Mails lesen und durchsuchen",
-      "Entwürfe speichern",
-      "E-Mails in deinem Namen senden (höchstens 50 Nachrichten pro Tag)",
-      "Nachrichten in andere Ordner und in den Papierkorb verschieben",
-    ]);
+    expect(permissions(de)).toEqual(["E-Mails lesen, senden und verwalten"]);
     expect(de).toContain('<p class="never">Den Papierkorb leert sie nie.</p>');
     expect(de).toContain("Nicht a@test.example? Wähle „Ablehnen“, melde dich im Postfach ab und versuche es erneut.");
     expect(de).toContain("Erlaube das nur, wenn du die Verbindung gerade selbst gestartet hast.");
@@ -85,11 +74,15 @@ describe("approval page", () => {
     expect(de).toContain('<html lang="de">');
   });
 
-  it("states the daily send limit of the contract in both languages", async () => {
-    const en = await renderApprovalPage({ lang: "en", ...base }).text();
-    const de = await renderApprovalPage({ lang: "de", ...base }).text();
-    expect(Number(/at most (\d+) messages per day/.exec(en)?.[1])).toBe(MAIL_LIMITS.sendsPerDay);
-    expect(Number(/höchstens (\d+) Nachrichten pro Tag/.exec(de)?.[1])).toBe(MAIL_LIMITS.sendsPerDay);
+  // The page names one permission per area, in the words of the mail server's own consent page.
+  // The limits (sends per day and the like) are no longer listed here; the AI tool is told them
+  // in the server instructions and the tool descriptions (test/mcp-handler.test.ts).
+  it("lists one short permission per area and no numbers", async () => {
+    for (const lang of ["en", "de"] as const) {
+      const html = await renderApprovalPage({ lang, ...base, areas: new Set(["contacts", "calendars"] as const) }).text();
+      expect(permissions(html)).toHaveLength(3);
+      for (const line of permissions(html)) expect(line).not.toMatch(/\d/);
+    }
   });
 
   it("posts the handle to /approve", async () => {
@@ -106,28 +99,23 @@ describe("areas beyond mail on the approval page", () => {
   it("says nothing about calendars or contacts when the deployment offers only mail", async () => {
     for (const html of [await page("en"), await page("en", []), await page("de", [])]) {
       expect(html).not.toMatch(/calendar|address book|Kalender|Adressbuch/i);
-      expect(permissions(html)).toHaveLength(4);
+      expect(permissions(html)).toHaveLength(1);
     }
   });
 
   it("adds one list entry for exactly each area that is switched on, after the mail entries", async () => {
-    expect(permissions(await page("en", ["contacts"])).slice(4)).toEqual(["Read, create, change and delete your contacts"]);
+    expect(permissions(await page("en", ["contacts"])).slice(1)).toEqual(["Read and manage your contacts"]);
     expect(await page("en", ["contacts"])).not.toMatch(/calendar/i);
-    expect(permissions(await page("en", ["calendars"])).slice(4)).toEqual([
-      "Read, create, change and delete your calendar events, and send invitations",
+    expect(permissions(await page("en", ["calendars"])).slice(1)).toEqual(["Read and manage your calendars"]);
+    expect(await page("en", ["calendars"])).not.toMatch(/contact|address book/i);
+    expect(permissions(await page("en", ["calendars", "contacts"])).slice(1)).toEqual([
+      "Read and manage your contacts",
+      "Read and manage your calendars",
     ]);
-    expect(await page("en", ["calendars"])).not.toMatch(/address book/i);
-    expect(permissions(await page("en", ["calendars", "contacts"])).slice(4)).toEqual([
-      "Read, create, change and delete your contacts",
-      "Read, create, change and delete your calendar events, and send invitations",
+    expect(permissions(await page("de", ["contacts", "calendars"])).slice(1)).toEqual([
+      "Kontakte lesen und verwalten",
+      "Kalender lesen und verwalten",
     ]);
-    expect(permissions(await page("de", ["contacts", "calendars"])).slice(4)).toEqual([
-      "Kontakte lesen, anlegen, ändern und löschen",
-      "Termine lesen, anlegen, ändern und löschen, und Einladungen verschicken",
-    ]);
-    // Only the calendars entry speaks of invitations.
-    expect(await page("en", ["contacts"])).not.toMatch(/invitation/i);
-    expect(await page("de", ["contacts"])).not.toMatch(/Einladung/i);
   });
 
   it("tells what deleting does, naming only the areas that are on", async () => {

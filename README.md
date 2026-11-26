@@ -270,6 +270,13 @@ shipped; change the values and replace the files for your own deployment. The fo
 the SIL Open Font License (texts next to the files). The pages run no script and load nothing
 from another origin, which their Content-Security-Policy enforces.
 
+The same mark is there as a PNG (`public/brand/icon.png`) and as `public/favicon.ico`. The
+server names the PNG as the connector's icon to AI tools, and its address
+(`<PUBLIC_ORIGIN>/brand/icon.png`) can be entered as the logo of the OAuth client at Stalwart.
+Whether a tool shows an icon, and which one, is up to that tool. In the same way the server's
+title carries the mailbox address ("<connector name> (<address>)"), so a tool that shows it
+can tell two connected mailboxes apart.
+
 The sign-in page itself is Stalwart's own and is not part of this worker.
 
 ### Where the data lives

@@ -37,12 +37,9 @@ const APPROVAL_COPY = {
     lead: (client: string, host: string) => `${client} (${host}) wants to access this mailbox:`,
     may: "The application may:",
     permissions: {
-      read: "Read and search your email",
-      drafts: "Save drafts",
-      send: "Send email in your name (at most 50 messages per day)",
-      move: "Move messages to other folders and to the trash",
-      contacts: "Read, create, change and delete your contacts",
-      calendars: "Read, create, change and delete your calendar events, and send invitations",
+      mail: "Read, send and manage your email",
+      contacts: "Read and manage your contacts",
+      calendars: "Read and manage your calendars",
     },
     never: "It never empties the trash.",
     neverWithAreas: (gone: string) => `Deleted mail goes to the trash, which it never empties. Deleted ${gone} are gone for good.`,
@@ -57,12 +54,9 @@ const APPROVAL_COPY = {
     lead: (client: string, host: string) => `${client} (${host}) möchte auf dieses Postfach zugreifen:`,
     may: "Die Anwendung darf:",
     permissions: {
-      read: "E-Mails lesen und durchsuchen",
-      drafts: "Entwürfe speichern",
-      send: "E-Mails in deinem Namen senden (höchstens 50 Nachrichten pro Tag)",
-      move: "Nachrichten in andere Ordner und in den Papierkorb verschieben",
-      contacts: "Kontakte lesen, anlegen, ändern und löschen",
-      calendars: "Termine lesen, anlegen, ändern und löschen, und Einladungen verschicken",
+      mail: "E-Mails lesen, senden und verwalten",
+      contacts: "Kontakte lesen und verwalten",
+      calendars: "Kalender lesen und verwalten",
     },
     never: "Den Papierkorb leert sie nie.",
     neverWithAreas: (gone: string) => `Gelöschte E-Mails landen im Papierkorb, den sie nie leert. Gelöschte ${gone} sind endgültig weg.`,
@@ -76,7 +70,7 @@ const APPROVAL_COPY = {
 } as const;
 
 /** What every connection may do, in the order shown; the areas of the deployment follow. */
-const MAIL_PERMISSIONS = ["read", "drafts", "send", "move"] as const;
+const MAIL_PERMISSIONS = ["mail"] as const;
 const AREA_PERMISSIONS = ["contacts", "calendars"] as const;
 
 /** The page before the sign-in at the mail server: what is about to happen, in two steps. */

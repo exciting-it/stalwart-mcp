@@ -29,7 +29,7 @@ beforeEach(() => {
     },
     endGrant: (token) => endGrant(token),
   };
-  handler = createMcpHandler(() => deps);
+  handler = createMcpHandler(() => deps, "https://connector.test.example");
 });
 
 type Ctx = ExecutionContext & { auth?: unknown };
@@ -177,7 +177,10 @@ describe("MCP endpoint", () => {
   });
 
   it("returns the server instructions on initialize", async () => {
-    const init = await result<{ instructions: string; serverInfo: { name: string; title: string; version: string } }>(
+    const init = await result<{
+      instructions: string;
+      serverInfo: { name: string; title: string; version: string; icons: { src: string; mimeType: string }[] };
+    }>(
       "initialize",
       { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "test", version: "1" } },
     );
@@ -186,8 +189,18 @@ describe("MCP endpoint", () => {
       `${SERVER_INSTRUCTIONS} This connection works in exactly one mailbox: ${store.a.email}. No tool can reach another mailbox; an address the user mentions is only a search filter.${AREA_SENTENCE}`,
     );
     expect(init.instructions).not.toContain(store.b.email);
-    // The title is CONNECTOR_NAME (vitest.config.ts); the name is fixed.
-    expect(init.serverInfo).toMatchObject({ name: "stalwart-mcp", title: "Test Mail", version: "1.0.0" });
+    // The title is CONNECTOR_NAME (vitest.config.ts) with the mailbox of the grant; the name is fixed.
+    expect(init.serverInfo).toMatchObject({
+      name: "stalwart-mcp",
+      title: `Test Mail (${store.a.email})`,
+      version: "1.0.0",
+    });
+    expect(init.serverInfo.title).not.toContain(store.b.email);
+    // Icons come from the worker's own origin, never from anywhere else.
+    expect(init.serverInfo.icons.map((i) => [i.src, i.mimeType])).toEqual([
+      ["https://connector.test.example/brand/icon.png", "image/png"],
+      ["https://connector.test.example/brand/favicon.svg", "image/svg+xml"],
+    ]);
   });
 
   it("no tool's input schema has an account or from property", async () => {

@@ -11,6 +11,7 @@ import type { AnySchema } from "@modelcontextprotocol/sdk/server/zod-compat.js";
 import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { type Area, AREAS, connectorName, features } from "../config";
+import { THEME } from "../oauth/theme";
 import type { Env } from "../env";
 import { GrantClientId, GrantProps } from "../oauth/grant-props";
 import { toolsFor } from "../tools";
@@ -126,9 +127,18 @@ function endingGrantOnReconnect(mailbox: Mailbox, end: () => Promise<void>): Mai
   };
 }
 
-function serverFor(deps: ToolDeps, grant: Grant): McpServer {
+function serverFor(deps: ToolDeps, grant: Grant, origin: string): McpServer {
   const server = new McpServer(
-    { name: "stalwart-mcp", title: connectorName(), version: "1.0.0" },
+    // The title carries the mailbox, so a tool that shows it can tell two connections apart.
+    {
+      name: "stalwart-mcp",
+      title: `${connectorName()} (${grant.email})`,
+      version: "1.0.0",
+      icons: [
+        { src: `${origin}${THEME.logo}`, mimeType: "image/png", sizes: ["512x512"] },
+        { src: `${origin}${THEME.icon}`, mimeType: "image/svg+xml", sizes: ["any"] },
+      ],
+    },
     { instructions: serverInstructions(grant.email) },
   );
   for (const tool of toolsFor(features())) {
@@ -149,7 +159,8 @@ function serverFor(deps: ToolDeps, grant: Grant): McpServer {
   return server;
 }
 
-export function createMcpHandler(depsFor: (env: Env) => ToolDeps): {
+/** `origin` is the worker's own public origin; the connector's icons are served from it. */
+export function createMcpHandler(depsFor: (env: Env) => ToolDeps, origin: string): {
   fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response>;
 } {
   return {
@@ -165,6 +176,7 @@ export function createMcpHandler(depsFor: (env: Env) => ToolDeps): {
       const server = serverFor(
         { ...deps, mailbox: (g) => endingGrantOnReconnect(deps.mailbox(g), () => deps.endGrant(accessToken)) },
         grant,
+        origin,
       );
       const transport = new WebStandardStreamableHTTPServerTransport({
         sessionIdGenerator: undefined,

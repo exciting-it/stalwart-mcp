@@ -5,6 +5,7 @@
 import { existsSync, statSync } from "node:fs";
 import path from "node:path";
 import { renderApprovalPage, renderMessagePage } from "../src/oauth/approval-page";
+import { THEME } from "../src/oauth/theme";
 
 const root = path.join(import.meta.dir, "..", "public");
 const pages = [
@@ -12,7 +13,8 @@ const pages = [
   renderMessagePage({ lang: "en", kind: "failed", status: 400 }),
 ];
 
-const referenced = new Set<string>();
+// Not in any page: the connector icon named in the MCP server info, and the root favicon.
+const referenced = new Set<string>([THEME.logo, "/favicon.ico"]);
 for (const page of pages) {
   const html = await page.text();
   for (const m of html.matchAll(/(?:src|href)="(\/[^"]+)"|url\("(\/[^"]+)"\)/g)) referenced.add((m[1] ?? m[2])!);

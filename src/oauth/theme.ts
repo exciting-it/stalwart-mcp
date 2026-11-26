@@ -33,6 +33,12 @@ export const THEME = {
   },
   icon: "/brand/favicon.svg",
   /**
+   * The same mark as a 512 px PNG, for places that take no SVG: the icon AI tools may show for
+   * the connector, and the logo address of the OAuth client at the mail server. A copy at
+   * `public/favicon.ico` serves clients that look for an icon at the root of the address.
+   */
+  logo: "/brand/icon.png",
+  /**
    * One sentence for the page shown before the sign-in at the mail server: which login is meant,
    * in the words your users know. Deployment-specific, like the rest of this file.
    */

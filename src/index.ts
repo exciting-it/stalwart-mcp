@@ -59,7 +59,7 @@ function providerFor(origin: string): OAuthProvider<Env> {
     provider = new OAuthProvider<Env>({
       ...baseOAuthOptions(origin),
       apiRoute: "/mcp",
-      apiHandler: createMcpHandler((env) => toolDeps(env, origin)),
+      apiHandler: createMcpHandler((env) => toolDeps(env, origin), origin),
       defaultHandler: defaultHandlerFor(origin),
     });
     providers.set(origin, provider);
