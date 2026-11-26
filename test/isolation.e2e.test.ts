@@ -236,7 +236,7 @@ describe("mail connector isolation, end to end", () => {
     const first = await callTool(a.accessToken!, "respond_to_event", args);
     const second = await callTool(a.accessToken!, "respond_to_event", args);
     expect(first.structuredContent).toEqual({ event_id: mine, response: "accepted", organizer_notified: true, deduplicated: false });
-    expect(second.structuredContent).toEqual({ event_id: mine, response: "accepted", organizer_notified: true, deduplicated: true });
+    expect(second.structuredContent).toEqual({ event_id: mine, response: "accepted", organizer_notified: false, deduplicated: false });
     expect(fake.eventsOf(A)[0]!.participants).toMatchObject({ a: { participationStatus: "accepted" }, b: { participationStatus: "needs-action" } });
     expect(fake.schedulingMessages(A)).toEqual([{ kind: "REPLY", eventId: mine, attendees: ["ok@test.example"] }]);
     expect(fake.eventsOf(B)).toEqual(before);

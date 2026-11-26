@@ -84,7 +84,7 @@ Constants live in `MAIL_LIMITS` in `src/mail.ts` and, for contacts and calendars
 | Messages sent per mailbox (`send_mail` and every event write that notifies participants or an organizer, together) | 50 per day |
 | Recipients per message (To, Cc, Bcc together) | 10 |
 | Messages per `move_mail`, `delete_mail` or `mark_mail` call | 50 |
-| Identical send (or identical notifying `create_event` / `update_event` / `respond_to_event`) is not repeated within | 10 minutes (600 s) |
+| Identical send (or identical notifying `create_event` / `update_event`) is not repeated within | 10 minutes (600 s) |
 | Parallel calls to Stalwart per mailbox | 2 |
 | Search results per page | at most 25 (default 10) |
 | Messages returned per thread | at most 25 |
@@ -242,10 +242,11 @@ and is not named on the approval page.
   written or sent (`organizer_notified: false`). Otherwise, unless the event has ended (a series
   never counts as ended), the request asks the server to schedule and Stalwart sends the
   organizer an iTIP `REPLY` from the mailbox: allow-listed organizer outside production, one
-  send of the 50 per day, deduplicated for 10 minutes like an update (an identical answer
-  returns `deduplicated: true`; so `accepted`, `declined`, `accepted` within 10 minutes leaves
-  `declined` stored), and an unknown outcome is `send_unconfirmed` and blocks the identical
-  answer for the window. An answer to an ended event is stored without notifying anyone and
+  send of the 50 per day. The stored answer, not a time window, keeps an answer from going out
+  twice: `accepted`, `declined`, `accepted` are three sends and leave `accepted` stored, while
+  the same answer twice in a row sends once. Two identical answers at the same time share one
+  result (`deduplicated: true`). An unknown outcome is `send_unconfirmed`, stays counted and
+  blocks the identical answer for 10 minutes while the old answer is still stored. An answer to an ended event is stored without notifying anyone and
   costs nothing. Its audit row counts 1 recipient when the organizer was notified by this
   call, else 0.
 - **Replacing participants.** `participants` in `update_event` replaces the list; an attendee
@@ -474,9 +475,7 @@ production a request under a host other than `PUBLIC_ORIGIN` answers 404.
   connected mailbox. Mitigations: two secrets per deployment, replacing `TOKEN_ENC_KEY`, and
   deleting the OAuth client.
 - Contacts and calendars cover the mailbox's own account: no shared address books or calendars
-  of other accounts, no free/busy lookups. An answer to an invitation carries no comment, and an
-  answer identical to one of the last 10 minutes is not sent again even when a different answer
-  was given in between (`accepted`, `declined`, `accepted` leaves `declined`). Deleting a contact or an
+  of other accounts, no free/busy lookups. An answer to an invitation carries no comment. Deleting a contact or an
   event cannot be undone. An event update with `participants` replaces the whole list (kept
   attendees keep their answers) and is refused for a meeting someone else organized; a contact
   update rebuilds the name from the parts given. A

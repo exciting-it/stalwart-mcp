@@ -7,7 +7,8 @@
  *
  * An event write that makes the mail server notify people (invitations, updates, cancellations,
  * the answer to an invitation) is a send too: the same allow-list, the same daily counter (one
- * per notified event) and, for a create, update or answer, the same dedupe. Whether it notifies is decided here (`event-notices.ts`); the
+ * per notified event) and, for a create or update, the same dedupe. An answer is deduplicated
+ * only while it is on its way or its outcome is unknown; the stored answer decides the rest. Whether it notifies is decided here (`event-notices.ts`); the
  * adapter only reads the event and writes with that decision.
  *
  * The event writes of one mailbox run one after the other (`#oneEventWriteAtATime`): an update
@@ -54,6 +55,7 @@ import {
   dropSend,
   eventWriteFingerprint,
   findRecentSend,
+  forgetSend,
   markSendUnconfirmed,
   pruneRecentSends,
   type RecordedSend,
@@ -130,6 +132,8 @@ export class MailboxOperations {
   readonly #slots = new Slots(MAIL_LIMITS.upstreamConcurrency);
   /** Sends (and notifying event writes) on their way upstream, by fingerprint: an identical one awaits it. */
   readonly #sendsInFlight = new Map<string, Promise<unknown>>();
+  /** Answers to invitations from the moment they are queued until they are done, by fingerprint. */
+  readonly #answersInFlight = new Map<string, Promise<RespondToEventResultT>>();
   /** Settles when the event write before the latest one is done: the tail of the event-write queue. */
   #eventWriteQueue: Promise<void> = Promise.resolve();
 
@@ -195,7 +199,7 @@ export class MailboxOperations {
         case "delete_event":
           return this.#oneEventWriteAtATime(() => this.#deleteEvent(accountId, req.input));
         case "respond_to_event":
-          return this.#sharedOrQueued("respond_to_event", req.input, () => this.#respondToEvent(accountId, req.input));
+          return this.#sharedAnswer(req.input, () => this.#respondToEvent(accountId, req.input));
       }
       return this.#collabUpstream(accountId, (a): Promise<CollabValue> => {
         switch (req.op) {
@@ -256,8 +260,8 @@ export class MailboxOperations {
    * event-write queue.
    */
   async #sharedOrQueued<T extends { deduplicated: boolean }>(
-    op: "create_event" | "update_event" | "respond_to_event",
-    input: CreateEventInputT | UpdateEventInputT | RespondToEventInputT,
+    op: "create_event" | "update_event",
+    input: CreateEventInputT | UpdateEventInputT,
     task: () => Promise<T>,
   ): Promise<T> {
     const fingerprint = await eventWriteFingerprint(op, input);
@@ -322,12 +326,33 @@ export class MailboxOperations {
   }
 
   /**
+   * An answer identical to one already queued or on its way shares that one's result, marked
+   * `deduplicated`; any other waits for its turn in the event-write queue. It is shared from the
+   * moment it is queued, because a later identical answer would otherwise find the first one's
+   * answer stored and report a quiet no-op instead.
+   */
+  async #sharedAnswer(input: RespondToEventInputT, task: () => Promise<RespondToEventResultT>): Promise<RespondToEventResultT> {
+    const fingerprint = await eventWriteFingerprint("respond_to_event", input);
+    // From here to `set` nothing awaits, so no second identical answer can slip in between.
+    const shared = this.#answersInFlight.get(fingerprint);
+    if (shared) return { ...(await shared), deduplicated: true };
+    const run = this.#oneEventWriteAtATime(task);
+    this.#answersInFlight.set(fingerprint, run);
+    try {
+      return await run;
+    } finally {
+      this.#answersInFlight.delete(fingerprint);
+    }
+  }
+
+  /**
    * An answer to an invitation: the event is read first. Only someone else's meeting that lists
-   * the mailbox can be answered (`invalid_input` otherwise, nothing written). An answer that the
-   * stored one already equals writes and sends nothing. One that notifies the organizer is a send
-   * like a notifying update: allow-listed organizer, one send counted, deduplicated (an identical
-   * answer within the window answers from the first, also when the stored answer equals it by
-   * now). One that does not (the event ended) is written without scheduling messages.
+   * the mailbox can be answered (`invalid_input` otherwise, nothing written). The stored answer
+   * decides first: when it already equals the new one, nothing is written or sent, whatever the
+   * dedupe rows say. One that notifies the organizer is a send: allow-listed organizer, one send
+   * counted, and an unknown outcome blocks the identical answer for the window; a confirmed one
+   * leaves no row (`forget`), so the same answer after a different one is a new send. One that
+   * does not notify (the event ended) is written without scheduling messages.
    */
   async #respondToEvent(accountId: string, input: RespondToEventInputT): Promise<RespondToEventResultT> {
     const audience = (await this.#collabUpstream(accountId, (a) => a.eventAudiences([input.event_id]))).get(input.event_id);
@@ -339,19 +364,20 @@ export class MailboxOperations {
       organizer_notified,
       deduplicated,
     });
-    const unchanged = audience.self.status === input.response;
+    if (audience.self.status === input.response) return answered(false, false);
     const notice = respondNotice(audience, clock.now());
     if (!notice.notify) {
-      if (!unchanged) await this.#collabUpstream(accountId, (a) => a.respondToEvent(input, false, audience));
+      await this.#collabUpstream(accountId, (a) => a.respondToEvent(input, false, audience));
       return answered(false, false);
     }
     this.#requireAllowed(notice.addresses);
     return this.#exactlyOnce<RespondToEventResultT>(await eventWriteFingerprint("respond_to_event", input), sendsFor(notice), {
-      unchanged: () => (unchanged ? answered(false, false) : undefined),
+      forget: true,
       send: async () => {
         await this.#collabUpstream(accountId, (a) => a.respondToEvent(input, true, audience));
         return answered(true, false);
       },
+      // With `forget` no confirmed row is kept, so `record` and `recorded` are never used.
       record: (r) => ({ message_id: r.event_id, recipients: 1 }),
       again: (r) => ({ ...r, deduplicated: true }),
       recorded: (sent) => ({ ...answered(true, true), event_id: sent.message_id }),
@@ -418,15 +444,14 @@ export class MailboxOperations {
   /**
    * Runs `send` at most once per fingerprint within the dedupe window, counted against the daily
    * send limit as `sends` sends. An identical call in flight awaits it (`again`); one already confirmed answers
-   * from its row (`recorded`); one whose outcome is unknown is `send_unconfirmed`. Otherwise, when
-   * `unchanged` gives a result (the write would change nothing), that is the answer: nothing is
-   * reserved or sent.
+   * from its row (`recorded`); one whose outcome is unknown is `send_unconfirmed`. With `forget`,
+   * a confirmed send deletes its row instead of keeping it, so it never answers a later call.
    */
   async #exactlyOnce<T>(
     fingerprint: string,
     sends: number,
     o: {
-      unchanged?: () => T | undefined;
+      forget?: boolean;
       send: () => Promise<T>;
       record: (result: T) => RecordedSend;
       again: (result: T) => T;
@@ -442,12 +467,10 @@ export class MailboxOperations {
     if (recent?.state === "sent") return o.recorded(recent.sent);
     // Unconfirmed, or pending with no twin in this instance (the object restarted mid-send).
     if (recent) throw new MailError("send_unconfirmed");
-    const skipped = o.unchanged?.();
-    if (skipped !== undefined) return skipped;
     const day = reserveSend(this.#sql, fingerprint, now, sends);
     if (day === null) throw new MailError("send_limit_reached");
 
-    const sending = this.#submit(fingerprint, day, sends, o.send, o.record);
+    const sending = this.#submit(fingerprint, day, sends, o.send, o.forget === true ? null : o.record);
     this.#sendsInFlight.set(fingerprint, sending);
     try {
       return await sending;
@@ -462,7 +485,7 @@ export class MailboxOperations {
     day: number,
     sends: number,
     send: () => Promise<T>,
-    record: (result: T) => RecordedSend,
+    record: ((result: T) => RecordedSend) | null,
   ): Promise<T> {
     let sent: T;
     try {
@@ -476,7 +499,8 @@ export class MailboxOperations {
       else markSendUnconfirmed(this.#sql, fingerprint);
       throw e;
     }
-    confirmSend(this.#sql, fingerprint, record(sent));
+    if (record === null) forgetSend(this.#sql, fingerprint);
+    else confirmSend(this.#sql, fingerprint, record(sent));
     return sent;
   }
 

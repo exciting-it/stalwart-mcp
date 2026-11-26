@@ -837,7 +837,8 @@ describe("tools", () => {
       expect(spec.description).toContain("counts as one of the mailbox's 50 sent messages per day");
       expect(spec.description).toContain("Not for events the mailbox organizes");
       expect(spec.description).toContain("answers that occurrence only");
-      expect(spec.description).toContain("not sent again (deduplicated: true)");
+      expect(spec.description).toContain("An answer the event already has is not sent again (organizer_notified: false)");
+      expect(spec.description).toContain("two identical answers at the same time are sent once (deduplicated: true)");
       expect(spec.description).toContain("Ask the user first.");
     });
 

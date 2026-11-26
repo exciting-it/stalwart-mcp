@@ -896,21 +896,36 @@ describe("answering an invitation (respond_to_event)", () => {
     expect(eventMethods()).toEqual(Array.from({ length: 3 }, () => ["CalendarEvent/get", "CalendarEvent/set"]).flat());
   });
 
-  it("the same answer twice within the window: one write, one REPLY, one send; the second is deduplicated", async () => {
+  it("the same answer twice in a row: one write, one REPLY, one send; the second finds it stored and sends nothing", async () => {
     const { stub, box } = await signIn(A);
     const id = invitation();
     const r1 = await box.respondToEvent({ event_id: id, response: "accepted" });
     const r2 = await box.respondToEvent({ event_id: id, response: "accepted" });
     expect(r1).toEqual({ event_id: id, response: "accepted", organizer_notified: true, deduplicated: false });
-    expect(r2).toEqual({ ...r1, deduplicated: true });
+    expect(r2).toEqual({ ...r1, organizer_notified: false });
     expect(eventSets()).toHaveLength(1);
     expect(fake.schedulingMessages(A)).toHaveLength(1);
     expect(await sendsCounted(stub)).toBe(1);
-    // After the window, the stored answer already equals it: nothing is written or sent.
-    now += (MAIL_LIMITS.sendDedupeSeconds + 1) * SECOND;
-    expect(await box.respondToEvent({ event_id: id, response: "accepted" })).toEqual({ ...r1, organizer_notified: false });
-    expect(eventSets()).toHaveLength(1);
-    expect(await sendsCounted(stub)).toBe(1);
+    // A confirmed answer leaves no row behind that could answer a later call.
+    expect(await recentSends(stub)).toEqual([]);
+  });
+
+  it("accepted, declined, accepted within the window: three writes, three REPLYs, three sends, accepted stored", async () => {
+    const { stub, box } = await signIn(A);
+    const id = invitation();
+    for (const response of ["accepted", "declined", "accepted"] as const) {
+      expect(await box.respondToEvent({ event_id: id, response })).toEqual({
+        event_id: id,
+        response,
+        organizer_notified: true,
+        deduplicated: false,
+      });
+      now += 60 * SECOND;
+    }
+    expect(eventSets()).toHaveLength(3);
+    expect(fake.schedulingMessages(A)).toHaveLength(3);
+    expect(await sendsCounted(stub)).toBe(3);
+    expect(ownStatus(id)).toBe("accepted");
   });
 
   it("two identical answers at the same time are one write and one send", async () => {
@@ -1020,15 +1035,36 @@ describe("answering an invitation (respond_to_event)", () => {
     expect(await sendsCounted(stub)).toBe(1);
   });
 
-  it("an unknown outcome is send_unconfirmed, stays counted and blocks the identical answer for the window", async () => {
+  it("an unknown outcome is send_unconfirmed, stays counted and blocks the identical answer while the old one is stored", async () => {
     const { stub, box } = await signIn(A);
     const id = invitation();
-    fake.failNextEventWrite("accepted-then-invalid-json");
+    // The request may or may not have reached the server; here it did not, so the old answer stays.
+    fake.failNextEventWrite("network");
     await expectCode(box.respondToEvent({ event_id: id, response: "accepted" }), "send_unconfirmed");
+    expect(ownStatus(id)).toBe("needs-action");
     await expectCode(box.respondToEvent({ event_id: id, response: "accepted" }), "send_unconfirmed");
     expect(eventSets()).toHaveLength(1);
     expect(await sendsCounted(stub)).toBe(1);
     expect(await recentSends(stub)).toEqual([expect.objectContaining({ state: "unconfirmed" })]);
+    // A different answer is another request.
+    expect(await box.respondToEvent({ event_id: id, response: "declined" })).toMatchObject({ organizer_notified: true });
+    expect(await sendsCounted(stub)).toBe(2);
+  });
+
+  it("after an unknown outcome the server did act on, the identical answer is a quiet no-op", async () => {
+    const { stub, box } = await signIn(A);
+    const id = invitation();
+    fake.failNextEventWrite("accepted-then-invalid-json");
+    await expectCode(box.respondToEvent({ event_id: id, response: "accepted" }), "send_unconfirmed");
+    expect(ownStatus(id)).toBe("accepted");
+    expect(await box.respondToEvent({ event_id: id, response: "accepted" })).toEqual({
+      event_id: id,
+      response: "accepted",
+      organizer_notified: false,
+      deduplicated: false,
+    });
+    expect(eventSets()).toHaveLength(1);
+    expect(await sendsCounted(stub)).toBe(1);
   });
 
   it("an occurrence id answers that occurrence only", async () => {

@@ -6,7 +6,9 @@
  * Event writes that make the mail server notify people (invitations, updates, cancellations)
  * count as sends: the same counter, and for a notifying create, update or answer the same
  * `recent_sends` rows. Such a row's `message_id` holds the event id (`<event id>/<calendar id>`
- * for a create) and `recipients` the number of people notified.
+ * for a create) and `recipients` the number of people notified. An answer's row lives only while
+ * it is pending or unconfirmed: once confirmed it is deleted, because the stored answer, not the
+ * window, says whether a repeat changes anything.
  *
  * `recent_sends` holds only a SHA-256 of the message, the time, the state of the send and, once
  * it is confirmed, the message id and the recipient count: no address, subject or body is
@@ -119,6 +121,14 @@ export function confirmSend(sql: SqlStorage, fingerprint: string, sent: Recorded
     sent.recipients,
     fingerprint,
   );
+}
+
+/**
+ * Stalwart confirmed a send whose result must never answer a later call (an answer to an
+ * invitation): the row goes, the counted send stays.
+ */
+export function forgetSend(sql: SqlStorage, fingerprint: string): void {
+  sql.exec("DELETE FROM recent_sends WHERE fingerprint = ?", fingerprint);
 }
 
 /** The outcome is unknown: the row and the day's reservation both stay. */

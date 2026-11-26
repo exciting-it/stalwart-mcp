@@ -167,7 +167,7 @@ recipients, subject, body and reply target. An identical send within 10 minutes 
 again; the first result is returned. If the outcome of a send is unknown (a timeout or a 5xx
 after the request left), it is counted and an identical send is refused for the same window.
 Event writes that make the mail server send invitations, updates or answers use the same rows
-(see below).
+(see below; an answer keeps its row only while its outcome is open).
 
 ## Contacts and calendars
 
@@ -212,7 +212,7 @@ like mail: reading, creating, changing and deleting.
   (delete), and one that cannot be parsed is `upstream_rejected`. For a notifying update or
   delete these cases mean "we do not know whether the server sent mail": `send_unconfirmed`,
   the sends stay counted, and an update or answer keeps its dedupe row (blocking the identical
-  request).
+  request; for an answer only while the stored answer is still another one).
 - **Same rules as mail.** The tools go through `defineTool` and the vault. The account comes from
   the grant, no tool has an account parameter, ids are only used inside the grant's account, and
   a foreign id answers "not found". An `address_book_id` or `calendar_id` that is not the
@@ -274,9 +274,9 @@ like mail: reading, creating, changing and deleting.
   started ten addresses it involves (one send covers at most `eventParticipantsMax` people, like
   one message; more is possible for an existing event created elsewhere), refused with
   `send_limit_reached` before anything is written when fewer are left (a deletion of several
-  notifying events reserves the sum at once, or deletes nothing), and a notifying create,
-  update or answer is deduplicated over a hash of the operation and its validated input with the same
-  `recent_sends` rows and in-flight table as `send_mail`. A deletion sends the notifying ids and
+  notifying events reserves the sum at once, or deletes nothing), and a notifying create or
+  update is deduplicated over a hash of the operation and its validated input with the same
+  `recent_sends` rows and in-flight table as `send_mail` (an answer differs, see below). A deletion sends the notifying ids and
   the others in two requests, and gives back the sends of events that were definitely not
   deleted; when the second request fails after the first went through, the result still
   reports the first (its cancellations) and names the second's ids in `not_deleted`.
@@ -288,8 +288,9 @@ like mail: reading, creating, changing and deleting.
   write in between could change who would be notified (a write decided as "notifies only
   allow-listed people" would then notify someone else). So `create_event`, `update_event`,
   `respond_to_event` and `delete_event` of one vault run one after the other (a promise queue in
-  `MailboxOperations`, released on every exit). A notifying create, update or answer identical
-  to one already on its way upstream still shares that one's result instead of queueing.
+  `MailboxOperations`, released on every exit). A notifying create or update identical to one
+  already on its way upstream still shares that one's result instead of queueing; an answer
+  identical to one already queued or on its way shares that one's result.
 - **The organizer rule.** The mailbox organizes an event when its `organizerCalendarAddress` is
   the mailbox's own address (case-insensitive, without `mailto:`) or the event names no
   organizer. Only then can a write notify. For a meeting someone else organized, an update with
@@ -312,20 +313,22 @@ like mail: reading, creating, changing and deleting.
   `invalid_input`, and nothing is written. The write is a PatchObject of exactly one path,
   `participants/<key>/participationStatus`, where `<key>` is the first participant entry with
   the mailbox's address (escaped as a JSON Pointer segment): no other property can change
-  through it. When the stored answer already equals the new one, nothing is written, sent or
-  counted (`organizer_notified: false`). Otherwise the notice rule decides
-  (`respondNotice`): the organizer is notified unless the event ended in the past (a series
-  never counts as ended; when unsure, it notifies). A notifying answer follows the send path:
-  the organizer must be allow-listed outside production, one send is reserved, it is
-  deduplicated over the operation and its validated input (an identical answer within the
-  window answers from the first with `deduplicated: true`, also when the stored answer equals it
-  by then), and an unknown outcome is `send_unconfirmed`, stays counted and blocks the identical
-  answer for the window. A non-notifying answer is written with
+  through it. For an answer the stored answer is the idempotency key, not a time window. It
+  decides first, before any dedupe row is looked at: when it already equals the new one,
+  nothing is written, sent or counted (`organizer_notified: false, deduplicated: false`).
+  Otherwise the notice rule decides (`respondNotice`): the organizer is notified unless the
+  event ended in the past (a series never counts as ended; when unsure, it notifies). A
+  notifying answer follows the send path: the organizer must be allow-listed outside
+  production, one send is reserved, and an unknown outcome is `send_unconfirmed`, stays counted
+  and blocks the identical answer for the window while the old answer is still stored (once
+  the stored answer shows it, the first rule applies). A confirmed answer leaves no row behind
+  (`#exactlyOnce` with `forget`), so no call is ever answered from an earlier answer's row:
+  `accepted`, `declined`, `accepted` within minutes are three writes, three replies and three
+  sends. Only an identical answer queued or on its way at the same time shares the first one's
+  result with `deduplicated: true` (the vault shares it from the moment it is queued, since a
+  later one would find the answer stored). A non-notifying answer is written with
   `sendSchedulingMessages: false` and costs nothing. The audit row counts 1 recipient when this
-  call made the server notify the organizer, else 0, never the address. Because the dedupe key is
-  the input, answering `accepted`, then `declined`, then `accepted` again within 10 minutes
-  answers the third call from the first (`deduplicated: true`) and leaves `declined` stored, as
-  for an identical `update_event`.
+  call made the server notify the organizer, else 0, never the address.
 - **Replacing participants** (`update_event` with `participants`) keeps what kept attendees
   answered: an address already on the event keeps its stored `participationStatus`, and its
   `name` when the input gives none; only new addresses start as `needs-action` with
