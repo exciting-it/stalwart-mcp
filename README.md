@@ -213,14 +213,16 @@ and is not named on the approval page.
   that many are not left, it is refused with `send_limit_reached` and nothing is written (a
   deletion of several such events needs the sum, or nothing is deleted). A notifying create or
   update is deduplicated like a send (the same request within 10 minutes returns the first
-  result and sends nothing). An unknown outcome of a notifying create, update or delete (no
-  readable answer, or an answer that names the event nowhere) is `send_unconfirmed`: the sends
-  stay counted and, for a create or update, the same request is blocked for the window.
+  result with `deduplicated: true` and sends nothing). An unknown outcome of a notifying
+  create, update or delete (no readable answer, or an answer that names the event nowhere) is
+  `send_unconfirmed`: the sends stay counted and, for a create or update, the same request is
+  blocked for the window.
   **Outside production only addresses on `SEND_ALLOWLIST` may be notified**, checked for every
   address involved before anything is written, also for an existing event's attendees when it
   is changed or deleted. The connector's event writes of one mailbox run one after the other, so
   none of them can change an event between another's check and its write. Audit rows of the event writes
-  carry how many addresses were notified (`recipient_count`), never an address.
+  carry how many addresses that call notified (`recipient_count`; 0 for a deduplicated one, the
+  count is in the first call's row), never an address.
 - **Someone else's meetings.** The mailbox organizes an event when its organizer
   (`organizerCalendarAddress`) is the mailbox's own address (any case, without `mailto:`) or it
   has none. For an event organized by someone else, `update_event` with `participants` or

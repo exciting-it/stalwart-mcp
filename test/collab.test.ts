@@ -708,7 +708,7 @@ describe("results of the write tools", () => {
     ok(UpdateContactResult, { contact_id: "ct1" });
     ok(DeleteResult, { deleted: 2, not_deleted: ["ct3"] });
     ok(CreateEventResult, { event_id: "ev1", calendar_id: "cal1", invitations: 2, deduplicated: false });
-    ok(UpdateEventResult, { event_id: "ev1", invitations: 0 });
+    ok(UpdateEventResult, { event_id: "ev1", invitations: 0, deduplicated: false });
     ok(DeleteEventResult, { deleted: 2, not_deleted: ["ev3"], cancellations: 1, cancelled_attendees: 3 });
     refused(DeleteResult, { deleted: true, id: "ct1" });
     refused(DeleteResult, { deleted: 1 });

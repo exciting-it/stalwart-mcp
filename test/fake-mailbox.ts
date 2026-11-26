@@ -432,7 +432,7 @@ export function createFakeMailStore() {
           event.participants = input.participants.map((p) => ({ name: p.name ?? null, email: p.email, role: "attendee", status: "needs-action" }));
         }
         const involved = new Set([...before, ...event.participants.map((p) => p.email ?? "")].filter((a) => a !== ""));
-        return { event_id: input.event_id, invitations: involved.size };
+        return { event_id: input.event_id, invitations: involved.size, deduplicated: false };
       },
       async deleteEvent(input) {
         record("deleteEvent");

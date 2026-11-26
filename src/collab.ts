@@ -499,7 +499,12 @@ export const CreateEventResult = z.object({
   invitations: z.number().int(),
   deduplicated: z.boolean(),
 });
-export const UpdateEventResult = z.object({ event_id: z.string(), invitations: z.number().int() });
+/** `deduplicated`: the identical update went out within the dedupe window; this call sent nothing. */
+export const UpdateEventResult = z.object({
+  event_id: z.string(),
+  invitations: z.number().int(),
+  deduplicated: z.boolean(),
+});
 /**
  * `cancellations`: the deleted events for which the mail server was asked to send cancellations;
  * `cancelled_attendees`: how many attendee addresses those went to (counted once per event).

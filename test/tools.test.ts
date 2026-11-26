@@ -635,7 +635,7 @@ describe("tools", () => {
       // Who gets mail, and what a change or deletion of someone else's meeting does.
       const update = byName("update_event").spec.description;
       expect(update).toContain("Unless the event has already ended");
-      expect(update).toContain("an identical change repeated within 10 minutes is not sent again");
+      expect(update).toContain("an identical change repeated within 10 minutes is not sent again (deduplicated: true)");
       expect(update).toContain("without time_zone stay in the event's own time zone (UTC for an event without one)");
       expect(update).toContain("attendees who stay keep their answers");
       expect(update).toContain(
@@ -664,7 +664,7 @@ describe("tools", () => {
       const { event_id } = created.structuredContent as { event_id: string };
       expect(created.structuredContent).toEqual({ event_id, calendar_id: store.a.calendarId, invitations: 1, deduplicated: false });
       const updated = await byName("update_event").execute(deps, grantA, { event_id, location: "Secret Room" });
-      expect(updated.structuredContent).toEqual({ event_id, invitations: 1 });
+      expect(updated.structuredContent).toEqual({ event_id, invitations: 1, deduplicated: false });
       const deleted = await byName("delete_event").execute(deps, grantA, { event_ids: [event_id, store.a.eventId] });
       expect(deleted.structuredContent).toEqual({ deleted: 2, not_deleted: [], cancellations: 1, cancelled_attendees: 1 });
       expect(audits).toEqual([
@@ -674,6 +674,28 @@ describe("tools", () => {
       ]);
       expect(JSON.stringify(audits)).not.toMatch(/Secret|secret|ok@test/);
       expect(audits.every((a) => !("messageId" in a))).toBe(true);
+    });
+
+    it("audit a deduplicated create or update as notifying nobody: the first call's row carries the count", async () => {
+      const real = deps.mailbox;
+      deps.mailbox = (g) => ({
+        ...real(g),
+        createEvent: async () => ({ event_id: "ev-first", calendar_id: store.a.calendarId, invitations: 2, deduplicated: true }),
+        updateEvent: async () => ({ event_id: "ev-first", invitations: 2, deduplicated: true }),
+      });
+      const created = await byName("create_event").execute(deps, grantA, {
+        title: "Again",
+        date: "2026-12-01",
+        participants: [{ email: "ok@test.example" }, { email: "second@test.example" }],
+      });
+      // The answer still describes the first event; only the audit row counts what this call sent.
+      expect(created.structuredContent).toEqual({ event_id: "ev-first", calendar_id: store.a.calendarId, invitations: 2, deduplicated: true });
+      const updated = await byName("update_event").execute(deps, grantA, { event_id: "ev-first", title: "Again" });
+      expect(updated.structuredContent).toEqual({ event_id: "ev-first", invitations: 2, deduplicated: true });
+      expect(audits).toEqual([
+        { ...base(), tool: "create_event", outcome: "ok", resultCount: 1, recipientCount: 0 },
+        { ...base(), tool: "update_event", outcome: "ok", resultCount: 1, recipientCount: 0 },
+      ]);
     });
 
     it("audit a refused notifying write as refused, without a recipient count or address", async () => {

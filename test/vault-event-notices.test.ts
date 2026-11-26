@@ -222,8 +222,8 @@ describe("a notifying update", () => {
     const id = invited();
     const r1 = await box.updateEvent({ event_id: id, title: "Moved" });
     const r2 = await box.updateEvent({ event_id: id, title: "Moved" });
-    expect(r1).toEqual({ event_id: id, invitations: 1 });
-    expect(r2).toEqual(r1);
+    expect(r1).toEqual({ event_id: id, invitations: 1, deduplicated: false });
+    expect(r2).toEqual({ ...r1, deduplicated: true });
     expect(eventSets()).toHaveLength(1);
     expect(eventSets()[0]!.sendSchedulingMessages).toBe(true);
     expect(fake.schedulingMessages(A)).toEqual([{ kind: "REQUEST", eventId: id, attendees: [OK] }]);
@@ -233,10 +233,23 @@ describe("a notifying update", () => {
     expect(await sendsCounted(stub)).toBe(2);
   });
 
+  it("two identical updates at the same time are one send, and one of the answers is deduplicated", async () => {
+    const { stub, box } = await signIn(A);
+    const id = invited();
+    slowUpstream();
+    const [r1, r2] = await Promise.all([
+      box.updateEvent({ event_id: id, title: "Moved" }),
+      box.updateEvent({ event_id: id, title: "Moved" }),
+    ]);
+    expect([r1.deduplicated, r2.deduplicated].sort()).toEqual([false, true]);
+    expect(fake.schedulingMessages(A)).toHaveLength(1);
+    expect(await sendsCounted(stub)).toBe(1);
+  });
+
   it("removing every attendee still notifies them (a cancellation) and costs a send", async () => {
     const { stub, box } = await signIn(A);
     const id = invited();
-    expect(await box.updateEvent({ event_id: id, participants: [] })).toEqual({ event_id: id, invitations: 1 });
+    expect(await box.updateEvent({ event_id: id, participants: [] })).toEqual({ event_id: id, invitations: 1, deduplicated: false });
     expect(fake.schedulingMessages(A)).toEqual([{ kind: "CANCEL", eventId: id, attendees: [OK] }]);
     expect(await sendsCounted(stub)).toBe(1);
   });
@@ -244,7 +257,7 @@ describe("a notifying update", () => {
   it("an update of an event without attendees, that adds none, costs nothing", async () => {
     const { stub, box } = await signIn(A);
     const id = fake.addEvent(A, { title: "Alone", start: "2027-03-01T09:00:00" }).id;
-    expect(await box.updateEvent({ event_id: id, title: "Still alone" })).toEqual({ event_id: id, invitations: 0 });
+    expect(await box.updateEvent({ event_id: id, title: "Still alone" })).toEqual({ event_id: id, invitations: 0, deduplicated: false });
     expect(eventSets()[0]!.sendSchedulingMessages).toBe(false);
     expect(await sendsCounted(stub)).toBe(0);
   });
@@ -408,7 +421,7 @@ describe("staging: only allow-listed attendees, checked before anything is writt
   it("a past event with a stranger may be changed and deleted: nobody is notified", async () => {
     const { stub, box } = await signIn(A);
     const old = fake.addEvent(A, { title: "Old", start: "2026-12-01T09:00:00", participants: { p: { calendarAddress: `mailto:${STRANGER}` } } }).id;
-    expect(await box.updateEvent({ event_id: old, title: "Old, renamed" })).toEqual({ event_id: old, invitations: 0 });
+    expect(await box.updateEvent({ event_id: old, title: "Old, renamed" })).toEqual({ event_id: old, invitations: 0, deduplicated: false });
     expect(await box.deleteEvent({ event_ids: [old] })).toMatchObject({ deleted: 1, cancellations: 0, cancelled_attendees: 0 });
     expect(eventSets().map((s) => s.sendSchedulingMessages)).toEqual([false, false]);
     expect(await sendsCounted(stub)).toBe(0);
@@ -421,11 +434,11 @@ describe("events that ended in the past", () => {
     const past = { start: "2026-12-01T09:00:00Z", end: "2026-12-01T10:00:00Z" };
     const created = await box.createEvent({ ...invite, ...past });
     expect(created).toMatchObject({ invitations: 0, deduplicated: false });
-    expect(await box.updateEvent({ event_id: created.event_id, title: "Minutes" })).toEqual({ event_id: created.event_id, invitations: 0 });
+    expect(await box.updateEvent({ event_id: created.event_id, title: "Minutes" })).toEqual({ event_id: created.event_id, invitations: 0, deduplicated: false });
     // Moving it back into the future notifies again.
-    expect(await box.updateEvent({ event_id: created.event_id, ...FUTURE })).toEqual({ event_id: created.event_id, invitations: 1 });
+    expect(await box.updateEvent({ event_id: created.event_id, ...FUTURE })).toEqual({ event_id: created.event_id, invitations: 1, deduplicated: false });
     // And moving it into the past again does not.
-    expect(await box.updateEvent({ event_id: created.event_id, ...past })).toEqual({ event_id: created.event_id, invitations: 0 });
+    expect(await box.updateEvent({ event_id: created.event_id, ...past })).toEqual({ event_id: created.event_id, invitations: 0, deduplicated: false });
     expect(await box.deleteEvent({ event_ids: [created.event_id] })).toMatchObject({ cancellations: 0 });
     expect(eventSets().map((s) => s.sendSchedulingMessages)).toEqual([false, false, true, false, false]);
     expect(await sendsCounted(stub)).toBe(1);
@@ -590,7 +603,7 @@ describe("event writes of one mailbox run one after the other", () => {
     await expectCode(box.updateEvent({ event_id: "ev99999", title: "x" }), "not_found");
     await expectCode(box.deleteEvent({ event_ids: ["ev99999"] }), "not_found");
     const id = fake.addEvent(A, { title: "Alone", start: "2027-03-01T09:00:00" }).id;
-    expect(await box.updateEvent({ event_id: id, title: "Renamed" })).toEqual({ event_id: id, invitations: 0 });
+    expect(await box.updateEvent({ event_id: id, title: "Renamed" })).toEqual({ event_id: id, invitations: 0, deduplicated: false });
   });
 });
 
@@ -611,7 +624,7 @@ describe("a meeting someone else organized", () => {
     const id = theirMeeting();
     const other = theirMeeting("2027-03-02T09:00:00");
     // Staging: the stranger and the organizer are not on the allow-list, and nobody is notified anyway.
-    expect(await box.updateEvent({ event_id: id, title: "Renamed for me", ...FUTURE })).toEqual({ event_id: id, invitations: 0 });
+    expect(await box.updateEvent({ event_id: id, title: "Renamed for me", ...FUTURE })).toEqual({ event_id: id, invitations: 0, deduplicated: false });
     expect(await box.deleteEvent({ event_ids: [id, other] })).toEqual({
       deleted: 2,
       not_deleted: [],
@@ -634,8 +647,8 @@ describe("a meeting someone else organized", () => {
       organizerCalendarAddress: `MAILTO:${A.toUpperCase()}`,
       participants: { p: { calendarAddress: `mailto:${OK}` } },
     }).id;
-    expect(await box.updateEvent({ event_id: none, title: "x" })).toEqual({ event_id: none, invitations: 1 });
-    expect(await box.updateEvent({ event_id: mine, title: "y", participants: [{ email: OK }] })).toEqual({ event_id: mine, invitations: 1 });
+    expect(await box.updateEvent({ event_id: none, title: "x" })).toEqual({ event_id: none, invitations: 1, deduplicated: false });
+    expect(await box.updateEvent({ event_id: mine, title: "y", participants: [{ email: OK }] })).toEqual({ event_id: mine, invitations: 1, deduplicated: false });
     expect(await box.deleteEvent({ event_ids: [none, mine] })).toMatchObject({ deleted: 2, cancellations: 2 });
     expect(fake.schedulingMessages(A).map((m) => m.kind)).toEqual(["REQUEST", "REQUEST", "CANCEL", "CANCEL"]);
     expect(await sendsCounted(stub)).toBe(4);
@@ -679,7 +692,7 @@ describe("replacing participants keeps what kept attendees answered", () => {
     const input = { event_id: id, participants: [{ email: "OK@test.example" }, { email: BOSS, name: "Boss" }, { email: STRANGER }] };
     expect(
       await opsWith(stub, { ENVIRONMENT: "production" }, (ops) => ops.collab({ accountId, email: A }, { op: "update_event", input })),
-    ).toEqual({ ok: true, value: { event_id: id, invitations: 3 } });
+    ).toEqual({ ok: true, value: { event_id: id, invitations: 3, deduplicated: false } });
     const people = Object.values(fake.eventsOf(A)[0]!.participants as Record<string, Record<string, unknown>>);
     expect(people.find((p) => p.calendarAddress === "mailto:OK@test.example")).toEqual({
       "@type": "Participant",
@@ -713,7 +726,7 @@ describe("one counted send covers at most 10 addresses", () => {
     const caller = { accountId, email: A };
     expect(await opsWith(stub, production, (ops) => ops.collab(caller, { op: "update_event", input: { event_id: id, title: "Moved" } }))).toEqual({
       ok: true,
-      value: { event_id: id, invitations: 15 },
+      value: { event_id: id, invitations: 15, deduplicated: false },
     });
     expect(await sendsCounted(stub)).toBe(2);
     await countSends(stub, MAIL_LIMITS.sendsPerDay - 3);

@@ -259,7 +259,9 @@ like mail: reading, creating, changing and deleting.
   deleted; when the second request fails after the first went through, the result still
   reports the first (its cancellations) and names the second's ids in `not_deleted`.
   Non-notifying writes cost nothing beyond the call. The tools and the audit rows report how
-  many attendees were notified, never an address.
+  many attendees were notified, never an address. A deduplicated create or update answers with
+  the first call's result and `deduplicated: true`; its audit row counts 0, because that call
+  notified nobody.
 - **One event write at a time.** An update reads the event, decides and then writes; another
   write in between could change who would be notified (a write decided as "notifies only
   allow-listed people" would then notify someone else). So `create_event`, `update_event` and

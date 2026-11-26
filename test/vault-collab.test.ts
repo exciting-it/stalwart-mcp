@@ -233,6 +233,7 @@ describe("writing contacts and events through the vault", () => {
     expect(await box.updateEvent({ event_id: created.event_id, location: "Room 2", recurrence: { frequency: "weekly", count: 4 } })).toEqual({
       event_id: created.event_id,
       invitations: 0,
+      deduplicated: false,
     });
     expect((await box.readEvent({ event_id: created.event_id })).event).toMatchObject({
       title: "Standup",

@@ -240,19 +240,17 @@ export class MailboxOperations {
 
   /**
    * A create or update identical to a notifying one on its way upstream shares that one's result,
-   * as an identical send does; any other waits for its turn in the event-write queue.
+   * marked `deduplicated`, as an identical send does; any other waits for its turn in the
+   * event-write queue.
    */
-  async #sharedOrQueued<T>(
+  async #sharedOrQueued<T extends { deduplicated: boolean }>(
     op: "create_event" | "update_event",
     input: CreateEventInputT | UpdateEventInputT,
     task: () => Promise<T>,
   ): Promise<T> {
     const fingerprint = await eventWriteFingerprint(op, input);
     const inFlight = this.#sendsInFlight.get(fingerprint) as Promise<T> | undefined;
-    if (inFlight) {
-      const first = await inFlight;
-      return (op === "create_event" ? { ...first, deduplicated: true } : first) as T;
-    }
+    if (inFlight) return { ...(await inFlight), deduplicated: true };
     return this.#oneEventWriteAtATime(task);
   }
 
@@ -295,15 +293,19 @@ export class MailboxOperations {
     const notice = updateNotice(input, audience, clock.now());
     if (!notice.notify) {
       const updated = await this.#collabUpstream(accountId, (a) => a.updateEvent(input, false, audience));
-      return { ...updated, invitations: 0 };
+      return { ...updated, invitations: 0, deduplicated: false };
     }
     this.#requireAllowed(notice.addresses);
     const invitations = notice.addresses.length;
     return this.#exactlyOnce<UpdateEventResultT>(await eventWriteFingerprint("update_event", input), sendsFor(notice), {
-      send: async () => ({ ...(await this.#collabUpstream(accountId, (a) => a.updateEvent(input, true, audience))), invitations }),
+      send: async () => ({
+        ...(await this.#collabUpstream(accountId, (a) => a.updateEvent(input, true, audience))),
+        invitations,
+        deduplicated: false,
+      }),
       record: (r) => ({ message_id: r.event_id, recipients: r.invitations }),
-      again: (r) => r,
-      recorded: (sent) => ({ event_id: sent.message_id, invitations: sent.recipients }),
+      again: (r) => ({ ...r, deduplicated: true }),
+      recorded: (sent) => ({ event_id: sent.message_id, invitations: sent.recipients, deduplicated: true }),
     });
   }
 

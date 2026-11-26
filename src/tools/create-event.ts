@@ -12,5 +12,6 @@ export const createEvent = defineTool({
   output: CreateEventResult,
   run: (mailbox, input) => mailbox.createEvent(input),
   count: () => 1,
-  recipients: (result) => result.invitations,
+  // A deduplicated answer describes the first event; this call made the server notify nobody.
+  recipients: (result) => (result.deduplicated ? 0 : result.invitations),
 });
