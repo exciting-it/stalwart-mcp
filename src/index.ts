@@ -6,7 +6,7 @@ import { handleApprove } from "./oauth/approve";
 import { handleAuthorize } from "./oauth/authorize";
 import { handleCallback } from "./oauth/callback";
 import { baseOAuthOptions, oauthApi } from "./oauth/options";
-import { configProblem, isEnabled, publicOrigin } from "./policy/environment";
+import { configProblem, publicOrigin } from "./policy/environment";
 import { toolDeps } from "./tools/deps";
 
 export { MailboxVault } from "./vault/mailbox-vault";
@@ -69,10 +69,9 @@ function providerFor(origin: string): OAuthProvider<Env> {
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-    if (!isEnabled(env)) return new Response("Service unavailable", { status: 503 });
     const problem = configProblem(env);
     if (problem !== null) {
-      // A missing or malformed address closes the worker instead of guessing one.
+      // A missing or malformed setting closes the worker instead of guessing one.
       console.error("config_error", problem);
       return new Response("Service unavailable", { status: 503 });
     }

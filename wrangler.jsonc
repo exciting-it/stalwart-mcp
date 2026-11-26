@@ -8,95 +8,63 @@
   // Invocation logs record request URLs, i.e. `/callback?code=…&state=…` and `/approve?h=…`:
   // off. The worker's own `console` output (fixed markers only) stays on.
   "observability": { "enabled": true, "logs": { "invocation_logs": false } },
-  // Fonts, artwork and icon of the approval page (`public/brand`, see src/oauth/theme.ts).
-  // Cloudflare serves these files itself, before the worker runs: they are public, hold no
-  // data, and stay reachable when the worker is switched off.
+  // Fonts, artwork and icon of the pages shown in the browser (`public/brand`, see
+  // src/oauth/theme.ts). Cloudflare serves these files itself, before the worker runs: they are
+  // public and hold no data.
   "assets": { "directory": "./public" },
-  // DEPLOYING YOUR OWN: change `routes` and the three addresses and names in `vars`, here and
-  // in `env.staging` below. Everything else can stay as it is.
+  // DEPLOYING YOUR OWN: change `routes`, the addresses and the name in `vars`, and the two
+  // storage ids below. Everything else can stay as it is.
   "routes": [{ "pattern": "mail-mcp.exciting-it.com", "custom_domain": true }],
   // `vars` holds only what is fixed for a deployment and never tuned while it runs:
-  //   ENVIRONMENT      "production" or "staging" (staging only serves allow-listed mailboxes)
+  //   ENVIRONMENT      "production". ("staging" makes a test deployment that only serves
+  //                    allow-listed mailboxes; see "Trying it first" in the README.)
   //   STALWART_ORIGIN  the Stalwart server, an https origin
-  //   PUBLIC_ORIGIN    this worker's own https origin (production only; must match `routes`)
+  //   PUBLIC_ORIGIN    this worker's own https origin (must match `routes`)
   //   CONNECTOR_NAME   the name AI tools show for the connector (optional)
-  //   FEATURES         what the connector offers beyond mail: "contacts", "calendars" or
-  //                    "contacts,calendars" (optional; without it only mail). Each area makes
-  //                    the worker ask Stalwart for one more scope, so the OAuth client there
-  //                    must allow it BEFORE this is deployed, or every sign-in fails.
   //   DATA_JURISDICTION  restricts where the mailbox vaults run and store data: "eu", "us" or
   //                    "fedramp" (optional). Choose it BEFORE the first sign-in: vault ids
   //                    depend on it, so a later change orphans every stored connection.
-  // A variable declared here is rewritten on every deploy. What an operator changes while the
-  // worker runs lives in the Cloudflare dashboard instead, and `keep_vars` keeps it there:
-  //   MAIL_MCP_ENABLED             off switch; the worker answers 503 unless exactly "true"
-  //   STALWART_OAUTH_CLIENT_ID     OAuth client id of this worker at Stalwart
-  //   SIGNIN_ALLOWLIST             staging only: mailboxes allowed to sign in (comma-separated)
-  //   SEND_ALLOWLIST               staging only: recipients mail may be sent to (comma-separated)
-  // Secrets (`wrangler secret put`, separate per environment):
-  //   STALWART_OAUTH_CLIENT_SECRET OAuth client secret at Stalwart
+  // A variable declared here is rewritten on every deploy. What an operator sets or changes
+  // while the worker runs lives in the Cloudflare dashboard instead, and `keep_vars` keeps it
+  // there:
+  //   STALWART_OAUTH_CLIENT_ID     OAuth client id of this worker at Stalwart (required)
+  //   DISABLED_FEATURES            areas to switch off: "contacts", "calendars" or
+  //                                "contacts,calendars" (optional; without it mail, contacts
+  //                                and calendars are all offered)
+  // Secrets (`wrangler secret put`, or the dashboard):
+  //   STALWART_OAUTH_CLIENT_SECRET OAuth client secret at Stalwart (required)
   //   TOKEN_ENC_KEY                base64 of 32 random bytes; encrypts stored mailbox tokens
+  //                                (required)
+  // Until the client id and both secrets are set, every endpoint answers 503.
   "vars": {
     "ENVIRONMENT": "production",
     "STALWART_ORIGIN": "https://mail.exciting-it.com",
     "PUBLIC_ORIGIN": "https://mail-mcp.exciting-it.com",
     "CONNECTOR_NAME": "exciting IT Mail",
-    // FEATURES is not set for production yet: contacts and calendars go on here once the live
-    // checks have passed on staging and production's OAuth client allows the two scopes.
     "DATA_JURISDICTION": "eu"
   },
-  // Production's KV and D1 do not exist yet and carry no ids. Create them once (README,
-  // "Deploying your own"), with a jurisdiction if you need one (it can only be set at
-  // creation), and put the ids here. The ids are not secrets.
-  "kv_namespaces": [{ "binding": "OAUTH_KV" }],
-  "d1_databases": [{ "binding": "DB", "database_name": "stalwart-mcp", "migrations_dir": "migrations" }],
+  // Create both once (README, "Deploying your own"), with a jurisdiction if you need one (it
+  // can only be set at creation), and put the ids here. The ids are not secrets.
+  "kv_namespaces": [{ "binding": "OAUTH_KV", "id": "bd3e1c010ab84025bb1e3fd67ee7bc4e" }],
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "stalwart-mcp",
+      "database_id": "404b585c-6a33-4d22-87c0-baba2fe6b6b6",
+      "migrations_dir": "migrations"
+    }
+  ],
+  // Per source address, on the endpoints that need no sign-in (src/index.ts). `namespace_id` is
+  // a number you choose: it names one counter set within your Cloudflare account, so the three
+  // limiters must differ from each other and from the limiters of your other workers.
   "ratelimits": [
     { "name": "AUTH_RATE_LIMITER", "namespace_id": "1101", "simple": { "limit": 30, "period": 60 } },
     { "name": "REGISTER_RATE_LIMITER", "namespace_id": "1102", "simple": { "limit": 20, "period": 60 } },
     { "name": "TOKEN_RATE_LIMITER", "namespace_id": "1103", "simple": { "limit": 120, "period": 60 } }
   ],
+  // Daily cleanup: audit rows older than 90 days and expired OAuth records.
   "triggers": { "crons": ["17 3 * * *"] },
   // One MailboxVault per Stalwart account id: the only holder of that mailbox's Stalwart tokens.
-  // `migrations` is inherited by env.staging; the binding itself is not and is repeated there.
   "durable_objects": { "bindings": [{ "name": "MAILBOX_VAULT", "class_name": "MailboxVault" }] },
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["MailboxVault"] }],
-
-  // --- STAGING: deploys as the SEPARATE worker "stalwart-mcp-staging" ---
-  // Bindings and vars are not inherited, so staging declares its own. It never claims the
-  // production domain and is reachable only via its *.workers.dev URL. It talks to the same
-  // Stalwart server as production; the allow-lists are what keeps it away from real mailboxes.
-  // Staging answers under the origin of the request and has no PUBLIC_ORIGIN; wrangler's
-  // warning that it is "missing" in env.staging.vars is expected.
-  "env": {
-    "staging": {
-      "name": "stalwart-mcp-staging",
-      "workers_dev": true,
-      "routes": [],
-      "observability": { "enabled": true, "logs": { "invocation_logs": false } },
-      "vars": {
-        "ENVIRONMENT": "staging",
-        "STALWART_ORIGIN": "https://mail.exciting-it.com",
-        "CONNECTOR_NAME": "exciting IT Mail (staging)",
-        "FEATURES": "contacts,calendars",
-        "DATA_JURISDICTION": "eu"
-      },
-      // Both created with `--jurisdiction eu` (it can only be set at creation).
-      "kv_namespaces": [{ "binding": "OAUTH_KV", "id": "fb0e1cc95ae944ff83795c9bf85f33cb" }],
-      "d1_databases": [
-        {
-          "binding": "DB",
-          "database_name": "stalwart-mcp-staging",
-          "database_id": "9d6ed4cf-37eb-4b74-b185-8fac529faf9b",
-          "migrations_dir": "migrations"
-        }
-      ],
-      "ratelimits": [
-        { "name": "AUTH_RATE_LIMITER", "namespace_id": "2101", "simple": { "limit": 30, "period": 60 } },
-        { "name": "REGISTER_RATE_LIMITER", "namespace_id": "2102", "simple": { "limit": 20, "period": 60 } },
-        { "name": "TOKEN_RATE_LIMITER", "namespace_id": "2103", "simple": { "limit": 120, "period": 60 } }
-      ],
-      "triggers": { "crons": ["17 3 * * *"] },
-      "durable_objects": { "bindings": [{ "name": "MAILBOX_VAULT", "class_name": "MailboxVault" }] }
-    }
-  }
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["MailboxVault"] }]
 }

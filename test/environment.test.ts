@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
   configProblem,
-  isEnabled,
   isProduction,
   publicOrigin,
   recipientsAllowed,
@@ -61,7 +60,13 @@ describe("environment policy", () => {
   });
 
   it("names the setting that keeps the worker from serving", () => {
-    const ok = { STALWART_ORIGIN: "https://mail.example", PUBLIC_ORIGIN: "https://connector.example" };
+    const required = {
+      STALWART_OAUTH_CLIENT_ID: "client",
+      STALWART_OAUTH_CLIENT_SECRET: "secret",
+      TOKEN_ENC_KEY: "key",
+    };
+    const ok = { STALWART_ORIGIN: "https://mail.example", PUBLIC_ORIGIN: "https://connector.example", ...required };
+    const staging = { ENVIRONMENT: "staging", STALWART_ORIGIN: "https://mail.example", ...required } as const;
     expect(configProblem({ ENVIRONMENT: "production", ...ok })).toBeNull();
     expect(configProblem({ ENVIRONMENT: "production", ...ok, STALWART_ORIGIN: "http://mail.example" })).toBe(
       "STALWART_ORIGIN",
@@ -71,23 +76,35 @@ describe("environment policy", () => {
     );
     expect(configProblem({ ENVIRONMENT: "production", ...ok, PUBLIC_ORIGIN: undefined })).toBe("PUBLIC_ORIGIN");
     // Staging answers under the request origin and needs no PUBLIC_ORIGIN.
-    expect(configProblem({ ENVIRONMENT: "staging", STALWART_ORIGIN: "https://mail.example" })).toBeNull();
-    expect(configProblem({ ENVIRONMENT: "staging", STALWART_ORIGIN: "" })).toBe("STALWART_ORIGIN");
-    // The same for the areas beyond mail.
-    expect(configProblem({ ENVIRONMENT: "production", ...ok, FEATURES: "contacts,calendars" })).toBeNull();
-    expect(configProblem({ ENVIRONMENT: "production", ...ok, FEATURES: "contacts,files" })).toBe("FEATURES");
+    expect(configProblem(staging)).toBeNull();
+    expect(configProblem({ ...staging, STALWART_ORIGIN: "" })).toBe("STALWART_ORIGIN");
+    // Every area is on unless it is switched off; a name the worker does not know closes it.
+    expect(configProblem({ ENVIRONMENT: "production", ...ok, DISABLED_FEATURES: "" })).toBeNull();
+    expect(configProblem({ ENVIRONMENT: "production", ...ok, DISABLED_FEATURES: "contacts,calendars" })).toBeNull();
+    expect(configProblem({ ENVIRONMENT: "production", ...ok, DISABLED_FEATURES: "contacts,files" })).toBe(
+      "DISABLED_FEATURES",
+    );
     // A jurisdiction is optional, but a mistyped one closes the worker.
     expect(configProblem({ ENVIRONMENT: "production", ...ok, DATA_JURISDICTION: "eu" })).toBeNull();
     expect(configProblem({ ENVIRONMENT: "production", ...ok, DATA_JURISDICTION: "" })).toBeNull();
     expect(configProblem({ ENVIRONMENT: "production", ...ok, DATA_JURISDICTION: "EU" })).toBe("DATA_JURISDICTION");
-    expect(configProblem({ ENVIRONMENT: "staging", STALWART_ORIGIN: "https://mail.example", DATA_JURISDICTION: "europe" })).toBe(
-      "DATA_JURISDICTION",
-    );
+    expect(configProblem({ ...staging, DATA_JURISDICTION: "europe" })).toBe("DATA_JURISDICTION");
   });
 
-  it.each(["false", "TRUE", "1", "", undefined])("is disabled for MAIL_MCP_ENABLED=%j", (v) =>
-    expect(isEnabled({ MAIL_MCP_ENABLED: v })).toBe(false),
+  it.each(["STALWART_OAUTH_CLIENT_ID", "STALWART_OAUTH_CLIENT_SECRET", "TOKEN_ENC_KEY"] as const)(
+    "stays closed until %s is set",
+    (name) => {
+      const ok = {
+        ENVIRONMENT: "production",
+        STALWART_ORIGIN: "https://mail.example",
+        PUBLIC_ORIGIN: "https://connector.example",
+        STALWART_OAUTH_CLIENT_ID: "client",
+        STALWART_OAUTH_CLIENT_SECRET: "secret",
+        TOKEN_ENC_KEY: "key",
+      } as const;
+      for (const value of [undefined, "", "  "]) {
+        expect(configProblem({ ...ok, [name]: value as never })).toBe(name);
+      }
+    },
   );
-
-  it("is enabled for exactly 'true'", () => expect(isEnabled({ MAIL_MCP_ENABLED: "true" })).toBe(true));
 });

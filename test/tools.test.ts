@@ -16,7 +16,6 @@ import { createFakeMailStore, type FakeMailStore } from "./fake-mailbox";
 
 let store: FakeMailStore;
 let audits: AuditEntry[];
-let enabled: boolean;
 let blocked: () => Promise<boolean>;
 let audit: (e: AuditEntry) => Promise<void>;
 let deps: ToolDeps;
@@ -25,13 +24,11 @@ let grantA: Grant;
 beforeEach(() => {
   store = createFakeMailStore();
   audits = [];
-  enabled = true;
   blocked = async () => false;
   audit = async (e) => {
     audits.push(e);
   };
   deps = {
-    enabled: () => enabled,
     blocked: () => blocked(),
     mailbox: (g) => store.mailboxFor(g.accountId),
     audit: (e) => audit(e),
@@ -201,26 +198,29 @@ describe("tools", () => {
     expect(audits.at(-1)?.messageId).toBeUndefined();
   });
 
-  it("answers disabled and blocked before the mailbox is touched", async () => {
-    enabled = false;
-    expect(text(await byName("list_mailboxes").execute(deps, grantA, {}))).toBe(MAIL_ERROR_MESSAGES.disabled);
-    enabled = true;
+  it("answers blocked before the mailbox is touched", async () => {
     blocked = async () => true;
+    expect(text(await byName("list_mailboxes").execute(deps, grantA, {}))).toBe(MAIL_ERROR_MESSAGES.blocked);
     expect(text(await byName("send_mail").execute(deps, grantA, validInputFor(byName("send_mail"))))).toBe(
       MAIL_ERROR_MESSAGES.blocked,
     );
     expect(store.calls).toHaveLength(0);
     expect(audits.map((a) => [a.outcome, a.errorCode])).toEqual([
-      ["refused", "disabled"],
+      ["refused", "blocked"],
       ["refused", "blocked"],
     ]);
   });
 
-  it("validates the input before it checks the switch", async () => {
-    enabled = false;
+  it("validates the input before it checks the block list", async () => {
+    let asked = 0;
+    blocked = async () => {
+      asked++;
+      return true;
+    };
     expect(text(await byName("read_thread").execute(deps, grantA, { thread_id: "../x" }))).toBe(
       MAIL_ERROR_MESSAGES.invalid_input,
     );
+    expect(asked).toBe(0);
   });
 
   it("fails closed when the block check itself fails", async () => {

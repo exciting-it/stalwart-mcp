@@ -4,8 +4,8 @@ A remote MCP server for [Stalwart](https://stalw.art) mailboxes, running on Clou
 
 A mailbox user adds the connector's address in an AI tool (Claude and others), signs in with the
 mailbox login on the mail server's own page, and the tool can then list folders, search, read
-conversations, write drafts and send mail in that one mailbox. If the deployment switches it on,
-the tool can also read and write that mailbox's contacts and calendar, including events with
+conversations, write drafts and send mail in that one mailbox. Unless the deployment switches
+that off, the tool can also read and write that mailbox's contacts and calendar, including events with
 participants, whom the mail server then invites by email. The worker sits between the AI
 tool and Stalwart's JMAP API: it is an OAuth server toward the tool and an OAuth client toward
 Stalwart. The tool never receives a Stalwart token.
@@ -43,7 +43,8 @@ Why it is built this way, and what its security rests on: [docs/design.md](docs/
 | `update_event` | Change an event or one occurrence; participants get an update by email (needs `calendars`) |
 | `delete_event` | Delete up to 50 events or occurrences **for good**; participants of the mailbox's own events get a cancellation by email (needs `calendars`) |
 
-The contacts and calendar tools exist only when the deployment names their area in `FEATURES`
+The contacts and calendar tools exist unless the deployment switches their area off with
+`DISABLED_FEATURES`
 (see [Contacts and calendars](#contacts-and-calendars)). Deleting a contact or an event is
 permanent: JMAP has no trash for them. An event write that involves participants makes the mail
 server send them mail (invitations, updates, cancellations), and each such write counts as one
@@ -115,64 +116,72 @@ Constants live in `MAIL_LIMITS` in `src/mail.ts` and, for contacts and calendars
 You need a Stalwart server with its OAuth server and JMAP reachable over public HTTPS, admin
 access to it, a Cloudflare account, and [Bun](https://bun.sh).
 
-1. **Addresses.** In `wrangler.jsonc` change `routes` and the `vars` block, at the top level
-   (production) and in `env.staging`:
+1. **Addresses.** In `wrangler.jsonc` change `routes` and the `vars` block:
    - `STALWART_ORIGIN`: your Stalwart server as an https origin, written the plain way:
      lower case, no path, no `:443` (`https://mail.example.com`).
-   - `PUBLIC_ORIGIN`: the address the connector is served under in production, written the
-     same way. It must match `routes`; production answers under no other host.
+   - `PUBLIC_ORIGIN`: the address the connector is served under, written the same way. It
+     must match `routes`; the worker answers under no other host.
    - `CONNECTOR_NAME`: the name AI tools show (optional, default "Stalwart Mail").
-   - `FEATURES`: what the connector offers beyond mail (optional); see "Contacts and
-     calendars" below before you set it.
-2. **OAuth client on Stalwart**, one per environment: confidential, grant types authorization
-   code and refresh, scope mail (plus the scopes of the areas you switch on, see
+   - `DATA_JURISDICTION`: optional; decide before the first sign-in (see
+     [Where the data lives](#where-the-data-lives)).
+2. **OAuth client on Stalwart**: confidential, grant types authorization code and refresh,
+   scopes mail, contacts and calendars (without the scope of an area you switch off, see
    [Contacts and calendars](#contacts-and-calendars)), exactly one redirect URI
-   `<origin of the worker>/callback`.
-3. **Storage for staging.** Create the KV namespace and the D1 database once and put their ids
-   into `env.staging` in `wrangler.jsonc` (they are not secrets):
-   `bunx wrangler kv namespace create stalwart-mcp-staging-oauth` and
-   `bunx wrangler d1 create stalwart-mcp-staging`. If the data has to stay in a region, add
+   `<PUBLIC_ORIGIN>/callback`.
+3. **Storage.** Create the KV namespace and the D1 database once and put their ids into
+   `wrangler.jsonc` (they are not secrets): `bunx wrangler kv namespace create stalwart-mcp-oauth`
+   and `bunx wrangler d1 create stalwart-mcp`. If the data has to stay in a region, add
    `--jurisdiction eu` to both now; it cannot be added later (see "Where the data lives").
-   Then apply the migration: `bun run migrate:staging`.
+   Then apply the migration: `bun run migrate`.
 4. **Connect the repository** (Cloudflare dashboard, Workers & Pages, import a repository):
-   worker name `stalwart-mcp-staging`, deploy command `bun run deploy:staging`. From then on
-   every push to the connected branch deploys; nothing is uploaded by hand. The staging and the
-   production worker each get their own connection to the same repository.
-5. **Secrets**, per environment (`bunx wrangler secret put <NAME> --env staging`):
+   worker name `stalwart-mcp` (the `name` in `wrangler.jsonc`), deploy command
+   `bun run deploy`. From then on every push to the connected branch deploys; nothing is
+   uploaded by hand.
+5. **Secrets** (in the dashboard, or `bunx wrangler secret put <NAME>`):
    - `STALWART_OAUTH_CLIENT_SECRET`: the client secret from step 2.
    - `TOKEN_ENC_KEY`: 32 random bytes, base64 (`openssl rand -base64 32`). Changing it later
      makes every stored mailbox token unreadable: every mailbox is disconnected.
-6. **Dashboard variables**, per environment (kept across deploys by `keep_vars`):
+6. **Dashboard variables** (kept across deploys by `keep_vars`):
    - `STALWART_OAUTH_CLIENT_ID`: the client id from step 2.
-   - `SIGNIN_ALLOWLIST`: comma-separated mailbox addresses that may connect (staging).
-   - `SEND_ALLOWLIST`: comma-separated addresses `send_mail` may deliver to (staging).
-   - `MAIL_MCP_ENABLED`: set to `true` last. Anything else makes every endpoint answer 503.
+   - `DISABLED_FEATURES`: optional, see [Contacts and calendars](#contacts-and-calendars).
+
+   Until the client id and both secrets are set, every endpoint answers 503, with
+   `config_error <setting>` in the worker's logs. A freshly created worker therefore serves
+   nothing, and it opens by itself once the last of the three is in place.
 7. Check that the Durable Object migration `v1` was applied (the `MailboxVault` class exists
    with SQLite storage), then work through the live checks below with a test mailbox.
-8. Production: the same steps for the top-level environment (`stalwart-mcp`,
-   `bun run migrate:production`, deploy command `bun run deploy:production`,
-   `--env=""` for secrets), with its own OAuth client, secrets and variables. The allow-lists
-   are not used in production.
 
-Outside production both allow-lists are enforced in code. If a list is empty, nobody can
-connect and nothing is sent. This is what makes it safe to point staging at your one, real
-mail server.
+### Trying it first
+
+Few people run a second mail server, so a trial usually talks to the real one. For that, set
+`ENVIRONMENT` to `staging`, for example in a second worker with its own name, storage and OAuth
+client. A staging deployment answers under the origin of the request (its `workers.dev`
+address will do) and needs no `PUBLIC_ORIGIN`, and it obeys two more dashboard variables:
+
+- `SIGNIN_ALLOWLIST`: comma-separated mailbox addresses that may connect.
+- `SEND_ALLOWLIST`: comma-separated addresses mail may go to. This covers `send_mail` and the
+  participants of every event write that makes the mail server notify.
+
+Both lists are enforced in code. If a list is empty, nobody can connect and nothing is sent.
+This is what makes it safe to point a trial at your one, real mail server. In production both
+lists are ignored.
 
 ### Contacts and calendars
 
-Mail is always offered. Contacts and calendars are off until you name them in `FEATURES`, in the
-`vars` block of `wrangler.jsonc` next to the addresses (it is fixed per deployment, not tuned
-while it runs): `contacts`, `calendars` or `contacts,calendars` (spaces are ignored; empty
-or unset means mail only). Any other name closes the worker with 503 and
-`config_error FEATURES` in its logs, so a typo never quietly asks Stalwart for more or less.
+Mail is always offered, and so are contacts and calendars unless you switch them off with the
+dashboard variable `DISABLED_FEATURES`: `contacts`, `calendars` or `contacts,calendars` (spaces
+are ignored; empty or unset switches nothing off). Any other name, `mail` included, closes the
+worker with 503 and `config_error DISABLED_FEATURES` in its logs, so a typo never quietly asks
+Stalwart for more than you meant. An area that is off has no tools, is not asked of Stalwart
+and is not named on the approval page.
 
-- **Scopes.** Each area makes the worker ask Stalwart for one more scope at sign-in:
+- **Scopes.** Each area that is on makes the worker ask Stalwart for one more scope at sign-in:
   `urn:ietf:params:oauth:scope:contacts` and `urn:ietf:params:oauth:scope:calendars`
   (`STALWART.scope` in `src/stalwart/endpoints.ts`). The OAuth client on Stalwart has to be
   allowed to grant them. The approval page names each area, so the user knows what the tool
   gets.
-- **Mailboxes that are already connected must connect again.** Their Stalwart token was issued
-  with the mail scope only. Until then the new tools answer with the fixed message "This
+- **After switching an area back on, connected mailboxes must connect again.** Their Stalwart
+  token was issued without that scope. Until then the new tools answer with the fixed message "This
   connection does not include that permission. Remove the connector in your AI tool and connect
   the mailbox again." (`not_granted`, audited as `refused`), and send nothing to Stalwart.
   Mail keeps working.
@@ -304,7 +313,7 @@ These need the OAuth client and a test mailbox on your server:
 - [ ] Remove the application and reconnect with two AI tools: do the earlier tools regain access (see "Known limits")?
 - [ ] How long an issued Stalwart access token keeps working after the application is removed, and after the OAuth client is deleted.
 
-If `FEATURES` is set, also these (the tests cannot tell, because the stand-in is written from the
+For contacts and calendars (unless both are switched off), also these (the tests cannot tell, because the stand-in is written from the
 same assumptions as the code):
 
 - [ ] Stalwart accepts the two extra scope names at sign-in (`urn:ietf:params:oauth:scope:contacts`, `urn:ietf:params:oauth:scope:calendars`), its consent page names them, and the OAuth client is allowed to grant them. Until this passes on staging, leave `FEATURES` out of production: a scope the client may not grant fails every sign-in, mail included.
@@ -360,12 +369,7 @@ Repeat them after a Stalwart upgrade.
 
 ## Runbook
 
-**Switch everything off.** Set `MAIL_MCP_ENABLED` to anything but `true` in the dashboard. Every
-endpoint answers 503: no request is served and no tool call reaches Stalwart. Only the static
-brand files under `/brand/` stay reachable; they hold no data. The vaults'
-cleanup alarms and the daily purge still run.
-
-**Block one mailbox.** In the D1 database (`stalwart-mcp`, or `stalwart-mcp-staging`):
+**Block one mailbox.** In the D1 database (`stalwart-mcp`):
 
 ```sql
 INSERT INTO blocked_accounts (key, reason, created_at)
@@ -379,10 +383,19 @@ A blocked mailbox cannot sign in and every tool call is refused.
 
 **Unblock.** `DELETE FROM blocked_accounts WHERE key = '<the same key>';`
 
-**End all access at once.** Use the off switch. Deleting the OAuth client on Stalwart does
-**not** clear connections or worker grants: a deleted client answers `invalid_client`, which the
-worker deliberately does not treat as a dead mailbox grant (otherwise one wrong secret would
-wipe every mailbox). Tool calls then fail with a temporary error until the client exists again.
+**End all access at once.** There is no switch for it; pick by how final it should be:
+
+- *Stop serving, keep the connections:* remove the custom domain from the worker in the
+  Cloudflare dashboard (Settings, Domains & Routes). No request reaches the worker; nothing
+  stored changes. The next deploy puts the domain back, so pause the build connection too.
+- *Cut every mailbox off:* replace `TOKEN_ENC_KEY`. Every stored mailbox token becomes
+  unreadable, so every tool call fails until the user connects the mailbox again. This cannot
+  be undone.
+
+Deleting the OAuth client on Stalwart does **not** clear connections or worker grants: a
+deleted client answers `invalid_client`, which the worker deliberately does not treat as a dead
+mailbox grant (otherwise one wrong secret would wipe every mailbox). Tool calls then fail with
+a temporary error until the client exists again.
 
 **A user disconnects.** Any one of: remove the connector in the AI tool; remove the application
 under Connected Applications in their Stalwart account; change the mailbox password.
@@ -396,17 +409,18 @@ The worker's `console` output holds only fixed markers such as `oauth_error <cod
 `config_error <setting>`. Invocation logs are switched off in `wrangler.jsonc`, because they
 record request URLs, and `/callback?code=…&state=…` and `/approve?h=…` carry codes and handles.
 
-**Everything answers 503 although the switch is on.** Look for `config_error` in the worker's
-logs: `STALWART_ORIGIN` or `PUBLIC_ORIGIN` is missing or not an https origin, or
-`DATA_JURISDICTION` is not one of Cloudflare's. In production a
-request under a host other than `PUBLIC_ORIGIN` answers 404.
+**Everything answers 503.** Look for `config_error <setting>` in the worker's logs:
+`STALWART_ORIGIN` or `PUBLIC_ORIGIN` is missing or not an https origin, `DATA_JURISDICTION` is
+not one of Cloudflare's, `DISABLED_FEATURES` names something unknown, or
+`STALWART_OAUTH_CLIENT_ID`, `STALWART_OAUTH_CLIENT_SECRET` or `TOKEN_ENC_KEY` is not set. In
+production a request under a host other than `PUBLIC_ORIGIN` answers 404.
 
 ## Known limits
 
 - Stalwart's `mail` scope also covers IMAP, SMTP submission and ManageSieve and cannot be
   narrowed to JMAP. Anyone who took over this worker and its secrets could act as every
-  connected mailbox. Mitigations: two secrets per environment, the off switch, and deleting the
-  OAuth client.
+  connected mailbox. Mitigations: two secrets per deployment, replacing `TOKEN_ENC_KEY`, and
+  deleting the OAuth client.
 - Contacts and calendars cover the mailbox's own account: no shared address books or calendars
   of other accounts, no free/busy lookups, no answering invitations. Deleting a contact or an
   event cannot be undone. An event update with `participants` replaces the whole list (kept
@@ -430,8 +444,8 @@ request under a host other than `PUBLIC_ORIGIN` answers 404.
 - A contacts or calendar tool that answers "This connection does not include that permission"
   right after a fresh connect does not need another reconnect: the server either does not list
   the capability for that token or does not implement the method (for example another draft of
-  JMAP for Calendars). The connector cannot tell these apart from a connection made before the
-  area was switched on.
+  JMAP for Calendars). The connector cannot tell these apart from a connection made while the
+  area was switched off.
 - The tool-call limit counts per clock minute, not a sliding minute: up to 120 calls can land
   within a few seconds around a minute boundary.
 - `/token` and `/register` are limited per source address. AI vendors call them from shared

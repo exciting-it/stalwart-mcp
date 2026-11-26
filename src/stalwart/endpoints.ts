@@ -31,7 +31,7 @@ export const STALWART = {
   get session(): string {
     return `${stalwartOrigin()}/jmap/session`;
   },
-  /** Mail always; one more scope for each area in `FEATURES`. Never more than the deployment offers. */
+  /** Mail always; one more scope for each area that is on (see `DISABLED_FEATURES`). Never more than the deployment offers. */
   get scope(): string {
     return scopeFor(features());
   },

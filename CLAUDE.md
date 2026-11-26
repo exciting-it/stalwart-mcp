@@ -16,12 +16,14 @@ before changing anything. This is auth and mail code: boring correctness is the 
    in `src/mcp/` or `src/index.ts`.
 4. **Addresses are deployment settings.** The Stalwart server and the worker's own origin come
    from `vars` in `wrangler.jsonc`, never from request input, and a bad value closes the worker.
-5. **Staging safety is enforced in code:** outside production only allow-listed mailboxes
-   connect and mail goes only to allow-listed recipients.
+5. **Trial safety is enforced in code:** outside production (`ENVIRONMENT` other than
+   `production`) only allow-listed mailboxes connect and mail goes only to allow-listed
+   recipients.
 6. **Nothing from a mailbox in logs, audit rows or error messages:** no tokens, subjects,
    bodies, search terms or recipient addresses. Error messages are the fixed texts in
    `src/mail.ts`.
-7. **No secrets in the repo.** Secrets via `wrangler secret`, separate per environment.
+7. **No secrets in the repo.** Secrets via `wrangler secret` or the dashboard, separate per
+   deployment.
 8. **`wrangler.jsonc` is the source of truth for deploy config.** `vars` holds only what is
    fixed per deployment; what an operator tunes while it runs lives in the dashboard.
 9. **No invisible characters in source files.** Write them as `\u` escapes.
@@ -35,11 +37,11 @@ before changing anything. This is auth and mail code: boring correctness is the 
 - Run `bun run test` (Vitest), never `bun test`.
 
 Before "done": `bun run lint && bun run typecheck && bun run test && bun run depgraph && bun run check:brand`, and
-`bunx wrangler deploy --dry-run` for both environments.
+`bunx wrangler deploy --dry-run`.
 
 ## Working style
 
-- Deploys go through Cloudflare Workers Builds (the Git connection runs `bun run deploy:<env>`),
-  never by hand and not from GitHub Actions. Actions is the quality gate.
+- Deploys go through Cloudflare Workers Builds (the Git connection runs `bun run deploy` on
+  every push to `main`), never by hand and not from GitHub Actions. Actions is the quality gate.
 - Nothing against a real mail server and no deploy without the owner's OK.
 - Docs, comments and commit messages in English.

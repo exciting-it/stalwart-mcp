@@ -144,11 +144,11 @@ describe("feature switch", () => {
   const caller = (email: string, accountId: string) => ({ accountId, email });
 
   it.each([
-    ["", "contacts", "not_granted"],
-    ["", "calendars", "not_granted"],
-    ["contacts", "calendars", "not_granted"],
-    ["calendars", "contacts", "not_granted"],
-  ])("FEATURES=%j: %s is %s", async (features, area, expected) => {
+    ["contacts,calendars", "contacts", "not_granted"],
+    ["contacts,calendars", "calendars", "not_granted"],
+    ["calendars", "calendars", "not_granted"],
+    ["contacts", "contacts", "not_granted"],
+  ])("DISABLED_FEATURES=%j: %s is %s", async (disabled, area, expected) => {
     const email = A;
     const { stub, accountId } = await signIn(email);
     const before = jmapPosts().length;
@@ -159,7 +159,7 @@ describe("feature switch", () => {
     const answers = await runInDurableObject(stub, (vault: MailboxVault, state) => {
       const ops = new MailboxOperations({
         sql: state.storage.sql,
-        env: { ...env, FEATURES: features } as Env,
+        env: { ...env, DISABLED_FEATURES: disabled } as Env,
         withAccessToken: (fn) => vault[WITH_ACCESS_TOKEN](fn),
       });
       return Promise.all(requests.map((r) => ops.collab(caller(email, accountId), r)));
@@ -168,25 +168,25 @@ describe("feature switch", () => {
     expect(jmapPosts().length).toBe(before);
   });
 
-  it("serves the area that is switched on", async () => {
+  it("serves the area that is left on", async () => {
     const { stub, accountId } = await signIn(A);
     fake.addContact(A, { name: { full: "Ada" } });
     const answer = await runInDurableObject(stub, (vault: MailboxVault, state) =>
       new MailboxOperations({
         sql: state.storage.sql,
-        env: { ...env, FEATURES: "contacts" } as Env,
+        env: { ...env, DISABLED_FEATURES: "calendars" } as Env,
         withAccessToken: (fn) => vault[WITH_ACCESS_TOKEN](fn),
       }).collab(caller(A, accountId), { op: "search_contacts", input: { limit: 10, offset: 0 } }),
     );
     expect(answer).toMatchObject({ ok: true, value: { contacts: [{ name: "Ada" }] } });
   });
 
-  it("treats an invalid FEATURES setting as no area", async () => {
+  it("treats an invalid DISABLED_FEATURES setting as no area", async () => {
     const { stub, accountId } = await signIn(A);
     const answer = await runInDurableObject(stub, (vault: MailboxVault, state) =>
       new MailboxOperations({
         sql: state.storage.sql,
-        env: { ...env, FEATURES: "contacts,files" } as Env,
+        env: { ...env, DISABLED_FEATURES: "files" } as Env,
         withAccessToken: (fn) => vault[WITH_ACCESS_TOKEN](fn),
       }).collab(caller(A, accountId), { op: "search_contacts", input: { limit: 10, offset: 0 } }),
     );
@@ -277,11 +277,11 @@ describe("writing contacts and events through the vault", () => {
   });
 
   it.each([
-    ["", "contacts"],
-    ["", "calendars"],
-    ["contacts", "calendars"],
-    ["calendars", "contacts"],
-  ])("FEATURES=%j: the write operations of %s are refused and send nothing", async (features, area) => {
+    ["contacts,calendars", "contacts"],
+    ["contacts,calendars", "calendars"],
+    ["calendars", "calendars"],
+    ["contacts", "contacts"],
+  ])("DISABLED_FEATURES=%j: the write operations of %s are refused and send nothing", async (disabled, area) => {
     const { stub, accountId } = await signIn(A);
     const before = jmapPosts().length;
     const requests = WRITES.filter((r) => r.op.endsWith(area === "contacts" ? "_contact" : "_event"));
@@ -289,7 +289,7 @@ describe("writing contacts and events through the vault", () => {
     const answers = await runInDurableObject(stub, (vault: MailboxVault, state) => {
       const ops = new MailboxOperations({
         sql: state.storage.sql,
-        env: { ...env, FEATURES: features } as Env,
+        env: { ...env, DISABLED_FEATURES: disabled } as Env,
         withAccessToken: (fn) => vault[WITH_ACCESS_TOKEN](fn),
       });
       return Promise.all(requests.map((r) => ops.collab(caller(A, accountId), r)));

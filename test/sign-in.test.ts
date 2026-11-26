@@ -506,7 +506,9 @@ describe("sign-in through Stalwart", () => {
     expect(await foreign.text()).not.toContain("attacker.example");
   });
 
-  it("answers the failed page without redirecting when the Stalwart client id is not configured", async () => {
+  // Since the worker stays closed until its client id and secrets are set, this request no
+  // longer reaches the sign-in handler (which used to answer its failed page with 500).
+  it("answers 503 without redirecting when the Stalwart client id is not configured", async () => {
     const ip = "198.51.100.8";
     const clientId = await registerClient("Tool", ip);
     const { challenge } = await pkce();
@@ -517,9 +519,8 @@ describe("sign-in through Stalwart", () => {
       ctx,
     );
     await waitOnExecutionContext(ctx);
-    expect(res.status).toBe(500);
+    expect(res.status).toBe(503);
     expect(res.headers.get("location")).toBeNull();
-    expectHtmlHeaders(res);
   });
 
   it("answers 429 on /authorize beyond 30 requests per minute from one address", async () => {

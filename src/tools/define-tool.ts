@@ -23,7 +23,6 @@ export interface Grant {
 }
 
 export interface ToolDeps {
-  enabled(): boolean;
   blocked(g: Grant): Promise<boolean>;
   mailbox(g: Grant): Mailbox;
   audit(e: AuditEntry): Promise<void>;
@@ -60,7 +59,6 @@ export interface Tool {
 /** Codes that mean "not allowed or not now" rather than "something broke". */
 const REFUSED_CODES: ReadonlySet<MailErrorCode> = new Set<MailErrorCode>([
   "invalid_input",
-  "disabled",
   "blocked",
   "rate_limited",
   "send_limit_reached",
@@ -99,7 +97,6 @@ export function defineTool<I extends z.ZodTypeAny, O extends z.ZodTypeAny>(spec:
   async function attempt(deps: ToolDeps, grant: Grant, input: z.SafeParseReturnType<unknown, z.infer<I>>): Promise<Outcome> {
     try {
       if (!input.success) throw new MailError("invalid_input");
-      if (!deps.enabled()) throw new MailError("disabled");
       if (await deps.blocked(grant)) throw new MailError("blocked");
       const output = spec.output.safeParse(await spec.run(deps.mailbox(grant), input.data, grant));
       if (!output.success) throw new MailError("internal");

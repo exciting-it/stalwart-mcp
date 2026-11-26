@@ -256,7 +256,6 @@ export const MAIL_ERROR_CODES = [
   "reconnect_required",
   "not_granted",
   "blocked",
-  "disabled",
   "no_identity",
   "account_mismatch",
   "mailbox_unsupported",
@@ -280,7 +279,6 @@ export const MAIL_ERROR_MESSAGES: Record<MailErrorCode, string> = {
   not_granted:
     "This connection does not include that permission. Remove the connector in your AI tool and connect the mailbox again.",
   blocked: "This connection has been blocked.",
-  disabled: "The mail connector is disabled for this mailbox.",
   no_identity: "The mailbox has no sending identity.",
   account_mismatch: "The connection does not match this mailbox.",
   mailbox_unsupported: "This mailbox does not support the requested operation.",

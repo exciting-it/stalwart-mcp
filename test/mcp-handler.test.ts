@@ -22,7 +22,6 @@ beforeEach(() => {
     ended.push(token);
   };
   const deps: ToolDeps = {
-    enabled: () => true,
     blocked: async () => false,
     mailbox: (g) => store.mailboxFor(g.accountId),
     audit: async (e) => {

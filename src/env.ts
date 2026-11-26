@@ -14,11 +14,12 @@ export interface Env {
    */
   DATA_JURISDICTION?: string;
   /**
-   * What the connector offers beyond mail: a comma-separated list of `contacts` and `calendars`.
-   * Optional; without it only mail. Each area widens the scope asked of Stalwart, so mailboxes
-   * connected before it was switched on have to connect again to use it.
+   * Areas to switch off: a comma-separated list of `contacts` and `calendars`. Optional; without
+   * it the connector offers mail, contacts and calendars. Each area that is on adds a scope to
+   * what is asked of Stalwart, so a mailbox connected while an area was off has to connect
+   * again to use it.
    */
-  FEATURES?: string;
+  DISABLED_FEATURES?: string;
 
   // --- bindings ---
   OAUTH_KV: KVNamespace;
@@ -30,12 +31,12 @@ export interface Env {
   // `vaultFor` (the only reader) types the stub.
   MAILBOX_VAULT: DurableObjectNamespace;
 
-  // --- secrets ---
+  // --- secrets (the worker answers 503 until both are set) ---
   STALWART_OAUTH_CLIENT_SECRET: string;
   TOKEN_ENC_KEY: string;
 
   // --- dashboard variables ---
-  MAIL_MCP_ENABLED?: string;
+  /** Required like the secrets: the worker answers 503 until it is set. */
   STALWART_OAUTH_CLIENT_ID?: string;
   SIGNIN_ALLOWLIST?: string;
   SEND_ALLOWLIST?: string;

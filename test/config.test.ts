@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { connectorName, dataJurisdiction, features, httpsOrigin, parseFeatures, stalwartOrigin } from "../src/config";
+import { connectorName, dataJurisdiction, enabledAreas, features, httpsOrigin, stalwartOrigin } from "../src/config";
 import { scopeFor, STALWART } from "../src/stalwart/endpoints";
 
 describe("httpsOrigin", () => {
@@ -39,23 +39,23 @@ describe("dataJurisdiction", () => {
   );
 });
 
-describe("parseFeatures", () => {
-  it("is mail only when the setting is missing or empty", () => {
-    expect([...parseFeatures(undefined)!]).toEqual([]);
-    expect([...parseFeatures("")!]).toEqual([]);
+describe("enabledAreas", () => {
+  it("offers every area when nothing is switched off", () => {
+    expect([...enabledAreas(undefined)!].sort()).toEqual(["calendars", "contacts"]);
+    expect([...enabledAreas("")!].sort()).toEqual(["calendars", "contacts"]);
   });
 
   it.each([
-    ["contacts", ["contacts"]],
-    ["calendars", ["calendars"]],
-    ["contacts,calendars", ["contacts", "calendars"]],
-    [" calendars , contacts ", ["calendars", "contacts"]],
-    ["contacts,contacts", ["contacts"]],
-  ])("%j switches on %j", (value, areas) => expect([...parseFeatures(value)!].sort()).toEqual([...areas].sort()));
+    ["contacts", ["calendars"]],
+    ["calendars", ["contacts"]],
+    ["contacts,calendars", []],
+    [" calendars , contacts ", []],
+    ["contacts,contacts", ["calendars"]],
+  ])("DISABLED_FEATURES=%j leaves %j", (value, areas) => expect([...enabledAreas(value)!].sort()).toEqual(areas));
 
-  it.each(["mail", "files", "contacts,", "contacts;calendars", "Contacts", "all", 1, null])(
+  it.each(["mail", "files", "contacts,", "contacts;calendars", "Contacts", "all", "none", 1, null])(
     "%j is refused, not ignored",
-    (value) => expect(parseFeatures(value)).toBeNull(),
+    (value) => expect(enabledAreas(value)).toBeNull(),
   );
 });
 
@@ -85,7 +85,7 @@ describe("deployment settings (vitest.config.ts)", () => {
       token: "https://stalwart.test.example/auth/token",
       revoke: "https://stalwart.test.example/auth/revoke",
       session: "https://stalwart.test.example/jmap/session",
-      // FEATURES in the test config switches both areas on: one scope each, mail first.
+      // Nothing is switched off in the test config: one scope per area, mail first.
       scope:
         "urn:ietf:params:oauth:scope:mail urn:ietf:params:oauth:scope:contacts urn:ietf:params:oauth:scope:calendars",
     });

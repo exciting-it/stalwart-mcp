@@ -1,4 +1,4 @@
-import { dataJurisdiction, httpsOrigin, parseFeatures } from "../config";
+import { dataJurisdiction, enabledAreas, httpsOrigin } from "../config";
 import type { Env } from "../env";
 
 export function isProduction(env: Pick<Env, "ENVIRONMENT">): boolean {
@@ -16,21 +16,30 @@ export function publicOrigin(env: Pick<Env, "ENVIRONMENT" | "PUBLIC_ORIGIN">, re
   return origin;
 }
 
+/** What the worker cannot run without. Until all three are set it serves nothing. */
+const REQUIRED = ["STALWART_OAUTH_CLIENT_ID", "STALWART_OAUTH_CLIENT_SECRET", "TOKEN_ENC_KEY"] as const;
+
+export type ConfigSetting =
+  | "STALWART_ORIGIN"
+  | "PUBLIC_ORIGIN"
+  | "DATA_JURISDICTION"
+  | "DISABLED_FEATURES"
+  | (typeof REQUIRED)[number];
+
 /** The setting that keeps this deployment from serving anything, or null when all are in order. */
-export function configProblem(
-  env: Pick<Env, "ENVIRONMENT" | "STALWART_ORIGIN" | "PUBLIC_ORIGIN" | "DATA_JURISDICTION" | "FEATURES">,
-): "STALWART_ORIGIN" | "PUBLIC_ORIGIN" | "DATA_JURISDICTION" | "FEATURES" | null {
+export function configProblem(env: Pick<Env, "ENVIRONMENT" | ConfigSetting>): ConfigSetting | null {
   if (httpsOrigin(env.STALWART_ORIGIN) === null) return "STALWART_ORIGIN";
   if (isProduction(env) && httpsOrigin(env.PUBLIC_ORIGIN) === null) return "PUBLIC_ORIGIN";
   // A mistyped jurisdiction must not quietly become "no restriction".
   if (dataJurisdiction(env.DATA_JURISDICTION) === null) return "DATA_JURISDICTION";
-  // A mistyped area must not quietly ask Stalwart for less (or more) than intended.
-  if (parseFeatures(env.FEATURES) === null) return "FEATURES";
+  // A mistyped area must not quietly ask Stalwart for more than intended.
+  if (enabledAreas(env.DISABLED_FEATURES) === null) return "DISABLED_FEATURES";
+  // A freshly created worker stays closed until its client and its key are in place.
+  for (const name of REQUIRED) {
+    const value: unknown = env[name];
+    if (typeof value !== "string" || value.trim() === "") return name;
+  }
   return null;
-}
-
-export function isEnabled(env: Pick<Env, "MAIL_MCP_ENABLED">): boolean {
-  return env.MAIL_MCP_ENABLED === "true";
 }
 
 function parseList(list: string | undefined): Set<string> {

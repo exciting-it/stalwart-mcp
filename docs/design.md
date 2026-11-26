@@ -17,7 +17,7 @@ Goals
 - The AI tool can list folders, search, read a conversation, write a draft, send, and move
   messages between folders or to the trash.
 - One mailbox user can never reach another mailbox.
-- Limits, an audit trail and an off switch that the AI tool cannot bypass.
+- Limits, an audit trail and a block list that the AI tool cannot bypass.
 - Optionally, the mailbox's contacts and calendar: read, create, change, delete, and events with
   participants, whom the mail server then invites by email (see below).
 
@@ -84,8 +84,8 @@ AI tool ◄──(5) on Allow: the worker's own access/refresh token
   denies: the code exchange may supersede the refresh token the vault already holds for other
   connected tools, so dropping the new one would cut those off. Deny only means the new tool
   gets nothing.
-- Toward Stalwart: one admin-registered confidential OAuth client per environment (grant types
-  authorization code and refresh, scope `mail` plus one scope per area in `FEATURES`, exactly one
+- Toward Stalwart: one admin-registered confidential OAuth client per deployment (grant types
+  authorization code and refresh, scope `mail` plus one scope per area that is on, exactly one
   redirect URI). Its secret is a
   worker secret.
 - Identity comes only from Stalwart: after the code exchange the worker reads the JMAP session
@@ -146,8 +146,8 @@ Rules that hold for every tool:
   way there. What happens to old Trash afterwards is the mail server's setting: if it empties
   Trash on a schedule, a deleted message does disappear then. The pages and tool texts say
   "never empties the Trash" for that reason, not "never deleted".
-- Every tool runs through one wrapper, `defineTool`: **validate → authorize (grant, off switch,
-  block list, limits) → act → audit**.
+- Every tool runs through one wrapper, `defineTool`: **validate → authorize (grant, block list,
+  limits) → act → audit**.
 
 Sending twice by accident: MCP has no idempotency key, and the caller is a language model that
 cannot be relied on to supply one. The vault therefore derives the key itself, a hash over
@@ -159,8 +159,8 @@ below).
 
 ## Contacts and calendars
 
-Two more areas, `contacts` and `calendars`, are off by default and switched on per deployment
-with the setting `FEATURES` (`src/config.ts`). Each covers the connected mailbox's own account,
+Two more areas, `contacts` and `calendars`, are on by default and can be switched off per
+deployment with the setting `DISABLED_FEATURES` (`src/config.ts`). Each covers the connected mailbox's own account,
 like mail: reading, creating, changing and deleting.
 
 | Tool | Area | What it does |
@@ -207,14 +207,14 @@ like mail: reading, creating, changing and deleting.
   a result count, never a name, title, location or search text.
 - **The vault gets one more RPC method, `collab`,** that takes one validated request
   (`CollabRequest`). It goes through the same admission as the mail calls (connection, account
-  match, validation, call limit), and refuses an operation whose area is not in `FEATURES`.
+  match, validation, call limit), and refuses an operation whose area is switched off.
   `MailboxAdapter` is not extended; the tool layer works with `MailboxAdapter & CollabAdapter`.
 - **Permission of a connection.** Each area has its own OAuth scope at Stalwart, asked only when
-  the area is in `FEATURES`. Stalwart's documentation says the JMAP session lists the capability of an
+  the area is on. Stalwart's documentation says the JMAP session lists the capability of an
   area for the token only when the scope was granted (a live check; see below). Every adapter method first checks that capability in the
   session and otherwise answers `not_granted` without any request; a method error
-  `unknownMethod` from Stalwart is mapped to `not_granted` too. A mailbox connected before the
-  area was switched on has a token without the scope and has to connect again. The approval page
+  `unknownMethod` from Stalwart is mapped to `not_granted` too. A mailbox connected while the
+  area was switched off has a token without the scope and has to connect again. The approval page
   names the areas (for calendars: "and send invitations"), and the server's MCP instructions get
   sentences about them: third-party text, permanent deletion, and that an event write with
   participants makes the mail server send them mail, so the AI tool asks first.
@@ -340,20 +340,23 @@ to …"). The server cannot make an AI tool safe, but it does the following:
   data jurisdiction of the vaults: a mistyped one never becomes "no restriction".
 - **Limits.** Per mailbox in the vault: tool calls per minute and the send limits. Per source
   address on the unauthenticated OAuth endpoints: rate-limit bindings.
-- **Off switch and block list.** A dashboard variable (anything but `true` answers 503 on every
-  endpoint) and a D1 table checked on sign-in and on every call.
+- **Closed until configured, and a block list.** Without its OAuth client id, client secret and
+  token key the worker answers 503 on every endpoint, so a freshly created deployment serves
+  nothing. There is deliberately no on/off variable. One mailbox is blocked through a D1 table
+  checked on sign-in and on every call; to end all access the operator takes the domain off the
+  worker or replaces the token key (README, runbook).
 - **Audit.** A D1 table with time, account id, address, AI tool, tool name, outcome and counts.
   No subjects, bodies, search terms or recipient addresses. Rows are deleted after 90 days.
-- **Staging.** A staging deployment usually talks to the production mail server, because few
-  people run a second Stalwart. Outside production, code (not convention) lets only
+- **Trial deployments.** A trial (`ENVIRONMENT` set to `staging`) usually talks to the real
+  mail server, because few people run a second Stalwart. Outside production, code (not convention) lets only
   allow-listed mailboxes connect and delivers only to allow-listed recipients, which includes
   the attendees of every event write that makes the mail server notify; empty lists mean
   nobody connects and nothing is sent.
 
 Known limit: Stalwart's `mail` scope also covers IMAP, SMTP submission and ManageSieve and
 cannot be narrowed to JMAP (and the contacts and calendars scopes reach CardDAV and CalDAV). Whoever takes over the worker and its secrets could act as every
-connected mailbox. Mitigations: two secrets per environment, the off switch, and deleting the
-OAuth client on Stalwart.
+connected mailbox. Mitigations: two secrets per deployment, replacing the token key, and
+deleting the OAuth client on Stalwart.
 
 The connector also depends on two of Stalwart's own web pages: the sign-in page, and the
 account page whose "Connected Applications" list is the user's own way to cut an AI tool off.

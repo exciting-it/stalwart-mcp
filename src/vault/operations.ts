@@ -38,7 +38,7 @@ import {
 } from "../mail";
 import type { z } from "zod";
 import { clock } from "../clock";
-import { type Area, parseFeatures } from "../config";
+import { type Area, enabledAreas } from "../config";
 import type { Env } from "../env";
 import type { JmapSession } from "../jmap/jmap-client";
 import { JmapCollabAdapter } from "../jmap/jmap-collab-adapter";
@@ -167,14 +167,14 @@ export class MailboxOperations {
 
   /**
    * The contacts and calendar operations, as one request (`CollabRequest`). An area the
-   * deployment has not switched on (`FEATURES`) is `not_granted`, whatever the stored token could do.
+   * deployment has switched off (`DISABLED_FEATURES`) is `not_granted`, whatever the stored token could do.
    */
   collab(caller: Caller, request: unknown): Promise<VaultResult<CollabValue>> {
     const { accountId } = caller;
     return this.#operation("collab", caller, () => {
       const parsed = parse(CollabRequest, request);
       const area: Area = COLLAB_OP_AREA[parsed.op];
-      if (!(parseFeatures(this.#env.FEATURES) ?? new Set<Area>()).has(area)) throw new MailError("not_granted");
+      if (!(enabledAreas(this.#env.DISABLED_FEATURES) ?? new Set<Area>()).has(area)) throw new MailError("not_granted");
       return parsed;
     }, (req): Promise<CollabValue> => {
       switch (req.op) {
