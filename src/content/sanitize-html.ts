@@ -55,9 +55,16 @@ const escapeText = (s: string) => s.replace(/</g, "&lt;").replace(/>/g, "&gt;");
 const escapeAttribute = (s: string) =>
   s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 
-/** The checked link target, or null: an absolute http, https or mailto URL without credentials. */
+/**
+ * The checked link target of an attribute value as written in the HTML (entities decoded once),
+ * or null: an absolute http, https or mailto URL without credentials.
+ */
 export function safeHref(raw: string): string | null {
-  const value = decodeEntities(raw).trim();
+  return checkedUrl(decodeEntities(raw).trim());
+}
+
+/** The same check on a value that is already decoded: nothing in it is read as an entity. */
+function checkedUrl(value: string): string | null {
   if (hasControl(value) || !/^(?:https?|mailto):/i.test(value)) return null;
   let url: URL;
   try {
@@ -76,12 +83,16 @@ function span(raw: string): string | null {
   return n >= 1 && n <= 1000 ? String(n) : null;
 }
 
-/** The canonical start tag of a kept element, from its checked attributes only. */
-function startTag(e: Element): string {
+/**
+ * The canonical start tag of a kept element, from its checked attributes only. An `href` that
+ * holds the end marker was left unfinished by the input and swallowed the suffix: it is left
+ * out, so the random marker never reaches the output and the same input gives the same result.
+ */
+function startTag(e: Element, marker: string): string {
   const name = e.tagName;
   if (name === "a") {
     const href = e.getAttribute("href");
-    const target = href === null ? null : safeHref(href);
+    const target = href === null || href.includes(marker) ? null : safeHref(href);
     return target === null ? "<a>" : `<a href="${escapeAttribute(target)}">`;
   }
   if (name === "th" || name === "td") {
@@ -152,7 +163,7 @@ export async function sanitizeHtml(html: string): Promise<string | null> {
         }
         // The original tags go; the kept element is written anew from its checked attributes.
         const name = e.tagName;
-        const start = startTag(e);
+        const start = startTag(e, marker);
         e.removeAndKeepContent();
         e.before(start, { html: true });
         if (!VOID.has(name)) e.onEndTag((end) => void end.before(`</${name}>`, { html: true }));
@@ -217,7 +228,9 @@ function canonicalAttributes(name: string, attributes: string): boolean {
     seen.add(attribute);
     if (name === "a" && attribute === "href") {
       const decoded = decodeEntities(value);
-      if (escapeAttribute(decoded) !== value || safeHref(decoded) !== decoded) return false;
+      // Decoded once, as a reader of the attribute does; a second decoding would misread a
+      // literal `&amp;` in the URL.
+      if (escapeAttribute(decoded) !== value || checkedUrl(decoded) !== decoded) return false;
     } else if ((name === "th" || name === "td") && (attribute === "colspan" || attribute === "rowspan")) {
       if (span(value) !== value) return false;
     } else {

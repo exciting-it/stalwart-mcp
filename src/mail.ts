@@ -230,33 +230,27 @@ export function isAttachmentFileName(name: string): boolean {
   );
 }
 
-/** The UTF-8 length of `text`, counted without encoding it (a lone surrogate becomes U+FFFD, 3 bytes). */
-function utf8Length(text: string): number {
-  let n = 0;
-  for (let i = 0; i < text.length; i++) {
-    const c = text.charCodeAt(i);
-    if (c < 0x80) n += 1;
-    else if (c < 0x800) n += 2;
-    else if (c >= 0xd800 && c <= 0xdbff && i + 1 < text.length && (text.charCodeAt(i + 1) & 0xfc00) === 0xdc00) {
-      n += 4;
-      i++;
-    } else n += 3;
-  }
-  return n;
-}
-
 /**
  * The bytes of the files an AI tool writes into one call: the UTF-8 length of every `text` and
- * the decoded length of every `base64` (arithmetic, nothing is decoded). Files of the mailbox
+ * the decoded length of every `base64` (from its length, nothing is decoded). Files of the mailbox
  * (way 1) do not count. Over `attachmentUploadTotalBytes` the call is `too_large`.
  */
 export function writtenAttachmentBytes(attachments: readonly z.input<typeof OutgoingAttachmentInput>[]): number {
   let total = 0;
   for (const a of attachments) {
-    if ("text" in a) total += utf8Length(a.text);
-    else if ("base64" in a) total += base64DecodedLength(a.base64) ?? 0;
+    if ("text" in a) total += new TextEncoder().encode(a.text).byteLength;
+    else if ("base64" in a) total += base64LengthOf(a.base64);
   }
   return total;
+}
+
+/**
+ * The decoded length of base64 the schema has already accepted, from its length and padding
+ * alone. This runs in the Worker for every call with attachments, so it does not scan the text.
+ */
+function base64LengthOf(value: string): number {
+  const pad = value.endsWith("==") ? 2 : value.endsWith("=") ? 1 : 0;
+  return Math.floor(((value.length - pad) * 3) / 4);
 }
 
 /** Throws `too_large` when the files written into one message exceed `attachmentUploadTotalBytes`. */

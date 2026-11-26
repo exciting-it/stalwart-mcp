@@ -201,6 +201,35 @@ describe("review round 1: the reported bypasses", () => {
     expect(await sanitizeHtml(`<x-unknown${attrs(51)}>y</x-unknown>`)).toBeNull();
   });
 
+  it("a link the input leaves unfinished loses its target: the end marker never reaches the output", async () => {
+    // The marker is random per call: inside a kept attribute it would make every call differ.
+    for (const [input, output] of [
+      [`<p>Hi</p><a href="https://example.org/`, "<p>Hi</p><a>"],
+      [`<p>Hi</p><a href='https://example.org/`, "<p>Hi</p><a>"],
+      [`<p>Hi</p><a href=https://example.org/`, "<p>Hi</p><a>"],
+      [`<p>Hi</p><td colspan="2`, "<p>Hi</p><td>"],
+      [`<p>Hi</p><p cla`, "<p>Hi</p><p>"],
+    ] as const) {
+      expect(await sanitizeHtml(input), input).toBe(output);
+      expect(await sanitizeHtml(input), input).toBe(output);
+    }
+    // Unfinished text and an unfinished comment at the end are not inside a tag: nothing is lost.
+    expect(await sanitizeHtml("<p>Hi</p>tail")).toBe("<p>Hi</p>tail");
+    expect(await sanitizeHtml("<p>Hi</p><!-- open")).toBe("<p>Hi</p>");
+  });
+
+  it("an ampersand that is itself written as an entity stays what it is", async () => {
+    const twice = `<a href="https://example.org/?a=1&amp;amp;b=2">x</a>`;
+    expect(await sanitizeHtml(twice)).toBe(twice);
+    expect(isCanonicalHtml(twice)).toBe(true);
+    const once = `<a href="https://example.org/?a=1&amp;b=2">x</a>`;
+    expect(await sanitizeHtml(once)).toBe(once);
+    // The check still refuses a value that is not what the sanitizer writes.
+    expect(isCanonicalHtml(`<a href="https://example.org/?a=1&b=2">x</a>`)).toBe(false);
+    expect(isCanonicalHtml(`<a href="javascript&amp;colon;alert(1)">x</a>`)).toBe(false);
+    expect(isCanonicalHtml(`<a href="&#106;avascript:alert(1)">x</a>`)).toBe(false);
+  });
+
   it("input that contains the old end marker keeps its content and is stable", async () => {
     for (const input of [
       `<plaintext>hello<x-end "'><!--x-end-->`,
