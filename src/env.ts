@@ -7,6 +7,8 @@ export interface Env {
   PUBLIC_ORIGIN?: string;
   /** The name AI tools show for the connector. Optional. */
   CONNECTOR_NAME?: string;
+  /** The id of this worker's OAuth client at Stalwart. Required: without it the worker answers 503. */
+  STALWART_OAUTH_CLIENT_ID?: string;
   /**
    * Restricts where the mailbox vaults run and store data: `eu`, `us` or `fedramp`. Optional. Must be
    * chosen before the first sign-in: vault ids depend on it, so a later change orphans every
@@ -36,8 +38,6 @@ export interface Env {
   TOKEN_ENC_KEY: string;
 
   // --- dashboard variables ---
-  /** Required like the secrets: the worker answers 503 until it is set. */
-  STALWART_OAUTH_CLIENT_ID?: string;
   SIGNIN_ALLOWLIST?: string;
   SEND_ALLOWLIST?: string;
 }

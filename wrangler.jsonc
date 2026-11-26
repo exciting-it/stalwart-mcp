@@ -12,7 +12,7 @@
   // src/oauth/theme.ts). Cloudflare serves these files itself, before the worker runs: they are
   // public and hold no data.
   "assets": { "directory": "./public" },
-  // DEPLOYING YOUR OWN: change `routes`, the addresses and the name in `vars`, and the two
+  // DEPLOYING YOUR OWN: change `routes`, the addresses and the names in `vars`, and the two
   // storage ids below. Everything else can stay as it is.
   "routes": [{ "pattern": "mail-mcp.exciting-it.com", "custom_domain": true }],
   // `vars` holds only what is fixed for a deployment and never tuned while it runs:
@@ -21,13 +21,13 @@
   //   STALWART_ORIGIN  the Stalwart server, an https origin
   //   PUBLIC_ORIGIN    this worker's own https origin (must match `routes`)
   //   CONNECTOR_NAME   the name AI tools show for the connector (optional)
+  //   STALWART_OAUTH_CLIENT_ID  OAuth client id of this worker at Stalwart (required; it is
+  //                    not a secret, the browser sees it at every sign-in)
   //   DATA_JURISDICTION  restricts where the mailbox vaults run and store data: "eu", "us" or
   //                    "fedramp" (optional). Choose it BEFORE the first sign-in: vault ids
   //                    depend on it, so a later change orphans every stored connection.
-  // A variable declared here is rewritten on every deploy. What an operator sets or changes
-  // while the worker runs lives in the Cloudflare dashboard instead, and `keep_vars` keeps it
-  // there:
-  //   STALWART_OAUTH_CLIENT_ID     OAuth client id of this worker at Stalwart (required)
+  // A variable declared here is rewritten on every deploy. What an operator changes while the
+  // worker runs lives in the Cloudflare dashboard instead, and `keep_vars` keeps it there:
   //   DISABLED_FEATURES            areas to switch off: "contacts", "calendars" or
   //                                "contacts,calendars" (optional; without it mail, contacts
   //                                and calendars are all offered)
@@ -41,6 +41,7 @@
     "STALWART_ORIGIN": "https://mail.exciting-it.com",
     "PUBLIC_ORIGIN": "https://mail-mcp.exciting-it.com",
     "CONNECTOR_NAME": "exciting IT Mail",
+    "STALWART_OAUTH_CLIENT_ID": "mail-connector",
     "DATA_JURISDICTION": "eu"
   },
   // Create both once (README, "Deploying your own"), with a jurisdiction if you need one (it

@@ -122,6 +122,7 @@ access to it, a Cloudflare account, and [Bun](https://bun.sh).
    - `PUBLIC_ORIGIN`: the address the connector is served under, written the same way. It
      must match `routes`; the worker answers under no other host.
    - `CONNECTOR_NAME`: the name AI tools show (optional, default "Stalwart Mail").
+   - `STALWART_OAUTH_CLIENT_ID`: the id of the OAuth client from step 2. It is not a secret.
    - `DATA_JURISDICTION`: optional; decide before the first sign-in (see
      [Where the data lives](#where-the-data-lives)).
 2. **OAuth client on Stalwart**: confidential, grant types authorization code and refresh,
@@ -141,13 +142,12 @@ access to it, a Cloudflare account, and [Bun](https://bun.sh).
    - `STALWART_OAUTH_CLIENT_SECRET`: the client secret from step 2.
    - `TOKEN_ENC_KEY`: 32 random bytes, base64 (`openssl rand -base64 32`). Changing it later
      makes every stored mailbox token unreadable: every mailbox is disconnected.
-6. **Dashboard variables** (kept across deploys by `keep_vars`):
-   - `STALWART_OAUTH_CLIENT_ID`: the client id from step 2.
-   - `DISABLED_FEATURES`: optional, see [Contacts and calendars](#contacts-and-calendars).
+6. **Dashboard variable**, optional (kept across deploys by `keep_vars`): `DISABLED_FEATURES`,
+   see [Contacts and calendars](#contacts-and-calendars).
 
    Until the client id and both secrets are set, every endpoint answers 503, with
    `config_error <setting>` in the worker's logs. A freshly created worker therefore serves
-   nothing, and it opens by itself once the last of the three is in place.
+   nothing, and it opens by itself once the second secret is in place.
 7. Check that the Durable Object migration `v1` was applied (the `MailboxVault` class exists
    with SQLite storage), then work through the live checks below with a test mailbox.
 
