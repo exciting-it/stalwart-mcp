@@ -59,6 +59,7 @@ export interface SentMessage {
   bcc: FakeAddress[];
   subject: string;
   text: string | null;
+  html: string | null;
   inReplyTo: string[] | null;
   references: string[] | null;
 }

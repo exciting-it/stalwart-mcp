@@ -403,16 +403,18 @@ function createEmail(account: FakeAccount, state: FakeState, raw: unknown): Fake
   if (references === false) return invalid("references");
 
   const values = isObject(raw.bodyValues) ? raw.bodyValues : {};
-  const bodyPart = (list: unknown): { value: string; type: string } | null | false => {
+  // RFC 8621 §4.6: textBody and htmlBody each hold exactly one part, of type text/plain and
+  // text/html; with both the server builds a multipart/alternative message.
+  const bodyPart = (list: unknown, type: string): { value: string; type: string } | null | false => {
     if (list === undefined) return null;
     if (!Array.isArray(list) || list.length !== 1 || !isObject(list[0])) return false;
     const p = list[0];
     const v = typeof p.partId === "string" ? values[p.partId] : undefined;
-    if (!isObject(v) || typeof v.value !== "string" || typeof p.type !== "string") return false;
+    if (!isObject(v) || typeof v.value !== "string" || p.type !== type) return false;
     return { value: v.value, type: p.type };
   };
-  const textBody = bodyPart(raw.textBody);
-  const htmlBody = bodyPart(raw.htmlBody);
+  const textBody = bodyPart(raw.textBody, "text/plain");
+  const htmlBody = bodyPart(raw.htmlBody, "text/html");
   if (textBody === false) return invalid("textBody");
   if (htmlBody === false) return invalid("htmlBody");
   const parts = [textBody, htmlBody].filter((p): p is { value: string; type: string } => p !== null);
@@ -586,6 +588,7 @@ const emailSubmissionSet: Handler = (args, ctx) => {
         bcc: email.bcc,
         subject: email.subject,
         text: email.text,
+        html: email.html,
         inReplyTo: email.inReplyTo,
         references: email.references,
       }));

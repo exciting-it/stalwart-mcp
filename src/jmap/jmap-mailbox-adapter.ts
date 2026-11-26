@@ -56,6 +56,21 @@ interface Outgoing {
   sentId: string | null;
 }
 
+/**
+ * The body of the Email: one text/plain part, or with HTML a text/plain and a text/html part,
+ * which the server sends as multipart/alternative (RFC 8621 §4.6).
+ */
+function bodyOf(text: string, html: string | undefined): Record<string, unknown> {
+  if (html === undefined) {
+    return { bodyValues: { body: { value: text } }, textBody: [{ partId: "body", type: "text/plain" }] };
+  }
+  return {
+    bodyValues: { body: { value: text }, html: { value: html } },
+    textBody: [{ partId: "body", type: "text/plain" }],
+    htmlBody: [{ partId: "html", type: "text/html" }],
+  };
+}
+
 export class JmapMailboxAdapter implements MailboxAdapter {
   readonly #accountId: string;
   readonly #accessToken: string;
@@ -166,8 +181,13 @@ export class JmapMailboxAdapter implements MailboxAdapter {
     };
   }
 
-  /** Looks up folders, the mailbox's own identity and the replied-to message; builds the Email. */
+  /**
+   * Looks up folders, the mailbox's own identity and the replied-to message; builds the Email.
+   * `input` is the message as the vault prepared it (`prepareOutgoing`): the text part filled in
+   * and any HTML already sanitized.
+   */
   async #prepare(input: OutgoingMessage): Promise<Outgoing> {
+    if (input.body === undefined) throw new MailError("invalid_input");
     const calls: Call[] = [
       ["Mailbox/get", { ids: null, properties: ["id", "role"] }, "m"],
       ["Identity/get", { ids: null }, "i"],
@@ -203,8 +223,7 @@ export class JmapMailboxAdapter implements MailboxAdapter {
       from: [{ name: identity.name ?? "", email: identity.email }],
       subject,
       ...threading,
-      bodyValues: { body: { value: input.body } },
-      textBody: [{ partId: "body", type: "text/plain" }],
+      ...bodyOf(input.body, input.html),
     };
     if (input.to.length > 0) email.to = addresses(input.to);
     if (input.cc.length > 0) email.cc = addresses(input.cc);

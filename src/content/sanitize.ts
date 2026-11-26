@@ -28,7 +28,7 @@ const ENTITY = /&(#x[0-9a-f]{1,6}|#[0-9]{1,7}|amp|lt|gt|quot|apos|nbsp);/gi;
 const NAMED: Record<string, string> = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " " };
 
 /** One pass over the text; the replacement is never rescanned, so entities decode exactly once. */
-function decodeEntities(s: string): string {
+export function decodeEntities(s: string): string {
   if (!s.includes("&")) return s;
   return s.replace(ENTITY, (whole, body: string) => {
     const lower = body.toLowerCase();
@@ -42,7 +42,7 @@ function decodeEntities(s: string): string {
 const isLetter = (c: string) => (c >= "a" && c <= "z") || (c >= "A" && c <= "Z");
 const isSpace = (c: string) => c === " " || c === "\t" || c === "\n" || c === "\r" || c === "\f";
 
-interface ParsedTag {
+export interface ParsedTag {
   name: string;
   closing: boolean;
   href: string | null;
@@ -51,7 +51,7 @@ interface ParsedTag {
 }
 
 /** Parses one tag starting at `<`. Returns null when the tag never ends (caller drops the rest). */
-function parseTag(html: string, start: number): ParsedTag | null {
+export function parseTag(html: string, start: number): ParsedTag | null {
   let i = start + 1;
   const closing = html.charAt(i) === "/";
   if (closing) i++;

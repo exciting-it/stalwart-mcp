@@ -125,8 +125,8 @@ call.
 | `list_mailboxes` | read | Folders with role, total and unread counts, and the connected mailbox's address |
 | `search_mail` | read | Filter by text, from, to, subject, date range, folder, unread, has attachment; newest first; summaries with a short preview |
 | `read_thread` | read | All messages of a conversation as plain text with headers, attachment names and sizes; long bodies are cut with a marker |
-| `create_draft` | write | New mail or reply, saved in Drafts |
-| `send_mail` | write, external effect | Sends a new mail or reply, plain text, copy in Sent |
+| `create_draft` | write | New mail or reply, plain text or with sanitized HTML, saved in Drafts |
+| `send_mail` | write, external effect | Sends a new mail or reply, plain text or with sanitized HTML, copy in Sent |
 | `move_mail` | write | Moves messages into one folder of the mailbox |
 | `delete_mail` | write | Moves messages to the Trash folder; the connector never empties it |
 | `mark_mail` | write | Sets or clears read (`$seen`) and flagged (`$flagged`) on messages; nothing else changes |
@@ -163,11 +163,53 @@ Rules that hold for every tool:
 
 Sending twice by accident: MCP has no idempotency key, and the caller is a language model that
 cannot be relied on to supply one. The vault therefore derives the key itself, a hash over
-recipients, subject, body and reply target. An identical send within 10 minutes is not sent
+recipients, subject, body, reply target and, when given, the sanitized HTML (so the same text
+with different HTML is a different send; a message without HTML keeps the hash it had before
+HTML existed). An identical send within 10 minutes is not sent
 again; the first result is returned. If the outcome of a send is unknown (a timeout or a 5xx
 after the request left), it is counted and an identical send is refused for the same window.
 Event writes that make the mail server send invitations, updates or answers use the same rows
 (see below; an answer keeps its row only while its outcome is open).
+
+### Formatted mail (HTML)
+
+`send_mail` and `create_draft` take an optional `html` next to `body`; at least one of them is
+required. The HTML is written by an AI tool, possibly steered by a mail it read, and it leaves
+under the mailbox's name. So the connector does not pass it on as given: it keeps an allow-list
+and removes everything else (`src/content/sanitize-html.ts`).
+
+- Kept: text formatting (`p`, `br`, `div`, `span`, `b`, `strong`, `i`, `em`, `u`, `s`, `sub`,
+  `sup`, `pre`, `code`, `blockquote`, `hr`), links (`a`), lists (`ul`, `ol`, `li`), headings
+  (`h1` to `h6`) and tables (`table`, `thead`, `tbody`, `tfoot`, `tr`, `th`, `td`).
+- Removed with their content: scripts, styles, frames, embedded objects, forms and their
+  controls, `svg`, `math`, `head` and its elements, `noscript`, `template`, media and images.
+  Any other element is unwrapped: its tag goes, its text stays.
+- Attributes: all removed except `href` on links and `colspan` / `rowspan` (1 to 1000) on
+  table cells. An `href` stays only as an absolute `http`, `https` or `mailto` URL without
+  credentials (parsed with `URL`, written back normalized); anything else loses the attribute and
+  keeps the link text. Comments, doctype, processing instructions and CDATA are removed.
+- No styles, because CSS can hide text from the reader that the recipient's client still
+  processes, and can load remote resources. No images, neither remote (a tracking pixel in the
+  mailbox's name) nor inline; the tool descriptions say so, so the AI tool does not promise one.
+- Text is re-escaped after the rewrite, so markup cannot form again from pieces left around
+  something that was removed, and end tags are written back bare. Sanitizing the output again
+  changes nothing.
+
+The parsing is the runtime's `HTMLRewriter`, a streaming HTML tokenizer that follows the HTML
+standard, not regular expressions. Two things it cannot do are done around it: it cannot remove
+a doctype, so `<!doctype` is turned into a bogus comment first (which ends at the same `>`);
+and it passes markup left unfinished at the end of the input through as written, so a fixed
+suffix that closes any open tag, attribute or comment is appended and leaves no trace. HTML its
+streaming parser refuses (a `<style>` after an unclosed `<select>`, for example) is refused with
+`invalid_input`, never passed on.
+
+The sanitizing runs in the mailbox's vault, where the send is prepared, not in the Worker that
+answers the MCP request: the Worker only checks the input's shape and sizes, and its CPU budget
+per request stays small. With HTML the message goes out as `multipart/alternative` (JMAP
+`textBody` and `htmlBody`, one part each); the plain part is `body` when given, otherwise the
+text of the sanitized HTML, made and cleaned the way the reading side reads HTML mail. When
+nothing visible is left of the HTML, the call is `invalid_input` without a `body` and the HTML
+is left out with one. Without `html` the request is exactly what it was before.
 
 ## Contacts and calendars
 
@@ -377,8 +419,10 @@ to …"). The server cannot make an AI tool safe, but it does the following:
   third parties and must be treated as data, not as instructions.
 - The same statement is in the server's MCP `instructions` and in each read tool's description.
   (Contacts and calendar entries follow the same rules, with their own notice; see above.)
-- Plain text only: HTML is reduced to text, links are not followed, remote images are never
-  fetched, invisible control characters are removed.
+- Plain text only on the reading side: HTML is reduced to text, links are not followed, remote
+  images are never fetched, invisible control characters are removed. HTML the AI tool writes
+  (`send_mail`, `create_draft`) is sanitized against an allow-list before it leaves (see
+  "Formatted mail").
 - Error messages are fixed texts and never repeat mail content.
 - The main damage of a successful injection is mail sent in the user's name, which includes
   invitations the mail server sends for an event write. That is what the send limits (shared by

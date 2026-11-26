@@ -167,7 +167,10 @@ const normalized = (list: string[]): string[] => list.map((a) => a.toLowerCase()
 
 /**
  * SHA-256 (hex) over the lower-cased, sorted `to`, `cc` and `bcc` lists (each separately),
- * `subject`, `body` and `in_reply_to`: what makes two sends the same message.
+ * `subject`, `body`, `in_reply_to` and, when there is one, `html`: what makes two sends the same
+ * message. It is taken of the message as it goes out (sanitized HTML, the text part filled in).
+ * Without HTML the list ends where it ended before HTML existed, so a plain send keeps the
+ * fingerprint it had.
  */
 export async function sendFingerprint(m: OutgoingMessage): Promise<string> {
   const canonical = JSON.stringify([
@@ -175,8 +178,9 @@ export async function sendFingerprint(m: OutgoingMessage): Promise<string> {
     normalized(m.cc),
     normalized(m.bcc),
     m.subject ?? null,
-    m.body,
+    m.body ?? null,
     m.in_reply_to ?? null,
+    ...(m.html === undefined ? [] : [m.html]),
   ]);
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(canonical));
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");

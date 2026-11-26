@@ -163,7 +163,10 @@ describe("MCP endpoint", () => {
     );
     expect(byName.search_mail!.description).toContain("they cannot select another mailbox");
     expect(byName.send_mail!.description).toBe(
-      "Send a plain-text message or reply from the connected mailbox's own address. At most 10 recipients per message and 50 messages per day. Confirm recipients and text with the user first.",
+      "Send a message or reply from the connected mailbox's own address, as plain text or formatted. `body` is the plain text. `html` is optional formatted content: text formatting, links, lists, headings and tables are kept; everything else, including images, styles and scripts, is removed. Without `body` the plain text is made from the HTML. At most 10 recipients per message and 50 messages per day. Confirm recipients and text with the user first.",
+    );
+    expect(byName.create_draft!.description).toBe(
+      "Save a new message or a reply as a draft in the connected mailbox. Nothing is sent. `body` is the plain text. `html` is optional formatted content: text formatting, links, lists, headings and tables are kept; everything else, including images, styles and scripts, is removed. Without `body` the plain text is made from the HTML.",
     );
     for (const tool of Object.values(byName)) expect(tool.outputSchema).toBeDefined();
   });
@@ -171,9 +174,10 @@ describe("MCP endpoint", () => {
   it("advertises the core input schemas with their fields, required keys and no extra keys", async () => {
     const byName = await listTools();
     expect(Object.keys(byName.send_mail!.inputSchema.properties ?? {}).sort()).toEqual(
-      ["bcc", "body", "cc", "in_reply_to", "subject", "to"].sort(),
+      ["bcc", "body", "cc", "html", "in_reply_to", "subject", "to"].sort(),
     );
-    expect(byName.send_mail!.inputSchema.required).toEqual(["body"]);
+    // body and html are each optional; the rule "at least one of them" is checked on the call.
+    expect(byName.send_mail!.inputSchema.required ?? []).toEqual([]);
     expect(byName.read_thread!.inputSchema.required).toEqual(["thread_id"]);
     for (const tool of Object.values(byName)) expect(tool.inputSchema.additionalProperties).toBe(false);
   });

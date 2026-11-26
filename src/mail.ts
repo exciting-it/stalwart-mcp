@@ -20,6 +20,8 @@ export const MAIL_LIMITS = {
   upstreamConcurrency: 2,
   subjectChars: 255,
   bodyInputChars: 100_000,
+  /** The optional HTML of `send_mail` and `create_draft`, before sanitizing. */
+  htmlInputChars: 200_000,
   filterChars: 200,
   accessTokenTtlSeconds: 3600,
   refreshIdleSeconds: 2_592_000,
@@ -79,6 +81,10 @@ export const SearchMailInput = z
 
 export const ReadThreadInput = z.object({ thread_id: MailIdSchema }).strict();
 
+/** How `send_mail` and `create_draft` describe `body` and `html` to the AI tool. */
+export const OUTGOING_CONTENT_NOTE =
+  "`body` is the plain text. `html` is optional formatted content: text formatting, links, lists, headings and tables are kept; everything else, including images, styles and scripts, is removed. Without `body` the plain text is made from the HTML.";
+
 /**
  * Plain (un-refined) object behind `CreateDraftInput` and `SendMailInput`. Exported because
  * refined schemas are Zod effects and the MCP SDK may need a plain object for registration.
@@ -93,7 +99,10 @@ export const OutgoingMessageBase = z
       .max(MAIL_LIMITS.subjectChars)
       .regex(/^[^\r\n]*$/)
       .optional(),
-    body: z.string().max(MAIL_LIMITS.bodyInputChars),
+    /** The plain text. Optional when `html` is given: then it is made from the sanitized HTML. */
+    body: z.string().max(MAIL_LIMITS.bodyInputChars).optional(),
+    /** Formatted content; sanitized against an allow-list in the vault before it is used. */
+    html: z.string().max(MAIL_LIMITS.htmlInputChars).optional(),
     in_reply_to: MailIdSchema.optional(),
   })
   .strict();
@@ -113,6 +122,13 @@ function refineOutgoing(m: OutgoingShape, ctx: z.RefinementCtx): void {
       code: z.ZodIssueCode.custom,
       path: ["subject"],
       message: "A subject is required unless in_reply_to is set.",
+    });
+  }
+  if (m.body === undefined && m.html === undefined) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["body"],
+      message: "Give body, html or both.",
     });
   }
 }

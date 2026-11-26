@@ -27,8 +27,8 @@ Why it is built this way, and what its security rests on: [docs/design.md](docs/
 | `list_mailboxes` | Folders with role and message counts, and the address of the connected mailbox |
 | `search_mail` | Search by text, sender, recipient, subject, date, folder, unread, attachment |
 | `read_thread` | A whole conversation as plain text |
-| `create_draft` | Save a new mail or a reply in Drafts |
-| `send_mail` | Send a new mail or a reply, plain text, from the mailbox's own address |
+| `create_draft` | Save a new mail or a reply in Drafts, plain text or with sanitized HTML |
+| `send_mail` | Send a new mail or a reply from the mailbox's own address, plain text or with sanitized HTML |
 | `move_mail` | Move messages into another folder of the mailbox |
 | `delete_mail` | Move messages to the Trash folder |
 | `mark_mail` | Mark messages read or unread, flagged or not; nothing else of a message changes |
@@ -54,6 +54,16 @@ of the mailbox's 50 sends per day (one per started ten addresses). An answer to 
 (`respond_to_event`) makes the mail server send the organizer that answer, and counts as one
 send too. Any other change or deletion of a meeting someone else organized only touches the
 mailbox's own copy.
+
+`send_mail` and `create_draft` take `body` (plain text), `html` (formatted content) or both. The
+HTML is sanitized against an allow-list in the mailbox's vault before anything is sent or stored:
+text formatting, links (absolute `http`, `https` and `mailto` only), lists, headings and tables
+survive; every other element is removed (scripts, styles, forms, embedded content and images
+with their content) or unwrapped, and every attribute except a checked `href` on links and
+`colspan` / `rowspan` on table cells. No images go out, neither remote nor inline. With HTML the
+message goes out as `multipart/alternative` with a `text/plain` and a `text/html` part; without
+`body` the plain part is the text of the sanitized HTML. HTML with nothing visible left is
+refused when no `body` is given, and left out when one is.
 
 It cannot remove mail for good, set marks other than read and flagged, manage folders, touch
 filters, or send from another address. Deleting always means moving to Trash, and `move_mail`
@@ -106,6 +116,7 @@ Constants live in `MAIL_LIMITS` in `src/mail.ts` and, for contacts and calendars
 | Locations, online meeting links, participants of an event | 5, 3 (http and https only), 50 (the rest counted in `participants_omitted`) |
 | Body text returned per message | 20,000 characters, then cut with a marker |
 | Body text accepted when writing | 100,000 characters |
+| HTML accepted when writing (before sanitizing) | 200,000 characters |
 | Worker access token lifetime | 1 hour |
 | Worker refresh token | ends after 30 days without use |
 | Unused Stalwart connection | wiped after 30 days without a tool call |
@@ -345,6 +356,9 @@ These need the OAuth client and a test mailbox on your server:
 - [ ] A removed application answers the refresh with `error: "invalid_grant"`. With a bare 401 instead, the connection is only cleared by the 30-day idle alarm.
 - [ ] `expires_in` in the token response is a number.
 - [ ] Bcc recipients are not visible to the To and Cc recipients of a sent message.
+- [ ] A mail sent with `html` arrives as `multipart/alternative` with a `text/plain` and a
+  `text/html` part, both as sent (links, lists, tables intact), and the copy Stalwart stores in
+  Sent holds the same two parts; a draft made with `html` shows the formatting in a mail client.
 - [ ] `move_mail` and `delete_mail` against the real server: a moved message is in the target folder only; a foreign or malformed id is reported as not found.
 - [ ] `mark_mail` against the real server: `Email/set` accepts the patch paths `keywords/$seen` and `keywords/$flagged` with `true` and `null`, leaves the other keywords (`$answered`, `$draft`) as they were, and answers a foreign id with `notUpdated` `notFound`; `search_mail` and other mail clients (IMAP `\Seen`, `\Flagged`) show the new state.
 - [ ] Whether the server empties Trash on its own (Stalwart's auto-expunge), and whether that is what you want now that an AI tool can move mail there.

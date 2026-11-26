@@ -36,6 +36,7 @@ describe("mail contract", () => {
       refreshIdleSeconds: 2_592_000,
       refreshBackoffSeconds: 300,
       auditRetentionDays: 90,
+      htmlInputChars: 200_000,
     });
   });
 
@@ -67,7 +68,7 @@ describe("mail contract", () => {
 
   it("exposes the un-refined base as a plain object shared by both inputs", () => {
     expect(Object.keys(OutgoingMessageBase.shape).sort()).toEqual(
-      ["bcc", "body", "cc", "in_reply_to", "subject", "to"].sort(),
+      ["bcc", "body", "cc", "html", "in_reply_to", "subject", "to"].sort(),
     );
     // base alone applies no refinements
     expect(OutgoingMessageBase.safeParse({ body: "b" }).success).toBe(true);
@@ -149,6 +150,19 @@ describe("mail contract", () => {
     expect(SendMailInput.safeParse({ ...m, subject: "s".repeat(256), body: "b" }).success).toBe(false);
     expect(SendMailInput.safeParse({ ...m, subject: "s", body: "b".repeat(100_000) }).success).toBe(true);
     expect(SendMailInput.safeParse({ ...m, subject: "s", body: "b".repeat(100_001) }).success).toBe(false);
+  });
+
+  it("needs body, html or both; html is capped at 200,000 chars", () => {
+    const m = { to: ["a@x.example"], subject: "s" };
+    for (const schema of [SendMailInput, CreateDraftInput]) {
+      expect(schema.safeParse(m).success).toBe(false);
+      expect(schema.safeParse({ ...m, body: "b" }).success).toBe(true);
+      expect(schema.safeParse({ ...m, html: "<p>h</p>" }).success).toBe(true);
+      expect(schema.safeParse({ ...m, body: "b", html: "<p>h</p>" }).success).toBe(true);
+      expect(schema.safeParse({ ...m, html: "h".repeat(200_000) }).success).toBe(true);
+      expect(schema.safeParse({ ...m, html: "h".repeat(200_001) }).success).toBe(false);
+      expect(schema.safeParse({ ...m, html: 1 }).success).toBe(false);
+    }
   });
 
   it.each(["", "a:b", "../x", "a b", "x".repeat(256)])("refuses id %j", (v) =>

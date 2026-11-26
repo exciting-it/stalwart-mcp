@@ -36,12 +36,15 @@ import {
   MoveMailRequest,
   MailError,
   type MailErrorCode,
+  type OutgoingMessage,
   ReadThreadInput,
   SearchMailInput,
   SendMailInput,
 } from "../mail";
 import type { z } from "zod";
 import { clock } from "../clock";
+import { cleanText, htmlToText } from "../content/sanitize";
+import { sanitizeHtml } from "../content/sanitize-html";
 import { type Area, enabledAreas } from "../config";
 import type { Env } from "../env";
 import type { JmapSession } from "../jmap/jmap-client";
@@ -125,6 +128,28 @@ function parse<S extends z.ZodTypeAny>(schema: S, input: unknown): z.output<S> {
   return parsed.data;
 }
 
+/**
+ * The message as it is sent or stored. Its HTML is sanitized here, in the vault, before the
+ * fingerprint is taken and before the mailbox is touched. The text part is `body` when given,
+ * otherwise the text of the sanitized HTML, cleaned as the reading side cleans mail text. HTML
+ * with nothing visible left is refused without a `body` and left out with one. HTML the parser
+ * cannot place is refused. Without HTML the message is returned as it is.
+ */
+async function prepareOutgoing(message: OutgoingMessage): Promise<OutgoingMessage & { body: string }> {
+  const { html, ...rest } = message;
+  if (html === undefined) {
+    if (rest.body === undefined) throw new MailError("invalid_input");
+    return { ...rest, body: rest.body };
+  }
+  const clean = await sanitizeHtml(html);
+  if (clean === null) throw new MailError("invalid_input");
+  const text = cleanText(htmlToText(clean), MAIL_LIMITS.htmlInputChars).text;
+  const visible = text.trim() !== "";
+  if (rest.body !== undefined) return visible ? { ...rest, body: rest.body, html: clean } : { ...rest, body: rest.body };
+  if (!visible) throw new MailError("invalid_input");
+  return { ...rest, body: text, html: clean };
+}
+
 export class MailboxOperations {
   readonly #sql: SqlStorage;
   readonly #env: Env;
@@ -162,9 +187,10 @@ export class MailboxOperations {
   }
 
   createDraft(caller: Caller, input: unknown) {
-    return this.#operation("createDraft", caller, () => parse(CreateDraftInput, input), (draft) =>
-      this.#upstream(caller.accountId, (a) => a.createDraft(draft)),
-    );
+    return this.#operation("createDraft", caller, () => parse(CreateDraftInput, input), async (draft) => {
+      const prepared = await prepareOutgoing(draft);
+      return this.#upstream(caller.accountId, (a) => a.createDraft(prepared));
+    });
   }
 
   moveMail(caller: Caller, input: unknown) {
@@ -226,8 +252,9 @@ export class MailboxOperations {
 
   sendMail(caller: Caller, input: unknown): Promise<VaultResult<SendResult>> {
     const { accountId } = caller;
-    return this.#operation("sendMail", caller, () => parse(SendMailInput, input), async (message) => {
-      this.#requireAllowed([...message.to, ...message.cc, ...message.bcc]);
+    return this.#operation("sendMail", caller, () => parse(SendMailInput, input), async (parsed) => {
+      this.#requireAllowed([...parsed.to, ...parsed.cc, ...parsed.bcc]);
+      const message = await prepareOutgoing(parsed);
       return this.#exactlyOnce<SendResult>(await sendFingerprint(message), 1, {
         send: () => this.#upstream(accountId, (a) => a.sendMail(message)),
         record: (sent) => ({ message_id: sent.message_id, recipients: sent.recipients }),
