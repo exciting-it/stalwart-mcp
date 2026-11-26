@@ -68,7 +68,7 @@ describe("mail contract", () => {
 
   it("exposes the un-refined base as a plain object shared by both inputs", () => {
     expect(Object.keys(OutgoingMessageBase.shape).sort()).toEqual(
-      ["bcc", "body", "cc", "html", "in_reply_to", "subject", "to"].sort(),
+      ["attachments", "bcc", "body", "cc", "html", "in_reply_to", "subject", "to"].sort(),
     );
     // base alone applies no refinements
     expect(OutgoingMessageBase.safeParse({ body: "b" }).success).toBe(true);

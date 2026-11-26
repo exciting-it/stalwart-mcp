@@ -43,10 +43,20 @@ export function imageType(bytes: Uint8Array): string | null {
   return null;
 }
 
+/**
+ * True when `bytes` start with the signature of `type`, for the types that have one here: PDF
+ * (`%PDF-`) and the four image types (`imageType`). Any other type has no signature to match.
+ */
+export function hasSignatureOf(bytes: Uint8Array, type: string): boolean {
+  if (type === "application/pdf") return startsWith(bytes, PDF);
+  if (type.startsWith("image/")) return imageType(bytes) === type;
+  return true;
+}
+
 const PLAIN_MEDIA_TYPE = /^[a-z0-9][a-z0-9.+-]{0,63}\/[a-z0-9][a-z0-9.+-]{0,63}$/;
 
 /** The declared type lower-cased when it is a plain media type, else null. */
-function plainType(declared: string): string | null {
+export function plainType(declared: string): string | null {
   const type = declared.trim().toLowerCase();
   return PLAIN_MEDIA_TYPE.test(type) ? type : null;
 }

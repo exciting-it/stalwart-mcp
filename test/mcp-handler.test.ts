@@ -167,10 +167,10 @@ describe("MCP endpoint", () => {
     );
     expect(byName.search_mail!.description).toContain("they cannot select another mailbox");
     expect(byName.send_mail!.description).toBe(
-      "Send a message or reply from the connected mailbox's own address, as plain text or formatted. `body` is the plain text. `html` is optional formatted content: text formatting, links, lists, headings and tables are kept; everything else, including images, styles and scripts, is removed. Without `body` the plain text is made from the HTML. At most 10 recipients per message and 50 messages per day. Confirm recipients and text with the user first.",
+      "Send a message or reply from the connected mailbox's own address, as plain text or formatted. `body` is the plain text. `html` is optional formatted content: text formatting, links, lists, headings and tables are kept; everything else, including images, styles and scripts, is removed. Without `body` the plain text is made from the HTML. `attachments` (at most 5, 10 MB in total): a file of a message in this mailbox by the ids read_thread lists (message_id, attachment_id); a text file you write (filename, text, content_type); or a small file as base64 (filename, base64, content_type), at most 1 MB. Programs, scripts and HTML or SVG files are refused by name. Confirm with the user which files go to whom. At most 10 recipients per message and 50 messages per day. Confirm recipients and text with the user first.",
     );
     expect(byName.create_draft!.description).toBe(
-      "Save a new message or a reply as a draft in the connected mailbox. Nothing is sent. `body` is the plain text. `html` is optional formatted content: text formatting, links, lists, headings and tables are kept; everything else, including images, styles and scripts, is removed. Without `body` the plain text is made from the HTML.",
+      "Save a new message or a reply as a draft in the connected mailbox. Nothing is sent. `body` is the plain text. `html` is optional formatted content: text formatting, links, lists, headings and tables are kept; everything else, including images, styles and scripts, is removed. Without `body` the plain text is made from the HTML. `attachments` (at most 5, 10 MB in total): a file of a message in this mailbox by the ids read_thread lists (message_id, attachment_id); a text file you write (filename, text, content_type); or a small file as base64 (filename, base64, content_type), at most 1 MB. Programs, scripts and HTML or SVG files are refused by name. Confirm with the user which files go to whom.",
     );
     for (const tool of Object.values(byName)) expect(tool.outputSchema).toBeDefined();
   });
@@ -178,8 +178,21 @@ describe("MCP endpoint", () => {
   it("advertises the core input schemas with their fields, required keys and no extra keys", async () => {
     const byName = await listTools();
     expect(Object.keys(byName.send_mail!.inputSchema.properties ?? {}).sort()).toEqual(
-      ["bcc", "body", "cc", "html", "in_reply_to", "subject", "to"].sort(),
+      ["attachments", "bcc", "body", "cc", "html", "in_reply_to", "subject", "to"].sort(),
     );
+    // attachments: at most five, each exactly one of three strict shapes.
+    const attachments = byName.send_mail!.inputSchema.properties!.attachments as {
+      type: string;
+      maxItems: number;
+      items: { anyOf: { properties: Record<string, unknown>; required: string[]; additionalProperties: boolean }[] };
+    };
+    expect(attachments).toMatchObject({ type: "array", maxItems: MAIL_LIMITS.attachmentsPerMessage });
+    expect(attachments.items.anyOf.map((o) => [Object.keys(o.properties), o.required, o.additionalProperties])).toEqual([
+      [["message_id", "attachment_id"], ["message_id", "attachment_id"], false],
+      [["filename", "text", "content_type"], ["filename", "text"], false],
+      [["filename", "base64", "content_type"], ["filename", "base64", "content_type"], false],
+    ]);
+    expect(byName.create_draft!.inputSchema.properties!.attachments).toEqual(attachments);
     // body and html are each optional; the rule "at least one of them" is checked on the call.
     expect(byName.send_mail!.inputSchema.required ?? []).toEqual([]);
     expect(byName.read_thread!.inputSchema.required).toEqual(["thread_id"]);

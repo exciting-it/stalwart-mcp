@@ -36,7 +36,8 @@ import {
   MoveMailRequest,
   MailError,
   type MailErrorCode,
-  type OutgoingMessage,
+  type OutgoingMessageBase,
+  type PreparedMessage,
   ReadAttachmentInput,
   ReadThreadInput,
   SearchMailInput,
@@ -45,6 +46,7 @@ import {
 import type { z } from "zod";
 import { clock } from "../clock";
 import { cleanText, htmlToText } from "../content/sanitize";
+import { prepareAttachments } from "../content/outgoing-attachment";
 import { sanitizeHtml } from "../content/sanitize-html";
 import { type Area, enabledAreas } from "../config";
 import type { Env } from "../env";
@@ -89,7 +91,7 @@ const COLLAB_OP_AREA: Record<z.output<typeof CollabRequest>["op"], Area> = {
 
 export type VaultResult<T> = { ok: true; value: T } | { ok: false; code: MailErrorCode };
 
-export type SendResult = RecordedSend & { deduplicated: boolean };
+export type SendResult = RecordedSend & { deduplicated: boolean; attachments: number };
 
 /** The account id and address of the calling grant; both must match the stored connection. */
 export interface Caller {
@@ -130,25 +132,31 @@ function parse<S extends z.ZodTypeAny>(schema: S, input: unknown): z.output<S> {
 }
 
 /**
- * The message as it is sent or stored. Its HTML is sanitized here, in the vault, before the
- * fingerprint is taken and before the mailbox is touched. The text part is `body` when given,
- * otherwise the text of the sanitized HTML, cleaned as the reading side cleans mail text. HTML
- * with nothing visible left is refused without a `body` and left out with one. HTML the parser
- * cannot place is refused. Without HTML the message is returned as it is.
+ * The message as it is sent or stored. Its HTML is sanitized and its attachments are prepared
+ * (`prepareAttachments`: decoded, checked, hashed) here, in the vault, before the fingerprint is
+ * taken and before the mailbox is touched. The text part is `body` when given, otherwise the text
+ * of the sanitized HTML, cleaned as the reading side cleans mail text. HTML with nothing visible
+ * left is refused without a `body` and left out with one. HTML the parser cannot place is
+ * refused. Without HTML the message is returned as it is.
  */
-async function prepareOutgoing(message: OutgoingMessage): Promise<OutgoingMessage & { body: string }> {
-  const { html, ...rest } = message;
+async function prepareOutgoing(message: z.output<typeof OutgoingMessageBase>): Promise<PreparedMessage> {
+  const { html, attachments: given, ...rest } = message;
+  let body: string;
+  let clean: string | undefined;
   if (html === undefined) {
     if (rest.body === undefined) throw new MailError("invalid_input");
-    return { ...rest, body: rest.body };
+    body = rest.body;
+  } else {
+    const sanitized = await sanitizeHtml(html);
+    if (sanitized === null) throw new MailError("invalid_input");
+    const text = cleanText(htmlToText(sanitized), MAIL_LIMITS.htmlInputChars).text;
+    const visible = text.trim() !== "";
+    if (rest.body === undefined && !visible) throw new MailError("invalid_input");
+    body = rest.body ?? text;
+    if (visible) clean = sanitized;
   }
-  const clean = await sanitizeHtml(html);
-  if (clean === null) throw new MailError("invalid_input");
-  const text = cleanText(htmlToText(clean), MAIL_LIMITS.htmlInputChars).text;
-  const visible = text.trim() !== "";
-  if (rest.body !== undefined) return visible ? { ...rest, body: rest.body, html: clean } : { ...rest, body: rest.body };
-  if (!visible) throw new MailError("invalid_input");
-  return { ...rest, body: text, html: clean };
+  const attachments = await prepareAttachments(given);
+  return clean === undefined ? { ...rest, body, attachments } : { ...rest, body, html: clean, attachments };
 }
 
 export class MailboxOperations {
@@ -266,11 +274,13 @@ export class MailboxOperations {
     return this.#operation("sendMail", caller, () => parse(SendMailInput, input), async (parsed) => {
       this.#requireAllowed([...parsed.to, ...parsed.cc, ...parsed.bcc]);
       const message = await prepareOutgoing(parsed);
-      return this.#exactlyOnce<SendResult>(await sendFingerprint(message), 1, {
+      // The fingerprint covers the attachments, so a recorded send carried this many.
+      const attachments = message.attachments?.length ?? 0;
+      return this.#exactlyOnce<SendResult>(await sendFingerprint(message, message.attachments), 1, {
         send: () => this.#upstream(accountId, (a) => a.sendMail(message)),
         record: (sent) => ({ message_id: sent.message_id, recipients: sent.recipients }),
         again: (sent) => ({ ...sent, deduplicated: true }),
-        recorded: (sent) => ({ ...sent, deduplicated: true }),
+        recorded: (sent) => ({ ...sent, deduplicated: true, attachments }),
       });
     });
   }

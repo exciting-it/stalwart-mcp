@@ -9,9 +9,9 @@ import { STALWART } from "../src/stalwart/endpoints";
 import { addDefaultAddressBook, addDefaultCalendar, AREA_SCOPES, COLLAB_CAPABILITIES } from "./fake-stalwart-collab";
 import { handleJmapRequest } from "./fake-stalwart-jmap";
 import type { FakeArea } from "./fake-stalwart-support";
-import type { FakeAccount, FakeAddress, FakeContact, FakeEmail, FakeEvent, FakeFolder, FakeState, SchedulingMessage, SentMessage } from "./fake-stalwart-state";
+import type { FakeAccount, FakeAddress, FakeContact, FakeEmail, FakeEvent, FakeFolder, FakeState, FakeUpload, SchedulingMessage, SentMessage } from "./fake-stalwart-state";
 
-export type { FakeAccount, FakeAddress, FakeAddressBook, FakeAttachment, FakeCalendar, FakeContact, FakeEmail, FakeEvent, FakeFolder, FakeIdentity, FakeState, SchedulingMessage, SentMessage } from "./fake-stalwart-state";
+export type { FakeAccount, FakeAddress, FakeAddressBook, FakeAttachment, FakeCalendar, FakeContact, FakeEmail, FakeEvent, FakeFolder, FakeIdentity, FakeState, FakeUpload, SchedulingMessage, SentMessage } from "./fake-stalwart-state";
 
 export interface RecordedRequest {
   url: string;
@@ -20,6 +20,9 @@ export interface RecordedRequest {
   /** Parsed JSON for JSON bodies, an object of fields for form bodies, the raw text otherwise, null when empty. */
   // `any` on purpose: tests read recorded bodies freely (`r.body.methodCalls`, `r.body.grant_type`).
   body: any;
+  /** For an upload only: its Content-Type and the bytes as sent. */
+  contentType?: string | null;
+  bytes?: Uint8Array;
 }
 
 export type FailureKind = "http-503" | "http-401" | "network" | "invalid-json" | "submission-rejected";
@@ -130,8 +133,12 @@ export interface FakeStalwart {
   expireAccessToken(email: string): void;
   folderId(email: string, role: string): string | null;
   email(email: string, id: string): FakeEmail | undefined;
+  /** The blobs uploaded to `email`'s account, oldest first. */
+  uploadedBlobs(email: string): FakeUpload[];
 }
 
+/** The session's `maxSizeUpload`: the largest blob the upload endpoint takes. */
+const MAX_SIZE_UPLOAD = 50_000_000;
 const CLIENT_ID = "test-client";
 const CLIENT_SECRET = "test-secret";
 const ACCESS_TTL_SECONDS = 3600;
@@ -240,6 +247,7 @@ export function createFakeStalwart(): FakeStalwart {
       calendars: new Map(),
       events: new Map(),
       scheduling: [],
+      uploads: [],
     };
     addDefaultAddressBook(account, nextId("ab"));
     addDefaultCalendar(account, nextId("cal"));
@@ -430,7 +438,7 @@ export function createFakeStalwart(): FakeStalwart {
     return {
       capabilities: {
         "urn:ietf:params:jmap:core": {
-          maxSizeUpload: 50_000_000,
+          maxSizeUpload: MAX_SIZE_UPLOAD,
           maxConcurrentUpload: 4,
           maxSizeRequest: 10_000_000,
           maxConcurrentRequests: 4,
@@ -485,6 +493,23 @@ export function createFakeStalwart(): FakeStalwart {
     });
   }
 
+  /**
+   * RFC 8620 §6.1: stores the body as a blob of the account in the path, typed by the request's
+   * Content-Type, and answers 201 with `accountId`, `blobId`, `type` and `size`. The token's own
+   * account only; more than the session's `maxSizeUpload` is 413.
+   */
+  function uploadEndpoint(req: Request, match: RegExpExecArray, content: Uint8Array): Response {
+    const bearer = bearerAccount(req);
+    if (!bearer) return unauthorized();
+    const accountId = decodeURIComponent(match[1]!);
+    if (accountId !== bearer.account.accountId) return new Response("fake-stalwart: forbidden", { status: 403 });
+    if (content.length > MAX_SIZE_UPLOAD) return new Response("fake-stalwart: too large", { status: 413 });
+    const type = req.headers.get("content-type") ?? "application/octet-stream";
+    const blobId = nextId("up");
+    bearer.account.uploads.push({ blobId, type, content: content.slice() });
+    return json({ accountId, blobId, type, size: content.length }, 201);
+  }
+
   function unauthorized(): Response {
     return new Response("fake-stalwart: unauthorized", {
       status: 401,
@@ -494,14 +519,18 @@ export function createFakeStalwart(): FakeStalwart {
 
   async function fakeFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
     const req = new Request(input, init);
-    const text = req.method === "GET" || req.method === "HEAD" ? "" : new TextDecoder().decode(await req.arrayBuffer());
-    requests.push({
+    const raw = req.method === "GET" || req.method === "HEAD" ? new Uint8Array(0) : new Uint8Array(await req.arrayBuffer());
+    const text = new TextDecoder().decode(raw);
+    const url = new URL(req.url);
+    const upload = /^\/jmap\/upload\/([^/]+)\/$/.exec(url.pathname);
+    const recorded: RecordedRequest = {
       url: req.url,
       method: req.method,
       authorization: req.headers.get("authorization"),
       body: parseBody(text, req.headers.get("content-type")),
-    });
-    const url = new URL(req.url);
+    };
+    if (upload) Object.assign(recorded, { contentType: req.headers.get("content-type"), bytes: raw });
+    requests.push(recorded);
     if (url.origin !== STALWART.origin) throw new TypeError("fake-stalwart: no route to host");
 
     const failure = transportFailures.shift();
@@ -538,6 +567,7 @@ export function createFakeStalwart(): FakeStalwart {
     }
     const download = /^\/jmap\/download\/([^/]+)\/([^/]+)\/([^/]+)$/.exec(url.pathname);
     if (download && req.method === "GET") return downloadEndpoint(req, url, download);
+    if (upload && req.method === "POST") return uploadEndpoint(req, upload, raw);
     if (url.pathname === "/auth/token" && req.method === "POST") {
       return tokenEndpoint(req, new URLSearchParams(text));
     }
@@ -689,5 +719,6 @@ export function createFakeStalwart(): FakeStalwart {
       return null;
     },
     email: (email, id) => accounts.get(key(email))?.emails.get(id),
+    uploadedBlobs: (email) => [...(accounts.get(key(email))?.uploads ?? [])],
   };
 }

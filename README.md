@@ -27,8 +27,8 @@ Why it is built this way, and what its security rests on: [docs/design.md](docs/
 | `list_mailboxes` | Folders with role and message counts, and the address of the connected mailbox |
 | `search_mail` | Search by text, sender, recipient, subject, date, folder, unread, attachment |
 | `read_thread` | A whole conversation as plain text, with each attachment's name, size, type and id |
-| `create_draft` | Save a new mail or a reply in Drafts, plain text or with sanitized HTML |
-| `send_mail` | Send a new mail or a reply from the mailbox's own address, plain text or with sanitized HTML |
+| `create_draft` | Save a new mail or a reply in Drafts, plain text or with sanitized HTML, with up to 5 attachments |
+| `send_mail` | Send a new mail or a reply from the mailbox's own address, plain text or with sanitized HTML, with up to 5 attachments |
 | `move_mail` | Move messages into another folder of the mailbox |
 | `delete_mail` | Move messages to the Trash folder |
 | `mark_mail` | Mark messages read or unread, flagged or not; nothing else of a message changes |
@@ -66,6 +66,21 @@ message goes out as `multipart/alternative` with a `text/plain` and a `text/html
 `body` the plain part is the text of the sanitized HTML. HTML with nothing visible left is
 refused when no `body` is given, and left out when one is.
 
+`send_mail` and `create_draft` take up to 5 `attachments`, each one of three kinds: a file of a
+message in this mailbox by the ids `read_thread` lists (`message_id`, `attachment_id`; reused on
+the server, its stored name and type kept); a text file the AI tool writes (`filename`, `text`,
+`content_type` one of `text/plain`, `text/csv`, `text/markdown`, `text/calendar`, `text/html`,
+`application/json`), stored as UTF-8; or a small file as base64 (`filename`, `base64`,
+`content_type` one of those or `application/pdf`, `image/png`, `image/jpeg`, `image/gif`,
+`image/webp`; a PDF or an image must start with that type's signature). A name that ends like a
+program, a script or an HTML or SVG file (`.exe`, `.js`, `.html`, `.svg` and the others in
+`EXECUTABLE_EXTENSIONS` in `src/mail.ts`) is refused in all three ways, for a stored file by its
+stored name. Files are decoded, checked and uploaded to the session's `uploadUrl` in the
+mailbox's vault before the message is created; anything refused leaves nothing uploaded or sent.
+The send fingerprint covers the attachments (the ids of a stored file, name, type and SHA-256 of
+any other), so an identical call within 10 minutes is answered from the first and uploads nothing.
+The allow-list, the daily limit and the dedupe of every send apply unchanged.
+
 `read_attachment` hands one attachment to the AI tool; it does not interpret files. What it is
 delivered as is decided from the bytes, not from the type the sender declared: PNG, JPEG, GIF
 and WebP (by their signatures) come back as an MCP `image` block; a text file (`text/*`, JSON,
@@ -79,7 +94,7 @@ kind and, for text, the text itself); the image or file follows it. The download
 and the base64 happen in the mailbox's vault, not in the Worker that answers the request.
 
 It cannot remove mail for good, set marks other than read and flagged, manage folders, touch
-filters, send attachments, convert PDF or Office files into text, or send from another address. Deleting always means moving to Trash, and `move_mail`
+filters, send programs, scripts or HTML files as attachments, convert PDF or Office files into text, or send from another address. Deleting always means moving to Trash, and `move_mail`
 brings a message back. The connector never empties the Trash; whether the mail server does is
 its own setting (see Known limits).
 
@@ -133,6 +148,11 @@ Constants live in `MAIL_LIMITS` in `src/mail.ts` and, for contacts and calendars
 | Page of a text attachment (`max_chars`) | at most 50,000 characters (default 20,000); `offset` 0 to 10,000,000 |
 | Body text accepted when writing | 100,000 characters |
 | HTML accepted when writing (before sanitizing) | 200,000 characters |
+| Attachments per `send_mail` or `create_draft` | 5 |
+| Text file written by the AI tool (`text`) | 200,000 characters |
+| File given as base64 | 1,000,000 bytes decoded |
+| All attachments of one message (stored files by the size the server reports) | 10,000,000 bytes (`too_large`) |
+| File name of a text or base64 file | 1 to 200 characters, one line, no path, no leading or trailing dot or space |
 | Worker access token lifetime | 1 hour |
 | Worker refresh token | ends after 30 days without use |
 | Unused Stalwart connection | wiped after 30 days without a tool call |
@@ -386,6 +406,20 @@ These need the OAuth client and a test mailbox on your server:
   each read with `read_attachment`; whether the model sees the image and can read the PDF.
 - [ ] How large an attachment each client you use accepts in a tool result (an image block, an
   embedded file of close to 3 MB, which is about 4 MB as base64).
+- [ ] Sending attachments against the real server: the session's `uploadUrl` is on the server's
+  origin and names `{accountId}`; an upload answers 201 or 200 with `accountId`, `blobId`, `type`
+  and `size`, and refuses another account's id in the path; `Email/set` create accepts
+  `attachments` with `blobId`, `type`, `name`, `disposition: "attachment"` and, for a text part,
+  `charset`.
+- [ ] A reused `blobId` of another message of the mailbox (an attachment of a received mail) is
+  accepted in `Email/set` create, and an unknown blob is refused (the connector maps either
+  refusal to `upstream_rejected`).
+- [ ] A sent message arrives with its attachments (names, types, a UTF-8 text file with its
+  umlauts intact, a PDF and an image that open), and the copy in Sent holds them too.
+- [ ] The largest file Stalwart accepts (`maxSizeUpload` in the session, and the message size
+  limit of the submission) against the connector's 1 MB per base64 file and 10 MB per message.
+- [ ] Whether one MCP call with several base64 files fits the request size and CPU of the Worker
+  on the Workers Free plan (see Known limits).
 - [ ] Whether the server empties Trash on its own (Stalwart's auto-expunge), and whether that is what you want now that an AI tool can move mail there.
 - [ ] Whether Stalwart ever reuses an account id (a reused id would meet the old vault).
 - [ ] Remove the application and reconnect with two AI tools: do the earlier tools regain access (see "Known limits")?
@@ -545,6 +579,13 @@ production a request under a host other than `PUBLIC_ORIGIN` answers 404.
   The text block that leads every result names the attachment either way. Images are delivered
   as images only for PNG, JPEG, GIF and WebP; other image types are files. ISO-8859-1 text is
   decoded as windows-1252, as browsers do.
+- Sending attachments: one MCP request is read up to 4 MiB (the MCP SDK's default request body
+  limit; a larger one is answered 413 before any tool runs). One base64 file of 1 MB is about
+  1.33 MB of request, so three such files fit in one call and four or five do not; attaching a
+  file of the mailbox by its ids costs no request size. The Worker parses that JSON and
+  checks the base64 shape on the Workers Free plan's 10 ms of CPU per request; the decoding,
+  hashing and uploads run in the vault. Uploaded files of a message that then fails are left to
+  the server, which expires unused blobs.
 - The tool-call limit counts per clock minute, not a sliding minute: up to 120 calls can land
   within a few seconds around a minute boundary.
 - `/token` and `/register` are limited per source address. AI vendors call them from shared

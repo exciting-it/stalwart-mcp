@@ -6,7 +6,7 @@
  */
 import type { JmapInvocation } from "../src/jmap/jmap-client";
 import { COLLAB_CAPABILITIES, COLLAB_METHODS } from "./fake-stalwart-collab";
-import type { FakeAccount, FakeAddress, FakeEmail, FakeState } from "./fake-stalwart-state";
+import type { FakeAccount, FakeAddress, FakeAttachment, FakeEmail, FakeState } from "./fake-stalwart-state";
 import {
   type Args,
   contains,
@@ -385,7 +385,35 @@ const identityGet: Handler = (args, { account, callId, out }) => {
 const CREATE_KEYS = new Set([
   "mailboxIds", "keywords", "from", "to", "cc", "bcc", "replyTo", "subject", "inReplyTo",
   "references", "messageId", "sentAt", "receivedAt", "bodyValues", "textBody", "htmlBody",
+  "attachments",
 ]);
+
+const ATTACHMENT_KEYS = new Set(["blobId", "type", "name", "disposition", "charset"]);
+
+/**
+ * The `attachments` of an `Email/set` create (RFC 8621 §4.6): each part names a blob of this
+ * account (an upload, or a part of one of its messages) with its type, name and disposition.
+ * A blob the account does not hold, or a malformed part, refuses the create (`invalidProperties`).
+ */
+function createAttachments(account: FakeAccount, raw: unknown): FakeAttachment[] | null {
+  if (raw === undefined) return [];
+  if (!Array.isArray(raw)) return null;
+  const out: FakeAttachment[] = [];
+  for (const p of raw as unknown[]) {
+    if (!isObject(p) || Object.keys(p).some((k) => !ATTACHMENT_KEYS.has(k))) return null;
+    if (typeof p.blobId !== "string" || typeof p.type !== "string" || p.disposition !== "attachment") return null;
+    if (p.name !== undefined && p.name !== null && typeof p.name !== "string") return null;
+    if (p.charset !== undefined && typeof p.charset !== "string") return null;
+    const content =
+      account.uploads.find((u) => u.blobId === p.blobId)?.content ??
+      [...account.emails.values()].flatMap((e) => e.attachments).find((a) => a.blobId === p.blobId)?.content;
+    if (content === undefined) return null;
+    const part: FakeAttachment = { blobId: p.blobId, name: (p.name as string | null | undefined) ?? null, size: content.length, type: p.type, content: content.slice() };
+    if (typeof p.charset === "string") part.charset = p.charset;
+    out.push(part);
+  }
+  return out;
+}
 
 function addressList(v: unknown): FakeAddress[] | null {
   if (v === undefined || v === null) return [];
@@ -442,6 +470,8 @@ function createEmail(account: FakeAccount, state: FakeState, raw: unknown): Fake
   const parts = [textBody, htmlBody].filter((p): p is { value: string; type: string } => p !== null);
   const text = parts.find((p) => p.type === "text/plain")?.value ?? null;
   const html = parts.find((p) => p.type === "text/html")?.value ?? null;
+  const attachments = createAttachments(account, raw.attachments);
+  if (attachments === null) return invalid("attachments");
 
   const id = state.nextId("em");
   const related = [...(inReplyTo ?? []), ...(references ?? [])];
@@ -464,7 +494,7 @@ function createEmail(account: FakeAccount, state: FakeState, raw: unknown): Fake
     text,
     html,
     preview: (text ?? html ?? "").replace(/\s+/g, " ").trim().slice(0, 256),
-    attachments: [],
+    attachments,
   };
 }
 
@@ -613,6 +643,7 @@ const emailSubmissionSet: Handler = (args, ctx) => {
         html: email.html,
         inReplyTo: email.inReplyTo,
         references: email.references,
+        attachments: email.attachments.map(({ name, type, size, content }) => ({ name, type, size, content })),
       }));
       submittedEmail.set(cid, emailId);
       createdIds.set(cid, submissionId);

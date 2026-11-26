@@ -278,6 +278,10 @@ export function createFakeMailStore() {
     const assertOwnMessage = (id: string | undefined): void => {
       if (id !== undefined && !account.messages.some((m) => m.id === id)) throw new MailError("not_found");
     };
+    /** A file attached by its ids must be one of this account's messages, as the mailbox checks. */
+    const assertOwnAttachments = (input: OutgoingMessage): void => {
+      for (const a of input.attachments ?? []) if ("message_id" in a) assertOwnMessage(a.message_id);
+    };
 
     return {
       async listMailboxes() {
@@ -302,8 +306,13 @@ export function createFakeMailStore() {
       async createDraft(input: OutgoingMessage) {
         record("createDraft");
         assertOwnMessage(input.in_reply_to);
+        assertOwnAttachments(input);
         counter += 1;
-        return { draft_id: `${account.accountId}-draft-${counter}`, folder_id: account.folders[1]!.id };
+        return {
+          draft_id: `${account.accountId}-draft-${counter}`,
+          folder_id: account.folders[1]!.id,
+          attachments: input.attachments?.length ?? 0,
+        };
       },
       async moveMail(input) {
         record("moveMail");
@@ -352,11 +361,13 @@ export function createFakeMailStore() {
       async sendMail(input: OutgoingMessage) {
         record("sendMail");
         assertOwnMessage(input.in_reply_to);
+        assertOwnAttachments(input);
         counter += 1;
         return {
           message_id: `${account.accountId}-sent-${counter}`,
           recipients: input.to.length + input.cc.length + input.bcc.length,
           deduplicated: false,
+          attachments: input.attachments?.length ?? 0,
         };
       },
       async searchContacts(input) {

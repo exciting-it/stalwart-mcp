@@ -43,6 +43,16 @@ export const MAIL_LIMITS = {
   attachmentPageMax: 50_000,
   attachmentPageDefault: 20_000,
   attachmentOffsetMax: 10_000_000,
+  /** Attachments one `send_mail` or `create_draft` may carry. */
+  attachmentsPerMessage: 5,
+  /** The `text` of one text file written by the AI tool. */
+  attachmentTextInputChars: 200_000,
+  /** One file given as base64, decoded. */
+  attachmentUploadBytes: 1_000_000,
+  /** All attachments of one message: stored size for a file of the mailbox, byte length for the others. */
+  attachmentsTotalBytes: 10_000_000,
+  /** The `filename` of a text or base64 file. */
+  attachmentNameChars: 200,
 } as const;
 
 export const UNTRUSTED_CONTENT_NOTICE =
@@ -61,6 +71,49 @@ export const EmailAddressSchema = z
 
 export const Filter = z.string().max(MAIL_LIMITS.filterChars);
 export const IsoDateTime = z.string().datetime({ offset: true });
+
+/**
+ * The one rule for text the write tools accept. Single-line text (names, titles, file names)
+ * carries no control character (`\p{Cc}`, line breaks included), no line or paragraph separator
+ * (U+2028, U+2029) and no bidi control (U+202A to U+202E, U+2066 to U+2069): none of them can
+ * smuggle a second property into a card, an event or a header, or make a name read differently
+ * than it is stored. Multi-line text (`notes`, `description`) may also carry `\n` and `\t`,
+ * nothing else of that list.
+ */
+const UNSAFE_IN_LINE = /[\p{Cc}\u2028\u2029\u202A-\u202E\u2066-\u2069]/u;
+const UNSAFE_IN_TEXT = /[^\P{Cc}\n\t]|[\u2028\u2029\u202A-\u202E\u2066-\u2069]/u;
+
+/** True when `value` is clean single-line text (see `UNSAFE_IN_LINE`). */
+export const isCleanLine = (value: string): boolean => !UNSAFE_IN_LINE.test(value);
+/** True when `value` is clean multi-line text: line breaks (`\n`) and tabs allowed. */
+export const isCleanText = (value: string): boolean => !UNSAFE_IN_TEXT.test(value);
+
+/**
+ * File types that run (or open in a browser) when the receiver opens them: an attachment whose
+ * name ends in one of these is refused, whichever way it was given. Mail clients open HTML and
+ * SVG files in a browser, so those go too; `text/html` as a content type stays allowed for a
+ * file with another name.
+ */
+export const EXECUTABLE_EXTENSIONS = [
+  ".exe", ".com", ".bat", ".cmd", ".scr", ".pif", ".msi", ".msp", ".js", ".jse", ".vbs", ".vbe",
+  ".wsf", ".wsh", ".ps1", ".jar", ".lnk", ".hta", ".cpl", ".dll", ".reg", ".iso", ".img", ".vhd",
+  ".vhdx", ".apk", ".app", ".dmg", ".pkg", ".sh", ".command", ".scpt", ".html", ".htm", ".svg",
+  ".xhtml",
+] as const;
+
+/**
+ * True when `name` ends in one of `EXECUTABLE_EXTENSIONS`: in any case, after compatibility
+ * normalization (a full-width dot or letter counts as the plain one), without invisible format
+ * characters, and before any trailing dots and white space (Windows drops those).
+ */
+export function isExecutableName(name: string): boolean {
+  const bare = name
+    .normalize("NFKC")
+    .replace(/\p{Cf}/gu, "")
+    .replace(/[\s.]+$/u, "")
+    .toLowerCase();
+  return EXECUTABLE_EXTENSIONS.some((ext) => bare.endsWith(ext));
+}
 
 // ---- tool inputs ----
 
@@ -109,6 +162,91 @@ export const ReadAttachmentInput = z
 export const OUTGOING_CONTENT_NOTE =
   "`body` is the plain text. `html` is optional formatted content: text formatting, links, lists, headings and tables are kept; everything else, including images, styles and scripts, is removed. Without `body` the plain text is made from the HTML.";
 
+/** How `send_mail` and `create_draft` describe `attachments` to the AI tool. */
+export const OUTGOING_ATTACHMENTS_NOTE =
+  "`attachments` (at most 5, 10 MB in total): a file of a message in this mailbox by the ids read_thread lists (message_id, attachment_id); a text file you write (filename, text, content_type); or a small file as base64 (filename, base64, content_type), at most 1 MB. Programs, scripts and HTML or SVG files are refused by name. Confirm with the user which files go to whom.";
+
+/** The content types of a text file written by the AI tool. */
+export const TEXT_ATTACHMENT_TYPES = [
+  "text/plain",
+  "text/csv",
+  "text/markdown",
+  "text/calendar",
+  "text/html",
+  "application/json",
+] as const;
+
+/** The content types of a file given as base64: the text types, PDF and four image types. */
+export const FILE_ATTACHMENT_TYPES = [
+  ...TEXT_ATTACHMENT_TYPES,
+  "application/pdf",
+  "image/png",
+  "image/jpeg",
+  "image/gif",
+  "image/webp",
+] as const;
+
+/**
+ * The decoded length of standard base64 (alphabet `A-Z a-z 0-9 + /`, padding optional but then
+ * complete, no white space), or null when `value` is not that. Arithmetic only: nothing is decoded.
+ */
+export function base64DecodedLength(value: string): number | null {
+  if (!/^[A-Za-z0-9+/]*={0,2}$/.test(value)) return null;
+  const pad = value.endsWith("==") ? 2 : value.endsWith("=") ? 1 : 0;
+  const core = value.length - pad;
+  const rest = core % 4;
+  if (rest === 1 || (pad > 0 && pad !== 4 - rest)) return null;
+  return ((core - rest) / 4) * 3 + (rest === 0 ? 0 : rest - 1);
+}
+
+/** The longest base64 text that can decode to `attachmentUploadBytes`. */
+const BASE64_MAX_CHARS = Math.ceil(MAIL_LIMITS.attachmentUploadBytes / 3) * 4;
+
+/**
+ * A file name the AI tool gives: one clean line (`isCleanLine`), no `/` or `\`, no leading or
+ * trailing white space or dot (so never `.` or `..`), and no ending of a file type that runs
+ * when opened (`isExecutableName`).
+ */
+export function isAttachmentFileName(name: string): boolean {
+  return isCleanLine(name) && !/[/\\]/.test(name) && !/^[\s.]|[\s.]$/u.test(name) && !isExecutableName(name);
+}
+
+const AttachmentFileName = z
+  .string()
+  .min(1)
+  .max(MAIL_LIMITS.attachmentNameChars)
+  .refine(isAttachmentFileName, "One line, no path, no leading or trailing dot or space, no program or script.");
+
+/**
+ * One attachment of an outgoing message, exactly one of: a file of a message of this mailbox by
+ * the ids `read_thread` lists (its name and type come from the mailbox); a text file written by
+ * the AI tool, stored as UTF-8; a small file as base64. The bytes of the last two are decoded,
+ * checked and uploaded in the vault.
+ */
+export const OutgoingAttachmentInput = z.union([
+  z.object({ message_id: MailIdSchema, attachment_id: AttachmentIdSchema }).strict(),
+  z
+    .object({
+      filename: AttachmentFileName,
+      text: z.string().max(MAIL_LIMITS.attachmentTextInputChars),
+      content_type: z.enum(TEXT_ATTACHMENT_TYPES).default("text/plain"),
+    })
+    .strict(),
+  z
+    .object({
+      filename: AttachmentFileName,
+      base64: z
+        .string()
+        .max(BASE64_MAX_CHARS)
+        .refine((v) => {
+          const n = base64DecodedLength(v);
+          return n !== null && n <= MAIL_LIMITS.attachmentUploadBytes;
+        }, "Standard base64 without white space, at most 1,000,000 bytes decoded."),
+      content_type: z.enum(FILE_ATTACHMENT_TYPES),
+    })
+    .strict(),
+]);
+
 /**
  * Plain (un-refined) object behind `CreateDraftInput` and `SendMailInput`. Exported because
  * refined schemas are Zod effects and the MCP SDK may need a plain object for registration.
@@ -128,6 +266,7 @@ export const OutgoingMessageBase = z
     /** Formatted content; sanitized against an allow-list in the vault before it is used. */
     html: z.string().max(MAIL_LIMITS.htmlInputChars).optional(),
     in_reply_to: MailIdSchema.optional(),
+    attachments: z.array(OutgoingAttachmentInput).max(MAIL_LIMITS.attachmentsPerMessage).default([]),
   })
   .strict();
 
@@ -253,7 +392,31 @@ export type MailFolder = z.infer<typeof MailFolderSchema>;
 export type MailAddress = z.infer<typeof MailAddressSchema>;
 export type MailSummary = z.infer<typeof MailSummarySchema>;
 export type ThreadMessage = z.infer<typeof ThreadMessageSchema>;
-export type OutgoingMessage = z.infer<typeof OutgoingMessageBase>;
+/** One attachment entry after validation (`content_type` of a text file defaulted). */
+export type OutgoingAttachmentT = z.output<typeof OutgoingAttachmentInput>;
+
+/** An outgoing message as a tool hands it on; `attachments` as given (absent: none). */
+export type OutgoingMessage = Omit<z.infer<typeof OutgoingMessageBase>, "attachments"> & {
+  attachments?: z.input<typeof OutgoingAttachmentInput>[];
+};
+
+/**
+ * An attachment as the vault hands it to the JMAP adapter: a file of a message of this mailbox by
+ * its ids, or bytes to upload with their name, type and SHA-256 (hex, for the send fingerprint).
+ * `charset` is `utf-8` for a text file written by the AI tool, null otherwise.
+ */
+export type PreparedAttachment =
+  | { message_id: string; attachment_id: string }
+  | { name: string; type: string; charset: "utf-8" | null; bytes: Uint8Array; sha256: string };
+
+/**
+ * The message as the vault prepared it: the text part filled in, HTML sanitized, attachments
+ * decoded (absent: none).
+ */
+export type PreparedMessage = Omit<OutgoingMessage, "body" | "attachments"> & {
+  body: string;
+  attachments?: PreparedAttachment[];
+};
 export type SearchMailInputT = z.infer<typeof SearchMailInput>;
 export type ReadThreadInputT = z.infer<typeof ReadThreadInput>;
 export type MoveMailRequestT = z.infer<typeof MoveMailRequest>;
@@ -323,15 +486,19 @@ export const ReadAttachmentResult = z.object({
  */
 export type AttachmentDelivery = Omit<z.infer<typeof ReadAttachmentResult>, "content_notice"> & { data: string | null };
 
+/** `attachments`: how many files the draft carries. */
 export const CreateDraftResult = z.object({
   draft_id: z.string(),
   folder_id: z.string(),
+  attachments: z.number().int(),
 });
 
+/** `attachments`: how many files the message carried. */
 export const SendMailResult = z.object({
   message_id: z.string(),
   recipients: z.number().int(),
   deduplicated: z.boolean(),
+  attachments: z.number().int(),
 });
 
 // ---- errors ----
@@ -390,7 +557,11 @@ export class MailError extends Error {
 
 // ---- adapter ----
 
-export interface MailboxAdapter {
+/**
+ * `Outgoing` is the message `createDraft` and `sendMail` take: the tool's `OutgoingMessage` on the
+ * Worker side, the vault's `PreparedMessage` for the JMAP adapter.
+ */
+export interface MailboxAdapter<Outgoing = OutgoingMessage> {
   listMailboxes(): Promise<{ folders: MailFolder[] }>;
   searchMail(
     input: SearchMailInputT,
@@ -400,14 +571,14 @@ export interface MailboxAdapter {
     messages: ThreadMessage[];
     omitted_messages: number;
   }>;
-  createDraft(input: OutgoingMessage): Promise<{ draft_id: string; folder_id: string }>;
+  createDraft(input: Outgoing): Promise<{ draft_id: string; folder_id: string; attachments: number }>;
   /** Moves messages into one folder of this mailbox. Throws when none could be moved. */
   moveMail(input: MoveMailRequestT): Promise<MoveMailOutcome>;
   /** Sets or clears read and flagged on messages of this mailbox. Throws when none could be marked. */
   markMail(input: MarkMailInputT): Promise<MarkMailOutcome>;
   sendMail(
-    input: OutgoingMessage,
-  ): Promise<{ message_id: string; recipients: number; deduplicated: boolean }>;
+    input: Outgoing,
+  ): Promise<{ message_id: string; recipients: number; deduplicated: boolean; attachments: number }>;
   /** One attachment of a message of this mailbox, decided and prepared for delivery. */
   readAttachment(input: ReadAttachmentInputT): Promise<AttachmentDelivery>;
 }

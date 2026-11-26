@@ -4,7 +4,8 @@
  * so the adapter cannot act on another account. It never destroys anything and never calls a
  * `/set` method other than `Email/set` create/update and `EmailSubmission/set` create. Deleting
  * a message means moving it to the Trash folder. It downloads only attachments of this account,
- * by a blob id the server named for them, through the session's download template.
+ * by a blob id the server named for them, through the session's download template, and uploads
+ * only the files of an outgoing message the vault prepared, through the session's upload template.
  */
 import {
   type AttachmentDelivery,
@@ -18,15 +19,26 @@ import {
   type MarkMailOutcome,
   type MoveMailOutcome,
   type MoveMailRequestT,
-  type OutgoingMessage,
+  isExecutableName,
+  type PreparedAttachment,
+  type PreparedMessage,
   type ReadAttachmentInputT,
   type ReadThreadInputT,
   type SearchMailInputT,
   type ThreadMessage,
 } from "../mail";
 import { z } from "zod";
-import { attachmentContent } from "../content/attachment";
-import { downloadBlob, jmapCall, methodResult, type JmapInvocation, type JmapSession, usableDownloadUrl } from "./jmap-client";
+import { attachmentContent, plainType } from "../content/attachment";
+import {
+  downloadBlob,
+  jmapCall,
+  methodResult,
+  type JmapInvocation,
+  type JmapSession,
+  uploadBlob,
+  usableDownloadUrl,
+  usableUploadUrl,
+} from "./jmap-client";
 import {
   ATTACHMENT_PART_PROPERTIES,
   attachmentName,
@@ -79,7 +91,30 @@ function bodyOf(text: string, html: string | undefined): Record<string, unknown>
   };
 }
 
-export class JmapMailboxAdapter implements MailboxAdapter {
+type StoredRef = Extract<PreparedAttachment, { message_id: string }>;
+type Upload = Exclude<PreparedAttachment, StoredRef>;
+const isStored = (a: PreparedAttachment): a is StoredRef => "message_id" in a;
+
+/** A charset the server reported for a stored text part, passed on when it is a plain token. */
+const CHARSET_TOKEN = /^[a-z0-9][a-z0-9._-]{0,39}$/;
+
+/**
+ * The name a stored attachment goes out with: the stored one, cleaned to one line and trimmed;
+ * `attachment` when nothing usable is left (no name, or only dots).
+ */
+function storedName(name: string | null | undefined): string {
+  const cleaned = attachmentName(name)?.trim() ?? "";
+  return /^\.*$/.test(cleaned) ? "attachment" : cleaned;
+}
+
+/** One entry of the Email's `attachments` (RFC 8621 §4.6); the server builds the MIME structure. */
+function attachmentPart(blobId: string, type: string, name: string, charset: string | null): Record<string, unknown> {
+  const part: Record<string, unknown> = { blobId, type, name, disposition: "attachment" };
+  if (charset !== null) part.charset = charset;
+  return part;
+}
+
+export class JmapMailboxAdapter implements MailboxAdapter<PreparedMessage> {
   readonly #accountId: string;
   readonly #accessToken: string;
   readonly #session: JmapSession;
@@ -218,18 +253,28 @@ export class JmapMailboxAdapter implements MailboxAdapter {
   }
 
   /**
-   * Looks up folders, the mailbox's own identity and the replied-to message; builds the Email.
-   * `input` is the message as the vault prepared it (`prepareOutgoing`): the text part filled in
-   * and any HTML already sanitized.
+   * Looks up folders, the mailbox's own identity, the replied-to message and the messages whose
+   * files are attached; uploads the other files; builds the Email. `input` is the message as the
+   * vault prepared it (`prepareOutgoing`): the text part filled in, any HTML already sanitized and
+   * the files decoded and checked.
    */
-  async #prepare(input: OutgoingMessage): Promise<Outgoing> {
+  async #prepare(input: PreparedMessage): Promise<Outgoing> {
     if (input.body === undefined) throw new MailError("invalid_input");
+    // Checked before anything is asked, so a session that cannot upload costs no request.
+    const attachments = input.attachments ?? [];
+    if (attachments.some((a) => !isStored(a)) && usableUploadUrl(this.#session.uploadUrl) === null) {
+      throw new MailError("mailbox_unsupported");
+    }
     const calls: Call[] = [
       ["Mailbox/get", { ids: null, properties: ["id", "role"] }, "m"],
       ["Identity/get", { ids: null }, "i"],
     ];
     if (input.in_reply_to !== undefined) {
       calls.push(["Email/get", { ids: [input.in_reply_to], properties: ["id", "messageId", "references", "subject"] }, "r"]);
+    }
+    const sources = [...new Set(attachments.filter(isStored).map((a) => a.message_id))];
+    if (sources.length > 0) {
+      calls.push(["Email/get", { ids: sources, properties: ["id", "attachments"], bodyProperties: ATTACHMENT_PART_PROPERTIES }, "a"]);
     }
     const responses = await this.#call(calls);
     const folders = getResult(JmapMailboxRole, methodResult(responses, "m", "Mailbox/get")).list;
@@ -264,15 +309,57 @@ export class JmapMailboxAdapter implements MailboxAdapter {
     if (input.to.length > 0) email.to = addresses(input.to);
     if (input.cc.length > 0) email.cc = addresses(input.cc);
     if (input.bcc.length > 0) email.bcc = addresses(input.bcc);
+    if (attachments.length > 0) email.attachments = await this.#attachments(attachments, responses);
     return { email, identityId: identity.id, draftsId, sentId };
   }
 
-  async createDraft(input: OutgoingMessage): Promise<{ draft_id: string; folder_id: string }> {
+  /**
+   * The Email's `attachments`, in the order given. A stored file is looked up in the answer to
+   * `Email/get` "a": a message that is not this account's, or that has no attachment with that part
+   * id, is `not_found`; its blob is reused with its stored name (refused, `invalid_input`, when it
+   * ends like a program) and its stored type when that is a plain media type. Then the total
+   * (stored sizes as the server reports them, byte lengths of the rest) is checked
+   * (`too_large`), and only then are the other files uploaded, one after the other.
+   */
+  async #attachments(attachments: PreparedAttachment[], responses: JmapInvocation[]): Promise<Record<string, unknown>[]> {
+    const stored = attachments.some(isStored)
+      ? getResult(JmapEmailAttachments, methodResult(responses, "a", "Email/get", { idsFromInput: true })).list
+      : [];
+    const resolve = (ref: StoredRef) => {
+      const part = stored.find((e) => e.id === ref.message_id)?.attachments?.find((p) => p.partId === ref.attachment_id);
+      if (!part) throw new MailError("not_found");
+      if (!MailIdSchema.safeParse(part.blobId).success) throw new MailError("upstream_rejected");
+      const name = storedName(part.name);
+      if (isExecutableName(part.name ?? "") || isExecutableName(name)) throw new MailError("invalid_input");
+      const type = plainType(part.type) ?? "application/octet-stream";
+      const charset = part.charset?.trim().toLowerCase() ?? "";
+      const textCharset = type.startsWith("text/") && CHARSET_TOKEN.test(charset) ? charset : null;
+      return { size: part.size, entry: attachmentPart(part.blobId!, type, name, textCharset) };
+    };
+    const resolved = attachments.map((a) => (isStored(a) ? resolve(a) : null));
+    const total = attachments.reduce((n, a, i) => n + (isStored(a) ? resolved[i]!.size : a.bytes.length), 0);
+    if (total > MAIL_LIMITS.attachmentsTotalBytes) throw new MailError("too_large");
+
+    const parts: Record<string, unknown>[] = [];
+    for (const [i, a] of attachments.entries()) {
+      parts.push(isStored(a) ? resolved[i]!.entry : await this.#upload(a));
+    }
+    return parts;
+  }
+
+  /** Uploads one prepared file and answers its `attachments` entry. */
+  async #upload(file: Upload): Promise<Record<string, unknown>> {
+    const contentType = file.charset === null ? file.type : `${file.type}; charset=${file.charset}`;
+    const blobId = await uploadBlob(this.#session, this.#accessToken, this.#accountId, file.bytes, contentType);
+    return attachmentPart(blobId, file.type, file.name, file.charset);
+  }
+
+  async createDraft(input: PreparedMessage): Promise<{ draft_id: string; folder_id: string; attachments: number }> {
     const { email, draftsId } = await this.#prepare(input);
     const responses = await this.#call([["Email/set", { create: { draft: email } }, "d"]]);
     const draftId = createdId(methodResult(responses, "d", "Email/set"), "draft");
     if (draftId === null) throw new MailError("upstream_rejected");
-    return { draft_id: draftId, folder_id: draftsId };
+    return { draft_id: draftId, folder_id: draftsId, attachments: input.attachments?.length ?? 0 };
   }
 
   /**
@@ -337,7 +424,9 @@ export class JmapMailboxAdapter implements MailboxAdapter {
    * (no answer, 5xx, unreadable, method responses missing) is `send_unconfirmed`: the mail may
    * have gone out, so it must not be sent again blindly. A refusal Stalwart states is definite.
    */
-  async sendMail(input: OutgoingMessage): Promise<{ message_id: string; recipients: number; deduplicated: boolean }> {
+  async sendMail(
+    input: PreparedMessage,
+  ): Promise<{ message_id: string; recipients: number; deduplicated: boolean; attachments: number }> {
     const { email, identityId, draftsId, sentId } = await this.#prepare(input);
     const afterSend: Record<string, unknown> =
       sentId === null
@@ -370,6 +459,7 @@ export class JmapMailboxAdapter implements MailboxAdapter {
       message_id: draftId,
       recipients: input.to.length + input.cc.length + input.bcc.length,
       deduplicated: false,
+      attachments: input.attachments?.length ?? 0,
     };
   }
 }

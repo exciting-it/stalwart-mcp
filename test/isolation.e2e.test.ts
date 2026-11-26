@@ -421,6 +421,41 @@ describe("mail connector isolation, end to end", () => {
     }
   });
 
+  it("user A cannot attach user B's files; A's own files and written files go out with A's message", async () => {
+    const accountIdA = fake.addMailbox(A).accountId;
+    const a = await connect(fake, A);
+    await connect(fake, B);
+    const mine = fake.addMessage(A, { subject: "mine", attachments: [{ name: "report.pdf", type: "application/pdf", content: "%PDF-1.4 A's report" }] });
+    const theirs = fake.addMessage(B, { subject: "theirs", attachments: [{ name: "secret.pdf", type: "application/pdf", content: "%PDF-1.4 B's secret" }] });
+    const uploads = () => fake.requests.filter((r) => new URL(r.url).pathname.startsWith("/jmap/upload/"));
+    const base = { to: ["ok@test.example"], subject: "Files", body: "Attached." };
+
+    for (const tool of ["send_mail", "create_draft"]) {
+      const foreign = await callTool(a.accessToken!, tool, {
+        ...base,
+        attachments: [{ filename: "note.txt", text: "hello" }, { message_id: theirs.id, attachment_id: "3" }],
+      });
+      expect(foreign).toEqual({ isError: true, content: [{ type: "text", text: MAIL_ERROR_MESSAGES.not_found }] });
+    }
+    expect(uploads()).toHaveLength(0);
+    expect(fake.sent(A)).toEqual([]);
+    expect(fake.sent(B)).toEqual([]);
+
+    const sent = await callTool(a.accessToken!, "send_mail", {
+      ...base,
+      attachments: [{ message_id: mine.id, attachment_id: "3" }, { filename: "note.txt", text: "hello" }],
+    });
+    expect(sent.isError).toBeFalsy();
+    expect(structured(sent)).toMatchObject({ attachments: 2, deduplicated: false });
+    expect(fake.sent(A).map((m) => m.attachments.map((f) => f.name))).toEqual([["report.pdf", "note.txt"]]);
+    expect(JSON.stringify(fake.sent(A))).not.toContain("secret");
+    // The upload carried A's token into A's account.
+    expect(uploads()).toHaveLength(1);
+    expect(uploads()[0]!.authorization).toBe(`Bearer ${fake.tokensFor(A).accessToken}`);
+    expect(new URL(uploads()[0]!.url).pathname).toBe(`/jmap/upload/${accountIdA}/`);
+    expect(fake.uploadedBlobs(B)).toEqual([]);
+  });
+
   it("the same send_mail call twice over MCP delivers one message", async () => {
     const a = await connect(fake, A);
     const args = { to: ["ok@test.example"], subject: "Once", body: "Only one copy" };

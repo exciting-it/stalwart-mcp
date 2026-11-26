@@ -50,6 +50,7 @@ describe("fetchSession", () => {
     expect(session).toEqual({
       apiUrl: `${STALWART.origin}/jmap/`,
       downloadUrl: `${STALWART.origin}/jmap/download/{accountId}/{blobId}/{name}?accept={type}`,
+      uploadUrl: `${STALWART.origin}/jmap/upload/{accountId}/`,
       accountId,
       username: A,
       // The test config offers contacts and calendars: the token has a scope for each.
@@ -75,7 +76,7 @@ describe("fetchSession", () => {
     await expectMailError(fetchSession(accessToken), "upstream_rejected");
 
     // An adapter built from such a session (e.g. a stored one) refuses before any request.
-    const session: JmapSession = { apiUrl: `${EVIL}/jmap/`, downloadUrl: null, accountId: "acc1", username: A, capabilities: [] };
+    const session: JmapSession = { apiUrl: `${EVIL}/jmap/`, downloadUrl: null, uploadUrl: null, accountId: "acc1", username: A, capabilities: [] };
     const adapter = new JmapMailboxAdapter({ accountId: "acc1", accessToken, session });
     await expectMailError(adapter.listMailboxes(), "upstream_rejected");
     expect(fake.requests).toHaveLength(1);
@@ -390,7 +391,7 @@ describe("JmapMailboxAdapter", () => {
     fake.addMailbox(A);
     const a = await adapterFor(A);
     const r = await a.sendMail({ to: ["ok@test.example"], cc: ["c@test.example"], bcc: ["b@test.example"], subject: "s", body: "b" });
-    expect(r).toEqual({ message_id: expect.any(String), recipients: 3, deduplicated: false });
+    expect(r).toEqual({ message_id: expect.any(String), recipients: 3, deduplicated: false, attachments: 0 });
     expect(fake.sent(A)).toHaveLength(1);
     expect(fake.sent(A)[0]).toMatchObject({ emailId: r.message_id, subject: "s", text: "b" });
     const stored = fake.email(A, r.message_id)!;

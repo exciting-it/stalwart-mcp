@@ -26,10 +26,8 @@ import {
   UpdateEventInput,
   UpdateEventResult,
   canonicalTimeZone,
-  isCleanLine,
-  isCleanText,
 } from "../src/collab";
-import { MAIL_LIMITS } from "../src/mail";
+import { isCleanLine, isCleanText, MAIL_LIMITS } from "../src/mail";
 
 const AFTER = "2026-11-01T00:00:00Z";
 const BEFORE = "2026-11-08T00:00:00Z";

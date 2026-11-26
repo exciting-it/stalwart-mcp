@@ -69,6 +69,15 @@ export interface SentMessage {
   html: string | null;
   inReplyTo: string[] | null;
   references: string[] | null;
+  /** The files the message carried, as stored when it was submitted. */
+  attachments: { name: string | null; type: string; size: number; content: Uint8Array }[];
+}
+
+/** A blob uploaded to the account (RFC 8620 §6.1), by its id; `type` is the upload's Content-Type. */
+export interface FakeUpload {
+  blobId: string;
+  type: string;
+  content: Uint8Array;
 }
 
 export interface FakeAddressBook {
@@ -128,6 +137,8 @@ export interface FakeAccount {
   calendars: Map<string, FakeCalendar>;
   events: Map<string, FakeEvent>;
   scheduling: SchedulingMessage[];
+  /** Uploaded blobs, oldest first; `Email/set` create may attach them. */
+  uploads: FakeUpload[];
 }
 
 /** What the JMAP handlers need from the fake. */

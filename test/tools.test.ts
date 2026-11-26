@@ -151,6 +151,34 @@ describe("tools", () => {
     expect((search.structuredContent as { messages: unknown[] }).messages).toEqual([]);
   });
 
+  it("B's message as an attachment answers not found for A; a program by name is refused before the mailbox", async () => {
+    for (const name of ["send_mail", "create_draft"]) {
+      const foreign = await byName(name).execute(deps, grantA, {
+        subject: "Hi",
+        body: "x",
+        to: ["ok@test.example"],
+        attachments: [{ message_id: store.b.messageId, attachment_id: "1" }],
+      });
+      expect(text(foreign)).toBe(MAIL_ERROR_MESSAGES.not_found);
+      const own = await byName(name).execute(deps, grantA, {
+        subject: "Hi",
+        body: "x",
+        to: ["ok@test.example"],
+        attachments: [{ message_id: store.a.messageId, attachment_id: "1" }, { filename: "a.txt", text: "a" }],
+      });
+      expect(own.structuredContent).toMatchObject({ attachments: 2 });
+    }
+    const calls = store.calls.length;
+    const program = await byName("send_mail").execute(deps, grantA, {
+      subject: "Hi",
+      body: "x",
+      to: ["ok@test.example"],
+      attachments: [{ filename: "setup.EXE", base64: "TVo=", content_type: "text/plain" }],
+    });
+    expect(text(program)).toBe(MAIL_ERROR_MESSAGES.invalid_input);
+    expect(store.calls).toHaveLength(calls);
+  });
+
   it("refuses unknown input fields such as from or account_id", async () => {
     const attempts: [string, Record<string, unknown>][] = [
       ["list_mailboxes", { account_id: store.b.accountId }],

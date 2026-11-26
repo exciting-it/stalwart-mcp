@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { EmailAddressSchema, Filter, IsoDateTime, type MailboxAdapter, MailIdSchema } from "./mail";
+import { EmailAddressSchema, Filter, isCleanLine, isCleanText, IsoDateTime, type MailboxAdapter, MailIdSchema } from "./mail";
 
 /**
  * Contract of the contacts and calendar tools (docs/design.md): limits, tool input and result
@@ -122,22 +122,8 @@ export const ReadEventInput = z.object({ event_id: MailIdSchema }).strict();
 
 // ---- write inputs ----
 
-/**
- * The one rule for text the write tools accept. Single-line text (names, title, location,
- * organization, job title, phone number) carries no control character (`\p{Cc}`, line breaks
- * included), no line or paragraph separator (U+2028, U+2029) and no bidi control (U+202A to
- * U+202E, U+2066 to U+2069): none of them can smuggle a second property into a card or event, or
- * make a name read differently than it is stored. Multi-line text (`notes`, `description`) may
- * also carry `\n` and `\t`, nothing else of that list.
- */
-const UNSAFE_IN_LINE = /[\p{Cc}\u2028\u2029\u202A-\u202E\u2066-\u2069]/u;
-const UNSAFE_IN_TEXT = /[^\P{Cc}\n\t]|[\u2028\u2029\u202A-\u202E\u2066-\u2069]/u;
-
-/** True when `value` is clean single-line text (see `UNSAFE_IN_LINE`). */
-export const isCleanLine = (value: string): boolean => !UNSAFE_IN_LINE.test(value);
-/** True when `value` is clean multi-line text: line breaks (`\n`) and tabs allowed. */
-export const isCleanText = (value: string): boolean => !UNSAFE_IN_TEXT.test(value);
-
+// The rule for text the write tools accept (`isCleanLine`, `isCleanText`) lives in src/mail.ts,
+// shared with the file names of outgoing attachments.
 const CLEAN_LINE = "No control, separator or bidi characters.";
 
 /** Single-line text: no line break, so it cannot smuggle a second property into a card or event. */

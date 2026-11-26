@@ -16,7 +16,7 @@
  * confirmed, and `unconfirmed` when its outcome is unknown (the mail may have gone out). The rows
  * outlive a wipe of the connection, so a reconnect never reopens a send of the last 10 minutes.
  */
-import { MAIL_LIMITS, type OutgoingMessage } from "../mail";
+import { MAIL_LIMITS, type OutgoingMessage, type PreparedAttachment } from "../mail";
 
 const MINUTE_MS = 60_000;
 const DAY_MS = 86_400_000;
@@ -165,14 +165,25 @@ export function releaseSends(sql: SqlStorage, day: number, n: number): void {
 
 const normalized = (list: string[]): string[] => list.map((a) => a.toLowerCase()).sort();
 
+/** The fields of a message the fingerprint covers; its attachments come prepared, as a second argument. */
+type Fingerprinted = Pick<OutgoingMessage, "to" | "cc" | "bcc" | "subject" | "body" | "in_reply_to" | "html">;
+
+/** What identifies one attachment in the fingerprint: the reference, or name, type and content hash. */
+function attachmentKey(a: PreparedAttachment): string[] {
+  if ("message_id" in a) return ["message", a.message_id, a.attachment_id];
+  return ["file", a.name, a.charset === null ? a.type : `${a.type}; charset=${a.charset}`, a.sha256];
+}
+
 /**
  * SHA-256 (hex) over the lower-cased, sorted `to`, `cc` and `bcc` lists (each separately),
- * `subject`, `body`, `in_reply_to` and, when there is one, `html`: what makes two sends the same
- * message. It is taken of the message as it goes out (sanitized HTML, the text part filled in).
- * Without HTML the list ends where it ended before HTML existed, so a plain send keeps the
+ * `subject`, `body`, `in_reply_to`, when there is one `html`, and when there are any the
+ * `attachments` in their order (a file of the mailbox by its ids; any other file by name, type
+ * and the SHA-256 of its bytes): what makes two sends the same message. It is taken of the
+ * message as it goes out (sanitized HTML, the text part filled in, files decoded). Without HTML
+ * and attachments the list ends where it ended before either existed, so a plain send keeps the
  * fingerprint it had.
  */
-export async function sendFingerprint(m: OutgoingMessage): Promise<string> {
+export async function sendFingerprint(m: Fingerprinted, attachments: readonly PreparedAttachment[] = []): Promise<string> {
   const canonical = JSON.stringify([
     normalized(m.to),
     normalized(m.cc),
@@ -181,6 +192,7 @@ export async function sendFingerprint(m: OutgoingMessage): Promise<string> {
     m.body ?? null,
     m.in_reply_to ?? null,
     ...(m.html === undefined ? [] : [m.html]),
+    ...(attachments.length === 0 ? [] : [{ attachments: attachments.map(attachmentKey) }]),
   ]);
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(canonical));
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");

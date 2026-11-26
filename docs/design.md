@@ -15,7 +15,8 @@ Goals
 - One connector URL for every mailbox on the server. Sign-in with the mailbox login on
   Stalwart's own page; the AI tool never sees a password.
 - The AI tool can list folders, search, read a conversation and its attachments, write a draft,
-  send, move messages between folders or to the trash, and mark them read, unread or flagged.
+  send (with attachments), move messages between folders or to the trash, and mark them read,
+  unread or flagged.
 - One mailbox user can never reach another mailbox.
 - Limits, an audit trail and a block list that the AI tool cannot bypass.
 - Optionally, the mailbox's contacts and calendar: read, create, change, delete, events with
@@ -27,7 +28,8 @@ Not in scope
 - Removing mail for good; keywords other than read and flagged; folder management; Sieve filters
   and forwards.
 - Converting attachments (PDF, Office files, archives) into text: the connector hands the file
-  to the AI tool, which reads it with its own means. Sending attachments.
+  to the AI tool, which reads it with its own means. Sending programs, scripts or HTML files as
+  attachments, or files larger than the limits below.
 - Free/busy lookups; a comment with the answer to an invitation. Shared mailboxes, address books
   and calendars (only the user's own account is served). A trash for contacts and events
   (deleting them is permanent).
@@ -126,8 +128,8 @@ call.
 | `list_mailboxes` | read | Folders with role, total and unread counts, and the connected mailbox's address |
 | `search_mail` | read | Filter by text, from, to, subject, date range, folder, unread, has attachment; newest first; summaries with a short preview |
 | `read_thread` | read | All messages of a conversation as plain text with headers, attachment names, sizes, types and ids; long bodies are cut with a marker |
-| `create_draft` | write | New mail or reply, plain text or with sanitized HTML, saved in Drafts |
-| `send_mail` | write, external effect | Sends a new mail or reply, plain text or with sanitized HTML, copy in Sent |
+| `create_draft` | write | New mail or reply, plain text or with sanitized HTML, up to 5 attachments, saved in Drafts |
+| `send_mail` | write, external effect | Sends a new mail or reply, plain text or with sanitized HTML, up to 5 attachments, copy in Sent |
 | `move_mail` | write | Moves messages into one folder of the mailbox |
 | `delete_mail` | write | Moves messages to the Trash folder; the connector never empties it |
 | `mark_mail` | write | Sets or clears read (`$seen`) and flagged (`$flagged`) on messages; nothing else changes |
@@ -165,9 +167,11 @@ Rules that hold for every tool:
 
 Sending twice by accident: MCP has no idempotency key, and the caller is a language model that
 cannot be relied on to supply one. The vault therefore derives the key itself, a hash over
-recipients, subject, body, reply target and, when given, the sanitized HTML (so the same text
-with different HTML is a different send; a message without HTML keeps the hash it had before
-HTML existed). An identical send within 10 minutes is not sent
+recipients, subject, body, reply target, when given the sanitized HTML (so the same text
+with different HTML is a different send) and, when there are any, the attachments in their order:
+a file of the mailbox by its message and attachment id, any other file by name, type and the
+SHA-256 of its bytes. A message without HTML and attachments keeps the hash it had before either
+existed. An identical send within 10 minutes is not sent
 again; the first result is returned. If the outcome of a send is unknown (a timeout or a 5xx
 after the request left), it is counted and an identical send is refused for the same window.
 Event writes that make the mail server send invitations, updates or answers use the same rows
@@ -212,6 +216,75 @@ per request stays small. With HTML the message goes out as `multipart/alternativ
 text of the sanitized HTML, made and cleaned the way the reading side reads HTML mail. When
 nothing visible is left of the HTML, the call is `invalid_input` without a `body` and the HTML
 is left out with one. Without `html` the request is exactly what it was before.
+
+### Sending attachments (`send_mail`, `create_draft`)
+
+An AI tool cannot hand over arbitrary bytes well: it has to write them out, as base64 for a binary
+file. So the input offers three ways, each a strict object, at most 5 per message:
+
+1. `{ message_id, attachment_id }`: a file of a message of this mailbox, by the ids `read_thread`
+   lists. Forwarding a received invoice is the common case, and it costs the AI tool nothing: the
+   file is never downloaded, the server reuses its blob. Its name and type come from the mailbox,
+   not from the input.
+2. `{ filename, text, content_type? }`: a text file the AI tool wrote (a CSV, a summary, a
+   calendar file), at most 200,000 characters, stored as UTF-8. `content_type` is one of
+   `text/plain` (default), `text/csv`, `text/markdown`, `text/calendar`, `text/html`,
+   `application/json`.
+3. `{ filename, base64, content_type }`: a small file, at most 1,000,000 bytes decoded, as
+   standard base64 without white space (padding optional). The types are the six above plus
+   `application/pdf`, `image/png`, `image/jpeg`, `image/gif` and `image/webp`; for PDF and the
+   images the bytes must start with that type's signature (the check `read_attachment` uses), so
+   a file declared a PDF is one.
+
+This is the most sensitive input so far: a mail the AI tool read can try to make it forward
+someone's files. The gate is the one every send has: outside production only allow-listed
+recipients, at most 50 sends a day, dedupe, and the tool description and the MCP instructions ask
+the AI tool to confirm with the user which files go to whom. Way 1 cannot reach beyond the
+mailbox: the lookup is in the grant's account, and a message that is not this mailbox's, or that
+has no attachment with that id, is `not_found` before anything is uploaded or sent. The limits
+keep the damage of a mistake small:
+
+- No file type that runs when opened, in all three ways (for way 1 judged by the stored name, both
+  as stored and as it goes out): a name ending in `.exe .com .bat .cmd .scr .pif .msi .msp .js .jse
+  .vbs .vbe .wsf .wsh .ps1 .jar .lnk .hta .cpl .dll .reg .iso .img .vhd .vhdx .apk .app .dmg .pkg
+  .sh .command .scpt .html .htm .svg .xhtml` is `invalid_input` (`EXECUTABLE_EXTENSIONS` in
+  `src/mail.ts`). The ending is compared in any case, after compatibility normalization (a
+  full-width dot counts as a dot), without invisible format characters, and before trailing dots
+  and white space, which Windows drops. HTML and SVG files go because mail clients open them in a
+  browser; `text/html` as a content type stays allowed for a file named otherwise.
+- A file name (ways 2 and 3) is 1 to 200 characters on one line, without the control, separator
+  and bidi characters the contact and event writes refuse (`isCleanLine`, now in `src/mail.ts`),
+  without `/` or `\`, and without a leading or trailing dot or white space (so never `.` or `..`).
+  A stored name (way 1) goes out cleaned to one line as `read_thread` shows it; with nothing
+  usable left it is `attachment`. A stored type goes out when it is a plain media type, else as
+  `application/octet-stream` (the rule of `read_attachment`), and a stored text part keeps its
+  charset when that is a plain token.
+- The total of one message (stored size for way 1 as the server reports it, byte length for the
+  others) is at most 10,000,000 bytes, else `too_large`. All of this is checked before anything is
+  uploaded or sent.
+
+How it goes out: the vault (the Durable Object) decodes the base64, checks the signatures, encodes
+the text and hashes each file before the fingerprint is taken; the Worker that answers the MCP
+request only checks shapes and sizes (the base64 alphabet and its decoded length are arithmetic).
+The adapter then looks up the folders, the identity and, in the same request, the messages of
+way 1 (`Email/get` with each attachment's `partId`, `blobId`, `size`, `name`, `type`, `charset`),
+checks names and the total, and only then uploads the files of ways 2 and 3 one after the other
+to the session's `uploadUrl` (RFC 8620 §6.1), with the content type as `Content-Type`
+(`; charset=utf-8` for way 2). The template is accepted only on Stalwart's origin and with
+`{accountId}` in it, like the download template; without a usable one a message with such a file
+is `mailbox_unsupported` before any request. The account id comes from the grant, the answer must
+name that account and the uploaded size, and its `blobId` must be an id. A failed upload maps like
+any lookup before the send (5xx and network errors `upstream_unavailable`, other refusals
+`upstream_rejected`) and is never `send_unconfirmed`: nothing was sent, so no send is counted and
+the identical call may be made again. Uploaded blobs that end up unused are left to the server,
+which expires them. The Email is created with `attachments` (`blobId`, `type`, `name`,
+`disposition: "attachment"`, and `charset` for a text part) next to the text and HTML parts, and
+the server builds the MIME structure. Without attachments the requests are exactly what they were.
+
+The dedupe runs before the adapter: an identical second call is answered from the first one's
+row and uploads nothing. Results report `attachments`, how many files the message carries. The
+audit row is unchanged (a column for the number of files would need a D1 migration): it holds the
+recipient count and the message or draft id as before, never a file name.
 
 ### Attachments (`read_attachment`)
 

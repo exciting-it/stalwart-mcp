@@ -23,6 +23,11 @@ export interface JmapSession {
    * `{accountId}` and `{blobId}`; null otherwise, and then nothing can be downloaded.
    */
   downloadUrl: string | null;
+  /**
+   * The upload URL template (RFC 8620 §6.1) when it is on Stalwart's origin and names
+   * `{accountId}`; null otherwise, and then nothing can be uploaded.
+   */
+  uploadUrl: string | null;
   accountId: string;
   username: string;
   /**
@@ -56,14 +61,27 @@ export function usableDownloadUrl(template: unknown): string | null {
   return template.includes("{accountId}") && template.includes("{blobId}") ? template : null;
 }
 
+/** An upload template the worker may use: on Stalwart's origin, naming the account. */
+export function usableUploadUrl(template: unknown): string | null {
+  if (typeof template !== "string" || !onStalwart(template)) return null;
+  return template.includes("{accountId}") ? template : null;
+}
+
 /**
- * Fetches with the token, never following a redirect, and answers the 200 response. A 401 is
- * `UpstreamAuthError`, a 5xx `upstream_unavailable`, any other status `upstream_rejected`; the
- * body of a refusal is never read. With `outcomeUnknown`, every failure after which the server
- * may have processed the request (network error, timeout, 5xx) is that code instead; a 401 and
- * other 4xx stay as they are, because the server refused the request without processing it.
+ * Fetches with the token, never following a redirect, and answers the 200 response (or one of
+ * `accepted`). A 401 is `UpstreamAuthError`, a 5xx `upstream_unavailable`, any other status
+ * `upstream_rejected`; the body of a refusal is never read. With `outcomeUnknown`, every failure
+ * after which the server may have processed the request (network error, timeout, 5xx) is that
+ * code instead; a 401 and other 4xx stay as they are, because the server refused the request
+ * without processing it.
  */
-async function requestOk(url: string, accessToken: string, init: RequestInit, outcomeUnknown?: MailErrorCode): Promise<Response> {
+async function requestOk(
+  url: string,
+  accessToken: string,
+  init: RequestInit,
+  outcomeUnknown?: MailErrorCode,
+  accepted: readonly number[] = [200],
+): Promise<Response> {
   const unknownOr = (e: unknown): unknown => (outcomeUnknown ? new MailError(outcomeUnknown) : e);
   let res: Response;
   try {
@@ -82,7 +100,7 @@ async function requestOk(url: string, accessToken: string, init: RequestInit, ou
     await res.body?.cancel();
     throw unknownOr(new MailError("upstream_unavailable"));
   }
-  if (res.status !== 200) {
+  if (!accepted.includes(res.status)) {
     await res.body?.cancel();
     throw new MailError("upstream_rejected");
   }
@@ -118,7 +136,49 @@ export async function fetchSession(accessToken: string): Promise<JmapSession> {
   const capabilities = Object.entries(body.primaryAccounts)
     .filter(([, id]) => id === accountId)
     .map(([capability]) => capability);
-  return { apiUrl, downloadUrl: usableDownloadUrl(body.downloadUrl), accountId: accountId as string, username, capabilities };
+  return {
+    apiUrl,
+    downloadUrl: usableDownloadUrl(body.downloadUrl),
+    uploadUrl: usableUploadUrl(body.uploadUrl),
+    accountId: accountId as string,
+    username,
+    capabilities,
+  };
+}
+
+/**
+ * Uploads `bytes` to `accountId` through the session's template (RFC 8620 §6.1) with `contentType`
+ * as the Content-Type, and answers the blob id the server gave. The server answers 201 (the RFC's
+ * example) or 200. An answer for another account, without a usable blob id or with another size
+ * is `upstream_rejected`. Failures map as for every lookup (never an unknown outcome: nothing is
+ * sent by an upload). A session without a usable template is `mailbox_unsupported`.
+ */
+export async function uploadBlob(
+  session: JmapSession,
+  accessToken: string,
+  accountId: string,
+  bytes: Uint8Array,
+  contentType: string,
+): Promise<string> {
+  const template = usableUploadUrl(session.uploadUrl);
+  if (template === null) throw new MailError("mailbox_unsupported");
+  const url = template.replace(/\{accountId\}/g, () => encodeURIComponent(accountId));
+  // Checked again on the filled URL, so no value can carry the token elsewhere.
+  if (!onStalwart(url)) throw new MailError("mailbox_unsupported");
+  const res = await requestOk(
+    url,
+    accessToken,
+    { method: "POST", headers: { "Content-Type": contentType, Accept: "application/json" }, body: bytes },
+    undefined,
+    [200, 201],
+  );
+  const answer = await readJsonBody(res);
+  if (!isObject(answer) || answer.accountId !== accountId || answer.size !== bytes.length) {
+    throw new MailError("upstream_rejected");
+  }
+  const blobId = MailIdSchema.safeParse(answer.blobId);
+  if (!blobId.success) throw new MailError("upstream_rejected");
+  return blobId.data;
 }
 
 /**
