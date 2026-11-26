@@ -5,7 +5,7 @@
   "description": "Remote MCP server for Stalwart mailboxes on Cloudflare Workers",
   "license": "MIT",
   "type": "module",
-  "packageManager": "bun@1.4.0",
+  "packageManager": "bun@1.4.5",
   "scripts": {
     "dev": "wrangler dev --var ENVIRONMENT:staging",
     "deploy": "wrangler deploy",
