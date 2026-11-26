@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { cleanText, htmlToText } from "../src/content/sanitize";
+import { cleanText, htmlToText, parseTag } from "../src/content/sanitize";
 
 describe("cleanText", () => {
   it("removes control, zero-width and bidi characters but keeps newlines and tabs", () =>
@@ -79,4 +79,29 @@ describe("htmlToText", () => {
 
   it("returns trimmed text without cutting length", () =>
     expect(htmlToText("  <p>" + "x".repeat(5000) + "</p>  ")).toBe("x".repeat(5000)));
+});
+
+describe("parseTag reads attribute names as HTML does", () => {
+  it("a leading = belongs to the attribute name, so the tag ends where a browser ends it", () => {
+    const html = '</p =="><img src=x onerror=alert(1)>">rest';
+    expect(parseTag(html, 0)).toMatchObject({ name: "p", closing: true, end: html.indexOf("rest") });
+    expect(parseTag('<p =a="x>y" b>', 0)).toMatchObject({ name: "p", end: 14 });
+    expect(parseTag("<p/=a=\"x>\">", 0)).toMatchObject({ name: "p", end: 11 });
+  });
+
+  it("an =-prefixed name is not href; a later href still is", () => {
+    expect(parseTag('<a =href="javascript:x" href="https://ok.example/">', 0)?.href).toBe("https://ok.example/");
+    expect(parseTag('<a =href="https://no.example/">', 0)?.href).toBeNull();
+  });
+
+  it("htmlToText: markup hidden in such an attribute stays out of the text", () => {
+    expect(htmlToText('<p =="><b>x</b>">y</p>')).toBe("y");
+    expect(htmlToText('<a =href="javascript:x" href="https://ok.example/">t</a>')).toBe("t <https://ok.example/>");
+  });
+
+  it("htmlToText: ordinary attributes read as before", () => {
+    expect(htmlToText('<a href="https://ok.example/" title="a=b">t</a>')).toBe("t <https://ok.example/>");
+    expect(htmlToText("<a href=https://ok.example/ x = y>t</a>")).toBe("t <https://ok.example/>");
+    expect(htmlToText('<p title="a > b">x</p><p data-x=\'"\'>y</p>')).toBe("x\ny");
+  });
 });

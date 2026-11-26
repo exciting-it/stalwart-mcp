@@ -4,17 +4,20 @@
  * text formatting, links, lists, headings and tables survive. Parsing is the runtime's
  * `HTMLRewriter` (an HTML tokenizer that follows the HTML standard); the rules:
  *
- * - kept elements (`KEPT`) lose every attribute except a checked `href` on `a` and a checked
- *   `colspan` / `rowspan` on `th` and `td`;
+ * - a kept element (`KEPT`) is written anew in canonical form: `<name>`, or with its checked
+ *   attributes (`href` on `a`, `colspan` / `rowspan` on `th` and `td`); its original start and end
+ *   tags go, so nothing of their attributes can stay;
  * - dropped elements (`DROPPED`) go with everything inside them;
  * - any other element is unwrapped: the tag goes, its content stays;
  * - comments, processing instructions, CDATA and the doctype are removed;
  * - text is re-escaped (`<` and `>`), so markup can never form again out of the pieces that are
  *   left once something was removed between them;
- * - end tags are written back bare (`</p>`), or dropped when they do not end a kept element.
+ * - end tags the rewriter passes through as written become `</name>` or go.
  *
- * Sanitizing the output again changes nothing. HTML the rewriter refuses to parse is refused as
- * a whole (`null`).
+ * The last step does not trust any of that: `isCanonicalHtml` checks the output against the
+ * exact form the steps above write, and anything else refuses the HTML as a whole (`null`).
+ * HTML the rewriter cannot parse, an element with an attribute the rewriter cannot address, and
+ * an element with more than `MAX_ATTRIBUTES` attributes are refused the same way.
  */
 import { decodeEntities, parseTag } from "./sanitize";
 
@@ -31,6 +34,12 @@ const DROPPED = new Set([
   "area",
 ]);
 
+/** Kept elements that have no end tag; `</br>` would make a line break. */
+const VOID = new Set(["br", "hr"]);
+
+/** More attributes on one element refuse the HTML before any work per attribute. */
+const MAX_ATTRIBUTES = 50;
+
 const LINK_SCHEMES = new Set(["http:", "https:", "mailto:"]);
 
 /** C0 controls and DEL anywhere in an `href` refuse it. */
@@ -42,22 +51,9 @@ function hasControl(s: string): boolean {
   return false;
 }
 
-/**
- * Appended to the input and never part of the output. The rewriter passes markup that the input
- * leaves unfinished at its end (`<img src=x onerror=...` without `>`) through as it is, where a
- * later concatenation could complete it. This suffix finishes any open tag, quoted attribute,
- * comment or bogus comment: `<x-end "'>` closes a tag (the quotes end an open attribute value),
- * `<!--x-end-->` closes a comment. In text the first part is an unknown element (unwrapped, so
- * nothing) and the second a comment (removed). Inside `plaintext` it stays text and is cut off.
- */
-const SUFFIX = `<x-end "'><!--x-end-->`;
-
 const escapeText = (s: string) => s.replace(/</g, "&lt;").replace(/>/g, "&gt;");
 const escapeAttribute = (s: string) =>
   s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
-
-/** Kept elements that have no end tag; `</br>` would make a line break. */
-const VOID = new Set(["br", "hr"]);
 
 /** The checked link target, or null: an absolute http, https or mailto URL without credentials. */
 export function safeHref(raw: string): string | null {
@@ -73,48 +69,93 @@ export function safeHref(raw: string): string | null {
   return url.href;
 }
 
-/** `colspan` / `rowspan`: digits only, 1 to 1000. */
+/** `colspan` / `rowspan`: digits only, 1 to 1000, written without leading zeros. */
 function span(raw: string): string | null {
   if (!/^[0-9]{1,4}$/.test(raw)) return null;
   const n = Number(raw);
   return n >= 1 && n <= 1000 ? String(n) : null;
 }
 
-function keep(e: Element): void {
-  const kept: [string, string][] = [];
-  if (e.tagName === "a") {
+/** The canonical start tag of a kept element, from its checked attributes only. */
+function startTag(e: Element): string {
+  const name = e.tagName;
+  if (name === "a") {
     const href = e.getAttribute("href");
     const target = href === null ? null : safeHref(href);
-    if (target !== null) kept.push(["href", target]);
-  } else if (e.tagName === "th" || e.tagName === "td") {
-    for (const name of ["colspan", "rowspan"]) {
-      const raw = e.getAttribute(name);
+    return target === null ? "<a>" : `<a href="${escapeAttribute(target)}">`;
+  }
+  if (name === "th" || name === "td") {
+    let attributes = "";
+    for (const attribute of ["colspan", "rowspan"]) {
+      const raw = e.getAttribute(attribute);
       const value = raw === null ? null : span(raw);
-      if (value !== null) kept.push([name, value]);
+      if (value !== null) attributes += ` ${attribute}="${value}"`;
     }
+    return `<${name}${attributes}>`;
   }
-  // Every attribute goes (also repeated ones); the checked ones are written back normalized.
-  for (const [name] of [...e.attributes]) {
-    if (name !== undefined) while (e.hasAttribute(name)) e.removeAttribute(name);
-  }
-  for (const [name, value] of kept) e.setAttribute(name, escapeAttribute(value));
+  return `<${name}>`;
 }
 
 /**
- * The sanitized HTML, or null when the rewriter refuses to parse it: its streaming parser stops at
- * markup it cannot place without a full tree (a `<textarea>` or `<script>` inside `<select>`,
- * for example). Such HTML is refused as a whole, never passed on.
+ * True when the element's attributes can be read and removed one by one: at most
+ * `MAX_ATTRIBUTES`, each addressable by its name. The rewriter lists a name that starts with
+ * `=` but cannot find it by that name; such an element is refused.
+ */
+function attributesInHand(e: Element): boolean {
+  const names: string[] = [];
+  for (const [name] of e.attributes) {
+    if (names.length === MAX_ATTRIBUTES) return false;
+    names.push(name ?? "");
+  }
+  return names.every((name) => e.hasAttribute(name));
+}
+
+/** Random per call, so no input can contain it. */
+function endMarker(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  return [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/**
+ * The sanitized HTML, or null when it is refused as a whole: the rewriter cannot parse it (its
+ * streaming parser stops at markup it cannot place without a full tree, such as a `<style>`
+ * after an unclosed `<select>`), an element has attributes the rewriter cannot address or too
+ * many of them, or the result is not in the canonical form (`isCanonicalHtml`).
  */
 export async function sanitizeHtml(html: string): Promise<string | null> {
+  // The rewriter passes markup that the input leaves unfinished at its end (`<img src=x
+  // onerror=...` without `>`) through as it is, where a later concatenation could complete it.
+  // This suffix finishes any open tag, quoted attribute, comment or bogus comment: `<x-... "'>`
+  // closes a tag (the quotes end an open attribute value), the comment closes a comment. In text
+  // the first part is an unknown element (unwrapped, so nothing) and the second a comment
+  // (removed). Inside `plaintext` it stays text and is cut off. Its name is random per call.
+  const marker = endMarker();
+  const suffix = `<x-end-${marker} "'><!--x-end-${marker}-->`;
   // The rewriter cannot remove a doctype. `<!x-doctype ...>` is a bogus comment instead: it ends
   // at the same `>` a doctype ends at, and comments are removed.
-  const input = html.replace(/<!doctype/gi, "<!x-doctype") + SUFFIX;
+  const input = html.replace(/<!doctype/gi, "<!x-doctype") + suffix;
+  let refused = false;
   const rewriter = new HTMLRewriter()
     .on("*", {
       element(e) {
-        if (DROPPED.has(e.tagName)) e.remove();
-        else if (KEPT.has(e.tagName)) keep(e);
-        else e.removeAndKeepContent();
+        if (!attributesInHand(e)) {
+          refused = true;
+          return;
+        }
+        if (DROPPED.has(e.tagName)) {
+          e.remove();
+          return;
+        }
+        if (!KEPT.has(e.tagName)) {
+          e.removeAndKeepContent();
+          return;
+        }
+        // The original tags go; the kept element is written anew from its checked attributes.
+        const name = e.tagName;
+        const start = startTag(e);
+        e.removeAndKeepContent();
+        e.before(start, { html: true });
+        if (!VOID.has(name)) e.onEndTag((end) => void end.before(`</${name}>`, { html: true }));
       },
     })
     .onDocument({
@@ -132,29 +173,81 @@ export async function sanitizeHtml(html: string): Promise<string | null> {
   } catch {
     return null;
   }
-  const leftover = escapeText(SUFFIX);
-  return normalizeEndTags(out.endsWith(leftover) ? out.slice(0, -leftover.length) : out);
+  if (refused) return null;
+  const leftover = escapeText(suffix);
+  const result = normalizeEndTags(out.endsWith(leftover) ? out.slice(0, -leftover.length) : out);
+  return result !== null && isCanonicalHtml(result) ? result : null;
 }
 
 /**
- * The rewriter passes end tags through as written, and one without a matching start tag never
- * reaches a handler, so `</p class=x>` or `</foo title="...">` would stay. In the rewriter's
- * output every `<` starts a tag (text and attribute values are escaped, a kept start tag has
- * only checked attributes), so each `</` found here is an end tag: it becomes `</name>` for a
- * kept element with content and goes otherwise.
+ * The rewriter passes end tags it cannot match to a start tag through as written
+ * (`</p class=x>`); this writes them back as `</name>` for a kept element with content and drops
+ * the others. Null when a tag does not end; `isCanonicalHtml` checks the result in any case.
  */
-function normalizeEndTags(html: string): string {
+function normalizeEndTags(html: string): string | null {
   const parts: string[] = [];
   let from = 0;
   let at = html.indexOf("</");
   while (at !== -1) {
     parts.push(html.slice(from, at));
     const tag = parseTag(html, at);
-    if (tag === null) return parts.join("");
+    if (tag === null) return null;
     if (KEPT.has(tag.name) && !VOID.has(tag.name)) parts.push(`</${tag.name}>`);
     from = tag.end;
     at = html.indexOf("</", from);
   }
   parts.push(html.slice(from));
   return parts.join("");
+}
+
+/**
+ * One token of the canonical output, anchored where the last one ended: text without `<` or
+ * `>`, a start tag `<name>` with double-quoted lower-case attributes whose values hold no `"`,
+ * `<` or `>`, or an end tag `</name>`. The classes do not overlap, so it runs in linear time.
+ */
+const TOKEN = /([^<>]+)|<([a-z0-9]+)((?: [a-z]+="[^"<>]*")*)>|<\/([a-z0-9]+)>/y;
+const ATTRIBUTE = / ([a-z]+)="([^"<>]*)"/g;
+
+/** The checked attributes of one canonical start tag, or false. */
+function canonicalAttributes(name: string, attributes: string): boolean {
+  if (attributes === "") return true;
+  const seen = new Set<string>();
+  for (const [, attribute = "", value = ""] of attributes.matchAll(ATTRIBUTE)) {
+    if (seen.has(attribute)) return false;
+    seen.add(attribute);
+    if (name === "a" && attribute === "href") {
+      const decoded = decodeEntities(value);
+      if (escapeAttribute(decoded) !== value || safeHref(decoded) !== decoded) return false;
+    } else if ((name === "th" || name === "td") && (attribute === "colspan" || attribute === "rowspan")) {
+      if (span(value) !== value) return false;
+    } else {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * The final check, independent of how the HTML was made: true only when `html` is a sequence of
+ * text without `<` and `>`, canonical start tags of kept elements (`<name>`, `<a href="...">`
+ * with a checked, normalized URL, `<th>` / `<td>` with checked `colspan` / `rowspan`, each at
+ * most once) and end tags `</name>` of kept elements that have content.
+ */
+export function isCanonicalHtml(html: string): boolean {
+  TOKEN.lastIndex = 0;
+  let at = 0;
+  while (at < html.length) {
+    TOKEN.lastIndex = at;
+    const m = TOKEN.exec(html);
+    if (m === null) return false;
+    at = TOKEN.lastIndex;
+    const [, text, start, attributes = "", end] = m;
+    if (text !== undefined) continue;
+    if (start !== undefined) {
+      if (!KEPT.has(start) || !canonicalAttributes(start, attributes)) return false;
+    } else if (end === undefined || !KEPT.has(end) || VOID.has(end)) {
+      return false;
+    }
+  }
+  return true;
 }

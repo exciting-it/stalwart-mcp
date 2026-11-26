@@ -190,22 +190,32 @@ and removes everything else (`src/content/sanitize-html.ts`).
 - Removed with their content: scripts, styles, frames, embedded objects, forms and their
   controls, `svg`, `math`, `head` and its elements, `noscript`, `template`, media and images.
   Any other element is unwrapped: its tag goes, its text stays.
-- Attributes: all removed except `href` on links and `colspan` / `rowspan` (1 to 1000) on
-  table cells. An `href` stays only as an absolute `http`, `https` or `mailto` URL without
+- Attributes: a kept element's start and end tags are dropped and the element is written anew
+  as `<name>`, with only `href` on links and `colspan` / `rowspan` (1 to 1000) on table cells,
+  so nothing of the original tag can stay. An element with more than 50 attributes, or with an
+  attribute the rewriter lists but cannot address by name (a name starting with `=`), refuses
+  the HTML as a whole. An `href` stays only as an absolute `http`, `https` or `mailto` URL without
   credentials (parsed with `URL`, written back normalized); anything else loses the attribute and
   keeps the link text. Comments, doctype, processing instructions and CDATA are removed.
 - No styles, because CSS can hide text from the reader that the recipient's client still
   processes, and can load remote resources. No images, neither remote (a tracking pixel in the
   mailbox's name) nor inline; the tool descriptions say so, so the AI tool does not promise one.
 - Text is re-escaped after the rewrite, so markup cannot form again from pieces left around
-  something that was removed, and end tags are written back bare. Sanitizing the output again
-  changes nothing.
+  something that was removed. End tags the rewriter passes through as written (those it cannot
+  match to a start tag) are written back as `</name>` or dropped.
+- The guarantee is the last step, which knows nothing about the steps before it: the output is
+  accepted only as a sequence of text without `<` or `>`, canonical start tags of kept elements
+  (with a checked, normalized `href` or checked spans) and bare end tags of kept elements.
+  Anything else refuses the HTML as a whole (`invalid_input`). Output that passes is stable:
+  sanitizing it again changes nothing (tested over a table of hostile inputs and a few thousand
+  random strings of markup characters).
 
 The parsing is the runtime's `HTMLRewriter`, a streaming HTML tokenizer that follows the HTML
 standard, not regular expressions. Two things it cannot do are done around it: it cannot remove
 a doctype, so `<!doctype` is turned into a bogus comment first (which ends at the same `>`);
-and it passes markup left unfinished at the end of the input through as written, so a fixed
-suffix that closes any open tag, attribute or comment is appended and leaves no trace. HTML its
+and it passes markup left unfinished at the end of the input through as written, so a suffix
+that closes any open tag, attribute or comment is appended and leaves no trace; its names carry
+a random token per call, so no input can contain it. HTML its
 streaming parser refuses (a `<style>` after an unclosed `<select>`, for example) is refused with
 `invalid_input`, never passed on.
 

@@ -67,6 +67,8 @@ export function parseTag(html: string, start: number): ParsedTag | null {
       continue;
     }
     const attrStart = i;
+    // As in HTML: a "=" where a name starts is part of that name, not the start of a value.
+    if (html.charAt(i) === "=") i++;
     while (i < html.length && !isSpace(html.charAt(i)) && html.charAt(i) !== "=" && html.charAt(i) !== ">" && html.charAt(i) !== "/") i++;
     const attr = html.slice(attrStart, i).toLowerCase();
     while (i < html.length && isSpace(html.charAt(i))) i++;

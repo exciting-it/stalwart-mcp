@@ -60,8 +60,11 @@ mailbox's own copy.
 HTML is sanitized against an allow-list in the mailbox's vault before anything is sent or stored:
 text formatting, links (absolute `http`, `https` and `mailto` only), lists, headings and tables
 survive; every other element is removed (scripts, styles, forms, embedded content and images
-with their content) or unwrapped, and every attribute except a checked `href` on links and
-`colspan` / `rowspan` on table cells. No images go out, neither remote nor inline. With HTML the
+with their content) or unwrapped. A kept element is written anew with no attributes except a
+checked `href` on links and `colspan` / `rowspan` on table cells. As a last step the result is
+checked against exactly that form; HTML that does not pass, that the parser cannot read, or
+whose elements carry more than 50 attributes or attributes the parser cannot address is refused
+as a whole (`invalid_input`), never passed on. No images go out, neither remote nor inline. With HTML the
 message goes out as `multipart/alternative` with a `text/plain` and a `text/html` part; without
 `body` the plain part is the text of the sanitized HTML. HTML with nothing visible left is
 refused when no `body` is given, and left out when one is.
