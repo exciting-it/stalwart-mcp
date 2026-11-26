@@ -91,9 +91,9 @@ const INVITATIONS =
 const AREA_SENTENCE = `${THIRD_PARTIES("contacts and calendar entries")} Deleting a contact or an event removes it for good.${INVITATIONS}${ASK}`;
 
 describe("MCP endpoint", () => {
-  it("lists the seven mail tools with the pinned annotations, then the tools of the areas", async () => {
+  it("lists the eight mail tools with the pinned annotations, then the tools of the areas", async () => {
     const byName = await listTools();
-    expect(Object.keys(byName).slice(0, 7)).toEqual([
+    expect(Object.keys(byName).slice(0, 8)).toEqual([
       "list_mailboxes",
       "search_mail",
       "read_thread",
@@ -101,8 +101,9 @@ describe("MCP endpoint", () => {
       "send_mail",
       "move_mail",
       "delete_mail",
+      "mark_mail",
     ]);
-    expect(Object.keys(byName).slice(7)).toEqual([
+    expect(Object.keys(byName).slice(8)).toEqual([
       "search_contacts",
       "read_contact",
       "list_calendars",
@@ -128,6 +129,14 @@ describe("MCP endpoint", () => {
       idempotentHint: true,
       openWorldHint: false,
     });
+    // Marking changes two flags and can be undone: not destructive, the same call again changes nothing.
+    expect(byName.mark_mail!.annotations).toEqual({
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    });
+    expect(Object.keys(byName.mark_mail!.inputSchema.properties ?? {})).toEqual(["message_ids", "read", "flagged"]);
     expect(byName.delete_mail!.description).toContain("This connector never empties the Trash");
     expect(byName.move_mail!.description).toContain("The Trash folder is not accepted here");
     // delete_mail takes message ids and nothing else: no folder, no "permanent" switch.

@@ -38,7 +38,7 @@ export interface ToolSpec<I extends z.ZodTypeAny, O extends z.ZodTypeAny> {
   title: string;
   description: string;
   /** `notify` and `destroy_notify`: writes that can make the mail server send mail to third parties. */
-  kind: "read" | "draft" | "send" | "move" | "trash" | "create" | "update" | "destroy" | "notify" | "destroy_notify";
+  kind: "read" | "draft" | "send" | "move" | "trash" | "mark" | "create" | "update" | "destroy" | "notify" | "destroy_notify";
   /** The area this tool belongs to; without one it is a mail tool and always offered. */
   area?: Area;
   input: I;

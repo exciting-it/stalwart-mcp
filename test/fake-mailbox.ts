@@ -29,6 +29,9 @@ interface StoredMessage {
   subject: string;
   body: string;
   date: string;
+  /** Read and flagged, as `mark_mail` sets them; a seeded message is read and not flagged. */
+  seen?: boolean;
+  flagged?: boolean;
 }
 
 interface Account {
@@ -230,8 +233,8 @@ export function createFakeMailStore() {
     subject: m.subject,
     date: m.date,
     preview: m.body.slice(0, 200),
-    unread: false,
-    flagged: false,
+    unread: m.seen === false,
+    flagged: m.flagged === true,
     answered: false,
     draft: false,
     has_attachment: false,
@@ -309,6 +312,24 @@ export function createFakeMailStore() {
         }
         if (moved === 0) throw new MailError("not_found");
         return { folder_id: folderId, moved, not_moved: notFound };
+      },
+      async markMail(input) {
+        record("markMail");
+        if (input.read === undefined && input.flagged === undefined) throw new MailError("invalid_input");
+        const notFound: string[] = [];
+        let marked = 0;
+        for (const id of new Set(input.message_ids)) {
+          const message = account.messages.find((m) => m.id === id);
+          if (message === undefined) {
+            notFound.push(id);
+            continue;
+          }
+          if (input.read !== undefined) message.seen = input.read;
+          if (input.flagged !== undefined) message.flagged = input.flagged;
+          marked += 1;
+        }
+        if (marked === 0) throw new MailError("not_found");
+        return { marked, not_marked: notFound };
       },
       async sendMail(input: OutgoingMessage) {
         record("sendMail");

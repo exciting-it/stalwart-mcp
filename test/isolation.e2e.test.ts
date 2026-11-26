@@ -327,6 +327,24 @@ describe("mail connector isolation, end to end", () => {
     expect(fake.email(A, mine.id)).toMatchObject({ subject: "mine", mailboxIds: { [fake.folderId(A, "trash")!]: true } });
   });
 
+  it("user A cannot mark user B's mail; marking A's own shows in A's search", async () => {
+    const a = await connect(fake, A);
+    await connect(fake, B);
+    const mine = fake.addMessage(A, { subject: "mine" });
+    const theirs = fake.addMessage(B, { subject: "theirs", keywords: ["$answered"] });
+
+    const foreign = await callTool(a.accessToken!, "mark_mail", { message_ids: [theirs.id], read: true, flagged: true });
+    expect(foreign.isError).toBe(true);
+    const mixed = await callTool(a.accessToken!, "mark_mail", { message_ids: [mine.id, theirs.id], read: true, flagged: true });
+    expect(mixed.isError).toBeFalsy();
+    expect(mixed.structuredContent).toEqual({ marked: 1, not_marked: [theirs.id] });
+    expect(fake.email(B, theirs.id)!.keywords).toEqual({ $answered: true });
+    expect(fake.email(A, mine.id)!.keywords).toEqual({ $seen: true, $flagged: true });
+
+    const search = await callTool(a.accessToken!, "search_mail", {});
+    expect(search.structuredContent).toMatchObject({ messages: [{ id: mine.id, unread: false, flagged: true }] });
+  });
+
   it("the same send_mail call twice over MCP delivers one message", async () => {
     const a = await connect(fake, A);
     const args = { to: ["ok@test.example"], subject: "Once", body: "Only one copy" };

@@ -13,7 +13,7 @@ export const MAIL_LIMITS = {
   threadMessagesMax: 25,
   sendsPerDay: 50,
   recipientsPerMessage: 10,
-  /** Messages one `move_mail` or `delete_mail` call may name. */
+  /** Messages one `move_mail`, `delete_mail` or `mark_mail` call may name. */
   moveBatchMax: 50,
   sendDedupeSeconds: 600,
   toolCallsPerMinute: 60,
@@ -137,6 +137,20 @@ export const MoveMailRequest = z
   })
   .strict();
 
+/**
+ * Plain (un-refined) object behind `MarkMailInput`: `read` sets or clears `$seen`, `flagged`
+ * sets or clears `$flagged`. No other keyword can be named.
+ */
+export const MarkMailInputBase = z
+  .object({ message_ids: MessageIds, read: z.boolean().optional(), flagged: z.boolean().optional() })
+  .strict();
+
+export const MarkMailInput = MarkMailInputBase.superRefine((m, ctx) => {
+  if (m.read === undefined && m.flagged === undefined) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["read"], message: "Give read, flagged or both." });
+  }
+});
+
 export const SendMailInput = OutgoingMessageBase.superRefine((m, ctx) => {
   refineOutgoing(m, ctx);
   if (m.to.length + m.cc.length + m.bcc.length === 0) {
@@ -203,6 +217,8 @@ export type SearchMailInputT = z.infer<typeof SearchMailInput>;
 export type ReadThreadInputT = z.infer<typeof ReadThreadInput>;
 export type MoveMailRequestT = z.infer<typeof MoveMailRequest>;
 export type MoveMailOutcome = z.infer<typeof MoveMailResult>;
+export type MarkMailInputT = z.infer<typeof MarkMailInput>;
+export type MarkMailOutcome = z.infer<typeof MarkMailResult>;
 
 // ---- tool results ----
 
@@ -232,6 +248,12 @@ export const MoveMailResult = z.object({
   folder_id: z.string(),
   moved: z.number().int(),
   not_moved: z.array(z.string()),
+});
+
+/** As `MoveMailResult`: `not_marked` lists the ids that are not messages of this mailbox or were refused. */
+export const MarkMailResult = z.object({
+  marked: z.number().int(),
+  not_marked: z.array(z.string()),
 });
 
 export const CreateDraftResult = z.object({
@@ -312,6 +334,8 @@ export interface MailboxAdapter {
   createDraft(input: OutgoingMessage): Promise<{ draft_id: string; folder_id: string }>;
   /** Moves messages into one folder of this mailbox. Throws when none could be moved. */
   moveMail(input: MoveMailRequestT): Promise<MoveMailOutcome>;
+  /** Sets or clears read and flagged on messages of this mailbox. Throws when none could be marked. */
+  markMail(input: MarkMailInputT): Promise<MarkMailOutcome>;
   sendMail(
     input: OutgoingMessage,
   ): Promise<{ message_id: string; recipients: number; deduplicated: boolean }>;

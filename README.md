@@ -31,6 +31,7 @@ Why it is built this way, and what its security rests on: [docs/design.md](docs/
 | `send_mail` | Send a new mail or a reply, plain text, from the mailbox's own address |
 | `move_mail` | Move messages into another folder of the mailbox |
 | `delete_mail` | Move messages to the Trash folder |
+| `mark_mail` | Mark messages read or unread, flagged or not; nothing else of a message changes |
 | `search_contacts` | Search the address book by text, name, email, phone, organization or address book (needs `contacts`) |
 | `read_contact` | One contact: names, emails, phones, organizations, addresses, birthday, notes (needs `contacts`) |
 | `list_calendars` | The mailbox's calendars with id, name and whether they are writable (needs `calendars`) |
@@ -52,10 +53,10 @@ of the mailbox's 50 sends per day (one per started ten addresses). The connector
 an invitation: a change or deletion of a meeting someone else organized only touches the
 mailbox's own copy.
 
-It cannot remove mail for good, flag mail, manage folders, touch filters, or send from another
-address. Deleting always means moving to Trash, and `move_mail` brings a message back. The
-connector never empties the Trash; whether the mail server does is its own setting (see Known
-limits).
+It cannot remove mail for good, set marks other than read and flagged, manage folders, touch
+filters, or send from another address. Deleting always means moving to Trash, and `move_mail`
+brings a message back. The connector never empties the Trash; whether the mail server does is
+its own setting (see Known limits).
 
 ## Sign-in flow
 
@@ -80,7 +81,7 @@ Constants live in `MAIL_LIMITS` in `src/mail.ts` and, for contacts and calendars
 | Tool calls per mailbox (mail, contacts and calendar calls together) | 60 per minute |
 | Messages sent per mailbox (`send_mail` and every event write that notifies participants, together) | 50 per day |
 | Recipients per message (To, Cc, Bcc together) | 10 |
-| Messages per `move_mail` or `delete_mail` call | 50 |
+| Messages per `move_mail`, `delete_mail` or `mark_mail` call | 50 |
 | Identical send (or identical notifying `create_event` / `update_event`) is not repeated within | 10 minutes (600 s) |
 | Parallel calls to Stalwart per mailbox | 2 |
 | Search results per page | at most 25 (default 10) |
@@ -326,6 +327,7 @@ These need the OAuth client and a test mailbox on your server:
 - [ ] `expires_in` in the token response is a number.
 - [ ] Bcc recipients are not visible to the To and Cc recipients of a sent message.
 - [ ] `move_mail` and `delete_mail` against the real server: a moved message is in the target folder only; a foreign or malformed id is reported as not found.
+- [ ] `mark_mail` against the real server: `Email/set` accepts the patch paths `keywords/$seen` and `keywords/$flagged` with `true` and `null`, leaves the other keywords (`$answered`, `$draft`) as they were, and answers a foreign id with `notUpdated` `notFound`; `search_mail` and other mail clients (IMAP `\Seen`, `\Flagged`) show the new state.
 - [ ] Whether the server empties Trash on its own (Stalwart's auto-expunge), and whether that is what you want now that an AI tool can move mail there.
 - [ ] Whether Stalwart ever reuses an account id (a reused id would meet the old vault).
 - [ ] Remove the application and reconnect with two AI tools: do the earlier tools regain access (see "Known limits")?

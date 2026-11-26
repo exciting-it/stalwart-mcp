@@ -29,6 +29,7 @@ import {
 import {
   CreateDraftInput,
   MAIL_LIMITS,
+  MarkMailInput,
   MoveMailRequest,
   MailError,
   type MailErrorCode,
@@ -162,6 +163,12 @@ export class MailboxOperations {
   moveMail(caller: Caller, input: unknown) {
     return this.#operation("moveMail", caller, () => parse(MoveMailRequest, input), (move) =>
       this.#upstream(caller.accountId, (a) => a.moveMail(move)),
+    );
+  }
+
+  markMail(caller: Caller, input: unknown) {
+    return this.#operation("markMail", caller, () => parse(MarkMailInput, input), (mark) =>
+      this.#upstream(caller.accountId, (a) => a.markMail(mark)),
     );
   }
 

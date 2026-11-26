@@ -632,6 +632,94 @@ describe("JmapMailboxAdapter", () => {
     expect(fake.email(A, m.id)!.mailboxIds).toEqual({ [m.folderId]: true });
   });
 
+  it("marks messages read and flagged with the two keyword patches only; other keywords and folders stay", async () => {
+    const m = fake.addMessage(A, { subject: "m", keywords: ["$answered", "$draft"] });
+    const a = await adapterFor(A);
+    const keywords = () => fake.email(A, m.id)!.keywords;
+    expect(await a.markMail({ message_ids: [m.id], read: true })).toEqual({ marked: 1, not_marked: [] });
+    expect(keywords()).toEqual({ $answered: true, $draft: true, $seen: true });
+    await a.markMail({ message_ids: [m.id], flagged: true });
+    expect(keywords()).toEqual({ $answered: true, $draft: true, $seen: true, $flagged: true });
+    await a.markMail({ message_ids: [m.id], read: false });
+    expect(keywords()).toEqual({ $answered: true, $draft: true, $flagged: true });
+    await a.markMail({ message_ids: [m.id], flagged: false });
+    expect(keywords()).toEqual({ $answered: true, $draft: true });
+    await a.markMail({ message_ids: [m.id], read: true, flagged: true });
+    expect(keywords()).toEqual({ $answered: true, $draft: true, $seen: true, $flagged: true });
+    // Marking again changes nothing and still succeeds.
+    expect(await a.markMail({ message_ids: [m.id], read: true, flagged: true })).toEqual({ marked: 1, not_marked: [] });
+    await a.markMail({ message_ids: [m.id], read: false, flagged: false });
+    expect(keywords()).toEqual({ $answered: true, $draft: true });
+    expect(fake.email(A, m.id)!.mailboxIds).toEqual({ [m.folderId]: true });
+
+    const requests = jmapRequests();
+    expect(requests.map(methodNames)).toEqual(Array.from({ length: 7 }, () => ["Email/set"]));
+    expect(requests.map((r) => r.body.methodCalls[0][1])).toEqual(
+      [
+        { "keywords/$seen": true },
+        { "keywords/$flagged": true },
+        { "keywords/$seen": null },
+        { "keywords/$flagged": null },
+        { "keywords/$seen": true, "keywords/$flagged": true },
+        { "keywords/$seen": true, "keywords/$flagged": true },
+        { "keywords/$seen": null, "keywords/$flagged": null },
+      ].map((patch) => ({ update: { [m.id]: patch }, accountId: expect.any(String) })),
+    );
+  });
+
+  it("search shows a marked message as read or unread, flagged or not", async () => {
+    const m = fake.addMessage(A, { subject: "m" });
+    const a = await adapterFor(A);
+    const state = async () => {
+      const [found] = (await a.searchMail({ limit: 10, offset: 0 })).messages;
+      return { unread: found!.unread, flagged: found!.flagged };
+    };
+    expect(await state()).toEqual({ unread: true, flagged: false });
+    await a.markMail({ message_ids: [m.id], read: true, flagged: true });
+    expect(await state()).toEqual({ unread: false, flagged: true });
+    await a.markMail({ message_ids: [m.id], read: false });
+    expect(await state()).toEqual({ unread: true, flagged: true });
+  });
+
+  it("marks nothing of another mailbox: foreign and unknown ids are named, duplicates count once", async () => {
+    const own = fake.addMessage(A, { subject: "mine" });
+    const foreign = fake.addMessage(B, { subject: "secret" });
+    const a = await adapterFor(A);
+    expect(await a.markMail({ message_ids: [own.id, foreign.id, "em999", own.id], flagged: true })).toEqual({
+      marked: 1,
+      not_marked: [foreign.id, "em999"],
+    });
+    expect(fake.email(A, own.id)!.keywords).toEqual({ $flagged: true });
+    expect(fake.email(B, foreign.id)!.keywords).toEqual({});
+    // None of them here: not found, and B's message is still untouched.
+    await expectMailError(a.markMail({ message_ids: [foreign.id, "em999"], read: true }), "not_found");
+    expect(fake.email(B, foreign.id)!.keywords).toEqual({});
+    expect(JSON.stringify(fake.requests)).not.toContain("secret");
+  });
+
+  it("a mark the server refuses is upstream_rejected when nothing was marked, else named", async () => {
+    const one = fake.addMessage(A, { subject: "one" });
+    const two = fake.addMessage(A, { subject: "two" });
+    const a = await adapterFor(A);
+    rewriteMoveAnswer((args) => {
+      delete args.updated![two.id];
+      args.notUpdated = { [two.id]: { type: "forbidden" } };
+    });
+    expect(await a.markMail({ message_ids: [one.id, two.id], read: true })).toEqual({ marked: 1, not_marked: [two.id] });
+    rewriteMoveAnswer((args) => {
+      args.updated = null;
+      args.notUpdated = { [one.id]: { type: "forbidden" } };
+    });
+    await expectMailError(a.markMail({ message_ids: [one.id], read: true }), "upstream_rejected");
+  });
+
+  it("a mark with neither read nor flagged is invalid_input and sends nothing", async () => {
+    const m = fake.addMessage(A, { subject: "m" });
+    const a = await adapterFor(A);
+    await expectMailError(a.markMail({ message_ids: [m.id] }), "invalid_input");
+    expect(jmapRequests()).toEqual([]);
+  });
+
   it("answers mailbox_unsupported without a Drafts folder", async () => {
     fake.addMailbox(A, { drafts: false });
     const a = await adapterFor(A);

@@ -24,6 +24,7 @@ import {
   MailError,
   type MailboxAdapter,
   type MailErrorCode,
+  type MarkMailInputT,
   type MoveMailRequestT,
   type OutgoingMessage,
   type ReadThreadInputT,
@@ -69,6 +70,10 @@ export class VaultMailbox implements Mailbox {
 
   moveMail(input: MoveMailRequestT) {
     return this.#call<Awaited<ReturnType<MailboxAdapter["moveMail"]>>>((v, id, email) => v.moveMail(id, email, input));
+  }
+
+  markMail(input: MarkMailInputT) {
+    return this.#call<Awaited<ReturnType<MailboxAdapter["markMail"]>>>((v, id, email) => v.markMail(id, email, input));
   }
 
   sendMail(input: OutgoingMessage) {

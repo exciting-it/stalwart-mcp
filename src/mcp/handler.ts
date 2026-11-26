@@ -50,6 +50,8 @@ const ANNOTATIONS: Record<ToolSpec<z.ZodTypeAny, z.ZodTypeAny>["kind"], ToolAnno
   // deleting, so it is marked destructive: AI tools then ask before they do it.
   move: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   trash: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
+  // Read and flagged: set or cleared again at any time, and the same call twice changes nothing more.
+  mark: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   send: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
   create: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
   update: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
@@ -112,6 +114,7 @@ function endingGrantOnReconnect(mailbox: Mailbox, end: () => Promise<void>): Mai
     readThread: (input) => guard(() => mailbox.readThread(input)),
     createDraft: (input) => guard(() => mailbox.createDraft(input)),
     moveMail: (input) => guard(() => mailbox.moveMail(input)),
+    markMail: (input) => guard(() => mailbox.markMail(input)),
     sendMail: (input) => guard(() => mailbox.sendMail(input)),
     searchContacts: (input) => guard(() => mailbox.searchContacts(input)),
     readContact: (input) => guard(() => mailbox.readContact(input)),

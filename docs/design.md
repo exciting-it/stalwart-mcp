@@ -14,8 +14,8 @@ Goals
 
 - One connector URL for every mailbox on the server. Sign-in with the mailbox login on
   Stalwart's own page; the AI tool never sees a password.
-- The AI tool can list folders, search, read a conversation, write a draft, send, and move
-  messages between folders or to the trash.
+- The AI tool can list folders, search, read a conversation, write a draft, send, move
+  messages between folders or to the trash, and mark them read, unread or flagged.
 - One mailbox user can never reach another mailbox.
 - Limits, an audit trail and a block list that the AI tool cannot bypass.
 - Optionally, the mailbox's contacts and calendar: read, create, change, delete, and events with
@@ -23,7 +23,8 @@ Goals
 
 Not in scope
 
-- Removing mail for good; flagging mail; folder management; Sieve filters and forwards.
+- Removing mail for good; keywords other than read and flagged; folder management; Sieve filters
+  and forwards.
 - Attachment contents (names and sizes only). Sending attachments.
 - Answering invitations, free/busy lookups. Shared mailboxes, address books and calendars (only
   the user's own account is served). A trash for contacts and events (deleting them is permanent).
@@ -126,6 +127,7 @@ call.
 | `send_mail` | write, external effect | Sends a new mail or reply, plain text, copy in Sent |
 | `move_mail` | write | Moves messages into one folder of the mailbox |
 | `delete_mail` | write | Moves messages to the Trash folder; the connector never empties it |
+| `mark_mail` | write | Sets or clears read (`$seen`) and flagged (`$flagged`) on messages; nothing else changes |
 
 Rules that hold for every tool:
 
@@ -146,6 +148,14 @@ Rules that hold for every tool:
   way there. What happens to old Trash afterwards is the mail server's setting: if it empties
   Trash on a schedule, a deleted message does disappear then. The pages and tool texts say
   "never empties the Trash" for that reason, not "never deleted".
+- Marking is a tool kind of its own (`mark`): not a send and not a deletion, so its annotations
+  say not read-only, not destructive and idempotent (read and flagged can be set back at any
+  time, and the same call twice changes nothing more). It is an `Email/set` update of the two
+  keyword paths `keywords/$seen` and `keywords/$flagged` only (`true` sets, `null` clears); its
+  input has no other keyword, so no input can mark a message as answered, a draft or anything
+  else, or move it. Like `move_mail` it takes 1 to 50 ids, counts each once, and names the ids
+  that are not messages of this mailbox or that the server refused; with none marked the answer
+  is `not_found` (all unknown) or `upstream_rejected`.
 - Every tool runs through one wrapper, `defineTool`: **validate → authorize (grant, block list,
   limits) → act → audit**.
 

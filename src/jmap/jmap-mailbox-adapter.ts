@@ -11,6 +11,8 @@ import {
   type MailboxAdapter,
   type MailFolder,
   type MailSummary,
+  type MarkMailInputT,
+  type MarkMailOutcome,
   type MoveMailOutcome,
   type MoveMailRequestT,
   type OutgoingMessage,
@@ -235,20 +237,43 @@ export class JmapMailboxAdapter implements MailboxAdapter {
     // tool that is marked as deleting is the only way there.
     if (!("role" in target) && folder.role === "trash") throw new MailError("invalid_input");
 
-    const ids = [...new Set(input.message_ids)];
-    const update = Object.fromEntries(ids.map((id) => [id, { mailboxIds: { [folder.id]: true } }]));
+    const { done, notDone } = await this.#updateEach(input.message_ids, { mailboxIds: { [folder.id]: true } });
+    return { folder_id: folder.id, moved: done, not_moved: notDone };
+  }
+
+  /**
+   * Sets or clears read (`$seen`) and flagged (`$flagged`) with an `Email/set` update of those two
+   * keyword paths only: other keywords, the folders and the message itself stay as they are.
+   */
+  async markMail(input: MarkMailInputT): Promise<MarkMailOutcome> {
+    const patch: Record<string, true | null> = {};
+    if (input.read !== undefined) patch["keywords/$seen"] = input.read ? true : null;
+    if (input.flagged !== undefined) patch["keywords/$flagged"] = input.flagged ? true : null;
+    if (Object.keys(patch).length === 0) throw new MailError("invalid_input");
+    const { done, notDone } = await this.#updateEach(input.message_ids, patch);
+    return { marked: done, not_marked: notDone };
+  }
+
+  /**
+   * One `Email/set` update applying `patch` to each message (duplicates once). An id that is not
+   * a message of this account is reported, not acted on. When none was updated it throws:
+   * `not_found` if the server knows none of them, else `upstream_rejected`.
+   */
+  async #updateEach(messageIds: string[], patch: Record<string, unknown>): Promise<{ done: number; notDone: string[] }> {
+    const ids = [...new Set(messageIds)];
+    const update = Object.fromEntries(ids.map((id) => [id, patch]));
     const responses = await this.#call([["Email/set", { update }, "u"]]);
     const { updated, refused } = updateResult(methodResult(responses, "u", "Email/set", { idsFromInput: true }));
 
-    const notMoved = ids.filter((id) => !updated.has(id));
-    if (notMoved.length === ids.length) {
-      // Nothing moved. An id the answer does not mention counts as "no such message here"; any
+    const notDone = ids.filter((id) => !updated.has(id));
+    if (notDone.length === ids.length) {
+      // Nothing changed. An id the answer does not mention counts as "no such message here"; any
       // other refusal is the server's and is reported as such.
-      const unknownOnly = notMoved.every((id) => (refused.get(id) ?? "notFound") === "notFound");
+      const unknownOnly = notDone.every((id) => (refused.get(id) ?? "notFound") === "notFound");
       throw new MailError(unknownOnly ? "not_found" : "upstream_rejected");
     }
-    // Some moved: that is the result, and the rest is named, whatever the reason.
-    return { folder_id: folder.id, moved: ids.length - notMoved.length, not_moved: notMoved };
+    // Some changed: that is the result, and the rest is named, whatever the reason.
+    return { done: ids.length - notDone.length, notDone };
   }
 
   /**

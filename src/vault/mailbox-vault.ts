@@ -18,6 +18,8 @@ import {
   MailError,
   type MailFolder,
   type MailSummary,
+  type MarkMailInputT,
+  type MarkMailOutcome,
   type MoveMailOutcome,
   type MoveMailRequestT,
   type OutgoingMessage,
@@ -216,6 +218,10 @@ export class MailboxVault extends DurableObject<Env> {
 
   moveMail(accountId: string, email: string, input: MoveMailRequestT): Promise<VaultResult<MoveMailOutcome>> {
     return this.#operations.moveMail({ accountId, email }, input);
+  }
+
+  markMail(accountId: string, email: string, input: MarkMailInputT): Promise<VaultResult<MarkMailOutcome>> {
+    return this.#operations.markMail({ accountId, email }, input);
   }
 
   /** The read-only contacts and calendar operations; `request` is validated by the operations. */

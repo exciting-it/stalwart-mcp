@@ -429,6 +429,30 @@ describe("admission", () => {
     expect(fake.requests).toHaveLength(0);
   });
 
+  it("markMail is admitted like every operation: the grant's account, valid input, the call limit", async () => {
+    const { stub, accountId, box } = await signIn(A);
+    const m = fake.addMessage(A, { subject: "m" });
+    const other = fake.addMailbox(B).accountId;
+    const bad = <T>(v: unknown) => v as T;
+    const before = fake.requests.length;
+    expect(await stub.markMail(other, A, { message_ids: [m.id], read: true })).toEqual({ ok: false, code: "account_mismatch" });
+    expect(await stub.markMail(accountId, A, { message_ids: [m.id] })).toEqual({ ok: false, code: "invalid_input" });
+    expect(await stub.markMail(accountId, A, bad({ message_ids: [m.id], keywords: { $junk: true } }))).toEqual({
+      ok: false,
+      code: "invalid_input",
+    });
+    expect(fake.requests).toHaveLength(before);
+    expect(fake.email(A, m.id)!.keywords).toEqual({});
+
+    now = Math.floor(T0 / MINUTE) * MINUTE;
+    for (let i = 0; i < MAIL_LIMITS.toolCallsPerMinute - 1; i++) await box.listMailboxes();
+    expect(await box.markMail({ message_ids: [m.id], read: true })).toEqual({ marked: 1, not_marked: [] });
+    const counted = fake.requests.length;
+    await expectCode(box.markMail({ message_ids: [m.id], flagged: true }), "rate_limited");
+    expect(fake.requests).toHaveLength(counted);
+    expect(fake.email(A, m.id)!.keywords).toEqual({ $seen: true });
+  });
+
   it("an unexpected failure becomes internal and is logged by operation name only", async () => {
     const { box } = await signIn(A);
     const log = vi.spyOn(console, "error").mockImplementation(() => {});
@@ -481,6 +505,7 @@ describe("token door", () => {
     "confirmGrant",
     "createDraft",
     "listMailboxes",
+    "markMail",
     "moveMail",
     "readThread",
     "searchMail",
