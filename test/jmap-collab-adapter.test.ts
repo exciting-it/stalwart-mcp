@@ -431,7 +431,7 @@ const searchIds = async (adapter: CollabUpstream, input: Partial<EventSearch> = 
 
 const EVENT_SUMMARY_REQUEST = [
   "id", "calendarIds", "title", "start", "timeZone", "duration", "showWithoutTime", "utcStart", "utcEnd",
-  "status", "locations", "recurrenceId", "recurrenceRule", "recurrenceRules",
+  "status", "locations", "recurrenceId", "recurrenceRule", "recurrenceRules", "baseEventId",
 ];
 
 describe("listCalendars", () => {
@@ -498,6 +498,7 @@ describe("searchEvents", () => {
           location: "Room 1",
           status: "confirmed",
           recurring: false,
+          series_id: null,
         },
       ],
       next_offset: null,
@@ -656,6 +657,43 @@ describe("searchEvents", () => {
     expect(events.find((e) => e.id === single)!.recurring).toBe(false);
   });
 
+  it("names the series of each occurrence in series_id, null for a single event, in the same request", async () => {
+    fake.addMailbox(A);
+    const weekly = fake.addEvent(A, { title: "Sync", start: "2026-11-02T09:00:00", recurrenceRule: { frequency: "weekly", count: 3 } }).id;
+    const single = fake.addEvent(A, { title: "Once", start: "2026-11-10T10:00:00" }).id;
+    const adapter = await adapterFor(A);
+    const { events } = await search(adapter, { after: "2026-11-01T00:00:00Z", before: "2026-12-01T00:00:00Z" });
+    expect(events.map((e) => [e.id, e.series_id])).toEqual([
+      [`${weekly}-20261102T090000`, weekly],
+      [`${weekly}-20261109T090000`, weekly],
+      [single, null],
+      [`${weekly}-20261116T090000`, weekly],
+    ]);
+    expect(jmapRequests()).toHaveLength(1);
+  });
+
+  it("series_id is null when the server names the event itself or an id that is not well-formed", async () => {
+    fake.addMailbox(A);
+    const weekly = fake.addEvent(A, { start: "2026-11-02T09:00:00", recurrenceRule: { frequency: "weekly", count: 2 } }).id;
+    fake.addEvent(A, { start: "2026-11-03T09:00:00" });
+    const adapter = await adapterFor(A);
+    type Body = { methodResponses?: [string, { list?: Record<string, unknown>[] }, string][] };
+    const answering = (base: (e: Record<string, unknown>) => unknown) =>
+      vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+        const body = (await (await fake.fetch(input, init)).json()) as Body;
+        for (const [, args] of body.methodResponses ?? []) for (const e of args.list ?? []) e.baseEventId = base(e);
+        return Response.json(body);
+      });
+    const window = { after: "2026-11-01T00:00:00Z", before: "2026-12-01T00:00:00Z" };
+    // Stalwart before 0.16.22 answered a stored event's own id.
+    answering((e) => e.id);
+    expect((await search(adapter, window)).events.map((e) => e.series_id)).toEqual([null, null, null]);
+    answering(() => "../cal/x");
+    const { events } = await search(adapter, window);
+    expect(events.map((e) => e.series_id)).toEqual([null, null, null]);
+    expect((await adapter.readEvent({ event_id: `${weekly}-20261109T090000` })).event).toMatchObject({ series_id: null, recurrence: null });
+  });
+
   it("the fake answers like the server: expansion needs one condition with after and before", async () => {
     fake.addMailbox(A);
     const { accessToken } = fake.tokensFor(A);
@@ -732,6 +770,7 @@ describe("readEvent", () => {
         location: "Room 1",
         status: "confirmed",
         recurring: true,
+        series_id: null,
         description: "Agenda\n1. Scope",
         description_truncated: false,
         locations: ["Room 1", "Annex"],
@@ -752,7 +791,6 @@ describe("readEvent", () => {
     expect(request!.body.using).toEqual([CORE, CALENDARS]);
     const properties = [
       ...EVENT_SUMMARY_REQUEST, "description", "descriptionContentType", "virtualLocations", "participants", "freeBusyStatus", "privacy",
-      "baseEventId",
     ];
     expect(calls(request!)).toEqual([["CalendarEvent/get", { ids: [id], properties, timeZone: "Etc/UTC", accountId }, "g"]]);
     // A stored event carries its own rule: nothing else is asked.
@@ -780,6 +818,7 @@ describe("readEvent", () => {
       start: "2026-11-03T09:00:00Z",
       local_start: "2026-11-03T09:00:00",
       recurring: true,
+      series_id: series,
       recurrence: "daily, 5 times",
     });
     // The server shows an occurrence without its rule, so the rule is read from the series it names.
@@ -790,6 +829,8 @@ describe("readEvent", () => {
     ]);
     expect(jmapRequests()).toHaveLength(3);
     await expectMailError(adapter.readEvent({ event_id: `${series}-20261109T090000` }), "not_found");
+    // The series itself is no occurrence of another.
+    expect((await adapter.readEvent({ event_id: series })).event).toMatchObject({ series_id: null, recurrence: "daily, 5 times" });
   });
 
   it("an occurrence whose series cannot be read any more has no rule; a server that names an event as its own series is not asked twice", async () => {
@@ -1984,6 +2025,22 @@ describe("writing events", () => {
       expect((await adapter.readEvent({ event_id })).event.calendar_ids).toEqual([other.id]);
     });
 
+    it("an update by the series_id of a search result changes every occurrence", async () => {
+      fake.addMailbox(A);
+      const adapter = await adapterFor(A);
+      const { event_id } = await adapter.createEvent({ title: "Daily", ...FUTURE, recurrence: { frequency: "daily", count: 3 } }, false);
+      const window = { after: "2031-03-01T00:00:00Z", before: "2031-03-31T00:00:00Z" };
+      const [, second] = (await search(adapter, window)).events;
+      expect(second!.series_id).toBe(event_id);
+      expect(await adapter.updateEvent({ event_id: second!.series_id!, title: "Renamed" }, false)).toEqual({ event_id });
+      const after = (await search(adapter, window)).events;
+      expect(after.map((e) => [e.title, e.series_id])).toEqual([
+        ["Renamed", event_id],
+        ["Renamed", event_id],
+        ["Renamed", event_id],
+      ]);
+    });
+
     it("an unknown outcome of a notifying update is send_unconfirmed", async () => {
       fake.addMailbox(A);
       const adapter = await adapterFor(A);
@@ -2032,6 +2089,18 @@ describe("writing events", () => {
       expect((await adapter.readEvent({ event_id })).event.title).toBe("Daily");
       expect(fake.eventsOf(A)[0]!.recurrenceOverrides).toEqual({ "2031-03-05T09:00:00": { excluded: true } });
       expect(fake.schedulingMessages(A)).toEqual([{ kind: "CANCEL", eventId: third, attendees: [OK] }]);
+    });
+
+    it("deleting by the series_id of a search result removes every occurrence", async () => {
+      fake.addMailbox(A);
+      const adapter = await adapterFor(A);
+      const { event_id } = await adapter.createEvent({ title: "Daily", ...FUTURE, recurrence: { frequency: "daily", count: 3 } }, false);
+      const window = { after: "2031-03-01T00:00:00Z", before: "2031-03-31T00:00:00Z" };
+      const found = (await search(adapter, window)).events;
+      expect(found.map((e) => e.series_id)).toEqual([event_id, event_id, event_id]);
+      expect(await adapter.deleteEvents([found[1]!.series_id!], false)).toEqual({ deleted: [event_id], notDeleted: [], unknownOnly: true });
+      expect(await searchIds(adapter, window)).toEqual([]);
+      expect(fake.eventsOf(A)).toEqual([]);
     });
   });
 

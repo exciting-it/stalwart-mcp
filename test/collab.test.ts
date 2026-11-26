@@ -212,6 +212,7 @@ describe("results", () => {
       location: null,
       status: null,
       recurring: false,
+      series_id: null,
       description: "",
       description_truncated: false,
       locations: [],

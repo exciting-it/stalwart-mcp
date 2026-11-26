@@ -422,6 +422,8 @@ export const EventSummarySchema = z.object({
   location: z.string().nullable(),
   status: z.string().nullable(),
   recurring: z.boolean(),
+  /** The id of the whole series when this is one occurrence of it; null for a stored event. */
+  series_id: z.string().nullable(),
 });
 
 export const EventDetailSchema = EventSummarySchema.extend({

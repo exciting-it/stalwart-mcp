@@ -529,6 +529,17 @@ describe("tools", () => {
       }
     });
 
+    it("say that series_id acts on the whole series and an occurrence id on that occurrence only", () => {
+      for (const name of ["search_events", "read_event"]) {
+        const { description } = byName(name).spec;
+        expect(description).toContain("series_id is the id of the whole series");
+        expect(description).toContain("read_event, update_event and delete_event take it to act on all occurrences");
+        expect(description).toContain("the occurrence id acts on that occurrence only");
+      }
+      expect(byName("update_event").spec.description).toContain("its series_id (from search_events or read_event) changes the whole series");
+      expect(byName("delete_event").spec.description).toContain("Its series_id (from search_events or read_event) deletes the whole series.");
+    });
+
     it("lead the result with the fixed notice and count in the audit row without content", async () => {
       const list = await byName("list_calendars").execute(deps, grantA, {});
       expect(Object.keys(list.structuredContent as object)).toEqual(["content_notice", "calendars"]);

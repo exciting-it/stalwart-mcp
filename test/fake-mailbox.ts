@@ -88,6 +88,7 @@ const summaryOfEvent = (e: EventDetail): EventSummary => ({
   location: e.location,
   status: e.status,
   recurring: e.recurring,
+  series_id: e.series_id,
 });
 
 const emptyContact = (id: string, book: string): ContactDetail => ({
@@ -183,6 +184,7 @@ function seedAccount(key: AccountKey): Account {
         location: null,
         status: "confirmed",
         recurring: false,
+        series_id: null,
         description: "",
         description_truncated: false,
         locations: [],

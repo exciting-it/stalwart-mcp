@@ -168,14 +168,14 @@ like mail: reading, creating, changing and deleting.
 | `search_contacts` | contacts | Filter by text, name, email, phone, organization, address book; most recently changed first; summaries |
 | `read_contact` | contacts | One contact with names, emails, phones, organizations, titles, addresses, birthday, notes |
 | `list_calendars` | calendars | The calendars with name, default flag, time zone and whether they are writable |
-| `search_events` | calendars | Events overlapping a window of at most 180 days, optionally in one calendar or matching a text; earliest first; one summary per occurrence of a recurring event |
+| `search_events` | calendars | Events overlapping a window of at most 180 days, optionally in one calendar or matching a text; earliest first; one summary per occurrence of a recurring event, with `series_id` naming its series |
 | `read_event` | calendars | One event or occurrence with description, locations, meeting links, participants and a short recurrence summary |
 | `create_contact` | contacts | A new contact (JSContact card) in the default or a given address book |
 | `update_contact` | contacts | Replaces the given fields of a contact |
 | `delete_contact` | contacts | Removes up to 50 contacts for good |
 | `create_event` | calendars | A new event, timed or all-day, with optional participants and recurrence |
-| `update_event` | calendars | Replaces the given fields of an event or of one occurrence |
-| `delete_event` | calendars | Removes up to 50 events or occurrences for good |
+| `update_event` | calendars | Replaces the given fields of an event or of one occurrence; a `series_id` changes the whole series |
+| `delete_event` | calendars | Removes up to 50 events or occurrences for good; a `series_id` removes the whole series |
 
 - **What is sent.** The contract (`src/collab.ts`) has eleven operations. The adapter
   (`src/jmap/jmap-collab-adapter.ts`) sends `/get` and `/query`, and `/set` of `ContactCard` and
@@ -238,7 +238,11 @@ like mail: reading, creating, changing and deleting.
   with `utcStart`. An occurrence comes without its rule; `read_event` asks for `baseEventId`
   (server-set, the series of an occurrence, null for a stored event) and reads the rule from
   that series in a second request. The id comes from the server's answer for this account,
-  never from the input.
+  never from the input. `search_events` asks for `baseEventId` too (same request), and both
+  results carry it as `series_id` (null for a stored event, for an event the server names as
+  its own series, and for an id that is not well-formed): without it, a series found by
+  searching could only be changed or deleted one occurrence at a time. A series id is a stored
+  event, so a write by it goes the same way as any other (audience read, notify decision).
 - **Invitations are sends.** An event write that makes the mail server notify people is treated
   like `send_mail`, because the server then sends mail to third parties on the user's behalf.
   JMAP has one switch per `CalendarEvent/set` request, `sendSchedulingMessages`; the connector

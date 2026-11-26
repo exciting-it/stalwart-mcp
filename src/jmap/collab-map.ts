@@ -366,8 +366,12 @@ export const JmapCalendarEvent = z.object({
   freeBusyStatus: z.string().nullish(),
   privacy: z.string().nullish(),
   recurrenceId: z.string().nullish(),
-  /** Server-set: the series an occurrence belongs to; null (or, on older servers, its own id) for a stored event. */
-  baseEventId: MailIdSchema.nullish(),
+  /**
+   * Server-set: the series an occurrence belongs to; null (or, on older servers, its own id) for a
+   * stored event. Read as any string, so a malformed one cannot fail a whole search; only a
+   * well-formed id is used (`seriesIdOf`).
+   */
+  baseEventId: z.string().nullish(),
   recurrenceRule: Rule.nullish(),
   /** The older JSCalendar name (an array); Stalwart uses `recurrenceRule`. Read as a fallback only. */
   recurrenceRules: z.array(Rule).nullish(),
@@ -394,12 +398,12 @@ export const CALENDAR_PROPERTIES = ["id", "name", "description", "color", "isDef
 // together with `utcStart`.
 const EVENT_SUMMARY_PROPERTIES = [
   "id", "calendarIds", "title", "start", "timeZone", "duration", "showWithoutTime", "utcStart", "utcEnd",
-  "status", "locations", "recurrenceId", "recurrenceRule", "recurrenceRules",
+  "status", "locations", "recurrenceId", "recurrenceRule", "recurrenceRules", "baseEventId",
 ] as const;
 export const EVENT_SUMMARY_REQUEST = EVENT_SUMMARY_PROPERTIES;
 export const EVENT_DETAIL_PROPERTIES = [
   ...EVENT_SUMMARY_PROPERTIES, "description", "descriptionContentType", "virtualLocations", "participants",
-  "freeBusyStatus", "privacy", "baseEventId",
+  "freeBusyStatus", "privacy",
 ] as const;
 /** What is read of the series of an occurrence: its rule. */
 export const EVENT_RULE_PROPERTIES = ["id", "recurrenceRule", "recurrenceRules"] as const;
@@ -440,12 +444,18 @@ function isRecurring(e: CalendarEventObject): boolean {
 }
 
 /**
- * The id of the series `e` is one occurrence of, when its rule has to be read from there: the
- * server shows an occurrence without the rule and names its series in `baseEventId`.
+ * The id of the series `e` is one occurrence of, as the server names it in `baseEventId`. Null
+ * for a stored event, also when an older server names the event itself, and for an id that is
+ * not well-formed.
  */
 export function seriesIdOf(e: CalendarEventObject): string | null {
   const base = e.baseEventId ?? null;
-  return base === null || base === e.id || ruleOf(e) !== null ? null : base;
+  return base === null || base === e.id || !MailIdSchema.safeParse(base).success ? null : base;
+}
+
+/** The series whose rule describes `e`: the server shows an occurrence without the rule. */
+export function ruleSeriesIdOf(e: CalendarEventObject): string | null {
+  return ruleOf(e) === null ? seriesIdOf(e) : null;
 }
 
 /** The ids of a JMAP id map, as far as they are well-formed ids: nothing else is passed on. */
@@ -468,6 +478,7 @@ export function toEventSummary(e: CalendarEventObject): EventSummary {
     location: locationNames(e, 1)[0] ?? null,
     status: optionalLine(e.status),
     recurring: isRecurring(e),
+    series_id: seriesIdOf(e),
   };
 }
 

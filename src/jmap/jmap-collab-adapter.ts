@@ -60,7 +60,7 @@ import {
   namesOwner,
   newCalendarEvent,
   newContactCard,
-  seriesIdOf,
+  ruleSeriesIdOf,
   toCalendarInfo,
   toContactDetail,
   toContactSummary,
@@ -287,7 +287,7 @@ export class JmapCollabAdapter implements CollabUpstream {
    * input. Null for a stored event, and when the series is gone by now.
    */
   async #seriesOf(event: CalendarEventObject): Promise<CalendarEventObject | null> {
-    const seriesId = seriesIdOf(event);
+    const seriesId = ruleSeriesIdOf(event);
     if (seriesId === null) return null;
     const responses = await this.#call("calendars", [
       ["CalendarEvent/get", { ids: [seriesId], properties: EVENT_RULE_PROPERTIES }, "b"],

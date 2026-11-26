@@ -34,8 +34,8 @@ Why it is built this way, and what its security rests on: [docs/design.md](docs/
 | `search_contacts` | Search the address book by text, name, email, phone, organization or address book (needs `contacts`) |
 | `read_contact` | One contact: names, emails, phones, organizations, addresses, birthday, notes (needs `contacts`) |
 | `list_calendars` | The mailbox's calendars with id, name and whether they are writable (needs `calendars`) |
-| `search_events` | Events that overlap a time window of at most 180 days, one entry per occurrence of a recurring event (needs `calendars`) |
-| `read_event` | One event: time, locations, description, participants, meeting links, recurrence (needs `calendars`) |
+| `search_events` | Events that overlap a time window of at most 180 days, one entry per occurrence of a recurring event, with the id of its series (needs `calendars`) |
+| `read_event` | One event: time, locations, description, participants, meeting links, recurrence, the id of its series (needs `calendars`) |
 | `create_contact` | Create a contact: names, up to 10 emails and 10 phones, organization, job title, notes, birthday (needs `contacts`) |
 | `update_contact` | Change a contact; a given field replaces the stored one (needs `contacts`) |
 | `delete_contact` | Delete up to 50 contacts **for good** (needs `contacts`) |
@@ -250,7 +250,8 @@ and is not named on the approval page.
   `Etc/UTC`). A wall-clock time that occurs twice (when the clocks go back) means its first
   occurrence, as RFC 5545 and RFC 8984 say. Timed events take years 1000 to 9999. An all-day event is a floating `start` at midnight with `P<days>D` and
   `showWithoutTime: true`. An occurrence id (as `search_events` lists it) changes or deletes
-  that occurrence only.
+  that occurrence only; the occurrence's `series_id` (in the results of `search_events` and
+  `read_event`) is the id of the whole series and changes or deletes all its occurrences.
 - **What the tools return.** Every result leads with a fixed `content_notice` saying that names,
   titles, descriptions, notes, locations and addresses may come from third parties (for example
   the sender of an invitation) and are data, not instructions. Text is stripped of control and
@@ -266,6 +267,10 @@ and is not named on the approval page.
   occurrence of a series without its rule and names the series in `baseEventId`; `read_event`
   then reads the rule from that series with a second request, so an occurrence found with
   `search_events` carries the rule of its series too (no rule when the series is gone by then).
+  `search_events` asks for `baseEventId` in the same request, and both tools return it as
+  `series_id`: the id of the series for an occurrence, null for a stored event (also when the
+  server names the event itself, as Stalwart before 0.16.22 did, or an id that is not
+  well-formed).
 
 ### Branding
 
@@ -348,7 +353,9 @@ same assumptions as the code):
 - [ ] `CalendarEvent/get` returns `utcStart` and `utcEnd` when asked for, and `read_event` on an
   occurrence id returns that occurrence (own `start`, `recurrenceId`, no rules) and, when asked
   for, `baseEventId` with the id of its series (null for a stored event), so `read_event` shows
-  the rule of the series for an occurrence. Asking for `utcStart` together with
+  the rule of the series for an occurrence. The same for the occurrences `search_events` gets
+  through `#ids` from the expanded query: each carries `baseEventId`, which becomes `series_id`,
+  and an update or a deletion by that id changes or removes the whole series. Asking for `utcStart` together with
   `recurrenceOverrides` is refused by the server, which is why the connector never asks for
   `recurrenceOverrides`.
 - [ ] Events in a time zone with a daylight-saving change, all-day events (`showWithoutTime`),
