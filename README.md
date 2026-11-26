@@ -78,9 +78,11 @@ the server, its stored name and type kept); a text file the AI tool writes (`fil
 `image/webp`; a PDF or an image must start with that type's signature). The files written into
 one call (text and base64 together) are at most 2 MB. A name that ends like a program, a script,
 a macro-enabled Office file or an HTML or SVG file (`.exe`, `.js`, `.py`, `.docm`, `.url`, `.html`,
-`.svg` and the others in `EXECUTABLE_EXTENSIONS` in `src/mail.ts`), or that carries
-`/ \ " : * ? < > |`, is refused in all three ways; a stored file counts by the last path segment of
-its stored name and goes out under that segment, or as `attachment` when nothing usable is left. Files are decoded, checked and uploaded to the session's `uploadUrl` in the
+`.svg` and the others in `EXECUTABLE_EXTENSIONS` in `src/mail.ts`) is refused in all three
+ways, and so is a written name that carries `/ \ " : * ? < > |`. A stored file counts by the last
+path segment of its stored name and goes out under that segment with each of `" : * ? < > |`
+turned into `_`, or as `attachment` when nothing usable is left. Files are decoded, checked and
+uploaded to the session's `uploadUrl` in the
 mailbox's vault before the message is created; anything refused leaves nothing uploaded or sent.
 The send fingerprint covers the attachments (the ids of a stored file, name, type and SHA-256 of
 any other), so an identical call within 10 minutes is answered from the first and uploads nothing.

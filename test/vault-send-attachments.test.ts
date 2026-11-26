@@ -577,7 +577,10 @@ describe("attachments: review round 1", () => {
       return (lastEmailCreate().attachments as { name: string }[]).map((a) => a.name);
     };
     expect(await names(["3", "4", "5", "6"])).toEqual(["evil.txt", "report.pdf", "attachment", "report.csv"]);
-    for (const attachment_id of ["7", "8", "9", "10", "11"]) {
+    // A received file keeps its name as far as it can: a character a written name may not have
+    // becomes `_`. A program ending hidden behind such a character is still refused.
+    expect(await names(["10"])).toEqual(["Re_ invoice_.pdf"]);
+    for (const attachment_id of ["7", "8", "9", "11"]) {
       await expectCode(box.createDraft({ ...msg, attachments: [{ message_id: source, attachment_id }] }), "invalid_input");
     }
     expect(uploads()).toHaveLength(0);

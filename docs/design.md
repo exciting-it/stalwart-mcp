@@ -283,9 +283,11 @@ keep the damage of a mistake small:
 - A stored name (way 1) counts only by its last path segment (what follows the last `/` or `\`).
   That segment is cleaned with `attachmentName` (control and invisible characters removed, line
   breaks and tabs turned into spaces, at most 200 characters; `read_thread` shows names with
-  `clean`, which keeps line breaks), and white space and dots are stripped at both ends. With
-  nothing left it goes out as `attachment`; otherwise it must meet the rule of a written name, or
-  the call is `invalid_input` (so a stored `Re: invoice?.pdf` cannot be forwarded under its name).
+  `clean`, which keeps line breaks), each of `" : * ? < > |` becomes `_` (a stored
+  `Re: invoice?.pdf` goes out as `Re_ invoice_.pdf`), and white space and dots are stripped at
+  both ends. With nothing left it goes out as `attachment`; otherwise it must meet the rule of a
+  written name, or the call is `invalid_input`. A stored name that ends like a program is
+  refused, also when the ending hides behind such a character (`x.exe"`, `x.exe::$DATA`).
   A stored type goes out when it is a plain media type, else as `application/octet-stream` (the
   rule of `read_attachment`); the type is not part of the program rule, so a stored `text/html`
   part named `report.txt` goes out as `text/html`. A stored text part keeps its charset when that

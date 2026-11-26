@@ -99,19 +99,25 @@ const isStored = (a: PreparedAttachment): a is StoredRef => "message_id" in a;
 /** A charset the server reported for a stored text part, passed on when it is a plain token. */
 const CHARSET_TOKEN = /^[a-z0-9][a-z0-9._-]{0,39}$/;
 
+/** The characters a written name may not have, beyond the path separators. */
+const NAME_FORBIDDEN = /["*:<>?|]/g;
+
 /**
  * The name a stored attachment goes out with. Only its last path segment counts (what follows the
  * last `/` or `\`); that is cleaned to one line (`attachmentName`: control and invisible
- * characters removed, line breaks and tabs made spaces, capped) and stripped of white space and
- * dots at both ends. Nothing left: `attachment`. Otherwise it must meet the rule of a written name
- * (`isAttachmentFileName`), and the segment as stored must not end like a program either;
- * else `invalid_input`.
+ * characters removed, line breaks and tabs made spaces, capped), each character a written name
+ * may not have becomes `_` (so a received `Re: invoice?.pdf` can be passed on), and white space
+ * and dots are stripped at both ends. Nothing left: `attachment`. Otherwise it must meet the rule
+ * of a written name (`isAttachmentFileName`). It is refused (`invalid_input`) when it ends like a
+ * program: as stored, with those characters taken out (`x.exe"`), or up to its first `:`
+ * (`x.exe::$DATA`).
  */
 function outgoingStoredName(name: string | null | undefined): string {
   const segment = (name ?? "").split(/[/\\]/).at(-1) ?? "";
-  const cleaned = (attachmentName(segment) ?? "").replace(/^[\s.]+|[\s.]+$/gu, "");
+  const cleaned = (attachmentName(segment) ?? "").replace(NAME_FORBIDDEN, "_").replace(/^[\s.]+|[\s.]+$/gu, "");
   if (cleaned === "") return "attachment";
-  if (isExecutableName(segment) || !isAttachmentFileName(cleaned)) throw new MailError("invalid_input");
+  const program = [segment, segment.replace(NAME_FORBIDDEN, ""), segment.split(":")[0] ?? ""].some(isExecutableName);
+  if (program || !isAttachmentFileName(cleaned)) throw new MailError("invalid_input");
   return cleaned;
 }
 
