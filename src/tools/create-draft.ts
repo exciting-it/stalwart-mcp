@@ -1,4 +1,4 @@
-import { CreateDraftInput, CreateDraftResult, OUTGOING_ATTACHMENTS_NOTE, OUTGOING_CONTENT_NOTE } from "../mail";
+import { CreateDraftInput, CreateDraftResult, OUTGOING_ATTACHMENTS_NOTE, OUTGOING_CONTENT_NOTE, requireWrittenAttachmentsFit } from "../mail";
 import { defineTool } from "./define-tool";
 
 export const createDraft = defineTool({
@@ -8,5 +8,6 @@ export const createDraft = defineTool({
   kind: "draft",
   input: CreateDraftInput,
   output: CreateDraftResult,
+  precheck: requireWrittenAttachmentsFit,
   run: (mailbox, input) => mailbox.createDraft(input),
 });

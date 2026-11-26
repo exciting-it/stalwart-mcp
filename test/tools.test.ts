@@ -179,6 +179,19 @@ describe("tools", () => {
     expect(store.calls).toHaveLength(calls);
   });
 
+  it("files written into one call over 2,000,000 bytes are too_large before the mailbox, audited as refused", async () => {
+    const half = btoa("x".repeat(750_000)); // 750,000 bytes each
+    const r = await byName("send_mail").execute(deps, grantA, {
+      subject: "Hi",
+      body: "x",
+      to: ["ok@test.example"],
+      attachments: [1, 2, 3].map((i) => ({ filename: `f${i}.csv`, base64: half, content_type: "text/csv" })),
+    });
+    expect(text(r)).toBe(MAIL_ERROR_MESSAGES.too_large);
+    expect(store.calls).toHaveLength(0);
+    expect(audits).toEqual([expect.objectContaining({ tool: "send_mail", outcome: "refused", errorCode: "too_large" })]);
+  });
+
   it("refuses unknown input fields such as from or account_id", async () => {
     const attempts: [string, Record<string, unknown>][] = [
       ["list_mailboxes", { account_id: store.b.accountId }],

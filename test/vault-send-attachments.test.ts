@@ -7,6 +7,7 @@ import {
   type MailErrorCode,
   type OutgoingMessage,
   SendMailInput,
+  writtenAttachmentBytes,
 } from "../src/mail";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { clock } from "../src/clock";
@@ -322,7 +323,10 @@ describe("attachments: file names", () => {
     expect(EXECUTABLE_EXTENSIONS).toEqual([
       ".exe", ".com", ".bat", ".cmd", ".scr", ".pif", ".msi", ".msp", ".js", ".jse", ".vbs", ".vbe", ".wsf", ".wsh", ".ps1",
       ".jar", ".lnk", ".hta", ".cpl", ".dll", ".reg", ".iso", ".img", ".vhd", ".vhdx", ".apk", ".app", ".dmg", ".pkg", ".sh",
-      ".command", ".scpt", ".html", ".htm", ".svg", ".xhtml",
+      ".command", ".scpt", ".html", ".htm", ".svg", ".xhtml", ".url", ".scf", ".chm", ".hlp", ".wsc", ".sct", ".msc",
+      ".gadget", ".inf", ".application", ".appref-ms", ".xll", ".xlam", ".docm", ".dotm", ".xlsm", ".xltm", ".pptm",
+      ".potm", ".ppsm", ".mht", ".mhtml", ".svgz", ".ps1xml", ".psm1", ".psd1", ".psc1", ".vb", ".ws", ".cab",
+      ".diagcab", ".ade", ".adp", ".mde", ".accde", ".py", ".pyc", ".pl", ".rb", ".php",
     ]);
     const { box } = await signIn(A);
     const before = fake.requests.length;
@@ -494,6 +498,126 @@ describe("attachments: a failed upload", () => {
       return fake.fetch(input, init);
     });
     await expectCode(box.sendMail({ ...msg, attachments: [{ filename: "a.txt", text: "a" }] }), "upstream_unavailable");
+    expect(await sendsCounted(stub)).toBe(0);
+  });
+});
+
+describe("attachments: review round 1", () => {
+  it("files written into one call total at most 2,000,000 bytes: more is too_large before anything is uploaded", async () => {
+    expect(MAIL_LIMITS.attachmentUploadTotalBytes).toBe(2_000_000);
+    const { stub, box } = await signIn(A);
+    const file = (n: number) => {
+      const b = new Uint8Array(n);
+      b.set(PDF);
+      return bigBase64(b);
+    };
+    const pdf = (name: string, n: number) => ({ filename: name, base64: file(n), content_type: "application/pdf" as const });
+    // Two full base64 files are the cap; one byte of text more is over it.
+    const over = [pdf("a.pdf", 1_000_000), pdf("b.pdf", 1_000_000), { filename: "c.txt", text: "x" }];
+    expect(writtenAttachmentBytes(over)).toBe(2_000_001);
+    // Text counts as UTF-8: 200,000 characters of three bytes each.
+    const wide = Array.from({ length: 4 }, (_, i) => ({ filename: `w${i}.txt`, text: "\u20ac".repeat(200_000) }));
+    expect(writtenAttachmentBytes(wide)).toBe(2_400_000);
+    const before = fake.requests.length;
+    await expectCode(box.sendMail({ ...msg, attachments: over }), "too_large");
+    await expectCode(box.createDraft({ ...msg, attachments: wide }), "too_large");
+    expect(fake.requests).toHaveLength(before);
+    expect(await sendsCounted(stub)).toBe(0);
+    // The schema itself stays shape-only: the cap is its own check with its own code.
+    expect(SendMailInput.safeParse({ ...msg, attachments: over }).success).toBe(true);
+    // Files of the mailbox do not count toward it.
+    const source = messageOfA([{ name: "big.pdf", type: "application/pdf", size: 5_000_000, content: PDF }]);
+    const atCap = [pdf("a.pdf", 1_000_000), pdf("b.pdf", 1_000_000), { message_id: source, attachment_id: "3" }];
+    expect(await box.sendMail({ ...msg, attachments: atCap })).toMatchObject({ attachments: 3 });
+  });
+
+  it("file names may not carry \" : * ? < > or |", async () => {
+    const { box } = await signIn(A);
+    const before = fake.requests.length;
+    for (const filename of ['x.exe"', "x.exe::$DATA", "x.exe:.txt", "x.exe*", "x.exe?", "x.exe<", "x.exe>", "x.exe|", 'a"b.txt', "a:b.txt", "a*b.txt", "a?b.txt", "a<b.txt", "a>b.txt", "a|b.txt"]) {
+      expect(SendMailInput.safeParse({ ...msg, attachments: [{ filename, text: "t" }] }).success, filename).toBe(false);
+      await expectCode(box.createDraft({ ...msg, attachments: [{ filename, base64: base64(PNG), content_type: "image/png" }] }), "invalid_input");
+    }
+    expect(fake.requests).toHaveLength(before);
+  });
+
+  it("the added endings are refused too, macro-enabled Office files included", async () => {
+    const added = [
+      ".url", ".scf", ".chm", ".hlp", ".wsc", ".sct", ".msc", ".gadget", ".inf", ".application", ".appref-ms", ".xll",
+      ".xlam", ".docm", ".dotm", ".xlsm", ".xltm", ".pptm", ".potm", ".ppsm", ".mht", ".mhtml", ".svgz", ".ps1xml",
+      ".psm1", ".psd1", ".psc1", ".vb", ".ws", ".cab", ".diagcab", ".ade", ".adp", ".mde", ".accde", ".py", ".pyc",
+      ".pl", ".rb", ".php",
+    ];
+    for (const ext of added) {
+      expect(EXECUTABLE_EXTENSIONS as readonly string[]).toContain(ext);
+      for (const filename of [`f${ext}`, `F${ext.toUpperCase()}`]) {
+        expect(SendMailInput.safeParse({ ...msg, attachments: [{ filename, text: "t" }] }).success, filename).toBe(false);
+      }
+    }
+    for (const filename of ["report.docx", "sheet.xlsx", "deck.pptx", "notes.md"]) {
+      expect(SendMailInput.safeParse({ ...msg, attachments: [{ filename, text: "t" }] }).success, filename).toBe(true);
+    }
+  });
+
+  it("a stored name counts by its last path segment and follows the rules of a written name", async () => {
+    const { box } = await signIn(A);
+    const source = messageOfA([
+      { name: "../../evil.txt", type: "text/plain", content: "a" },
+      { name: "dir\\sub\\report.pdf", type: "application/pdf", content: PDF },
+      { name: "folder/", type: "text/plain", content: "c" },
+      { name: " . report.csv. ", type: "text/csv", content: "d" },
+      { name: "x.exe::$DATA", type: "application/octet-stream", content: "e" },
+      { name: 'x.exe"', type: "application/octet-stream", content: "f" },
+      { name: "safe/../run.EXE", type: "application/octet-stream", content: "g" },
+      { name: "Re: invoice?.pdf", type: "application/pdf", content: PDF },
+      { name: "line\u2028break.txt", type: "text/plain", content: "h" },
+    ]);
+    const names = async (ids: string[]) => {
+      await box.createDraft({ ...msg, attachments: ids.map((attachment_id) => ({ message_id: source, attachment_id })) });
+      return (lastEmailCreate().attachments as { name: string }[]).map((a) => a.name);
+    };
+    expect(await names(["3", "4", "5", "6"])).toEqual(["evil.txt", "report.pdf", "attachment", "report.csv"]);
+    for (const attachment_id of ["7", "8", "9", "10", "11"]) {
+      await expectCode(box.createDraft({ ...msg, attachments: [{ message_id: source, attachment_id }] }), "invalid_input");
+    }
+    expect(uploads()).toHaveLength(0);
+  });
+
+  it("the stored type goes out when it is a plain media type, else as application/octet-stream", async () => {
+    const { box } = await signIn(A);
+    const source = messageOfA([
+      { name: "a.pdf", type: "application/pdf", content: PDF },
+      { name: "b.txt", type: "Text/Plain", content: "b" },
+      { name: "c.bin", type: "application/pdf; name=c.pdf", content: PDF },
+      { name: "d.bin", type: "", content: "d" },
+      { name: "e.bin", type: "image/png\nX-Evil: 1", content: "e" },
+      { name: "f.page", type: "text/html", content: "<p>f</p>" },
+    ]);
+    const types = async (ids: string[]) => {
+      await box.createDraft({ ...msg, attachments: ids.map((attachment_id) => ({ message_id: source, attachment_id })) });
+      return (lastEmailCreate().attachments as { type: string }[]).map((a) => a.type);
+    };
+    expect(await types(["3", "4", "5"])).toEqual(["application/pdf", "text/plain", "application/octet-stream"]);
+    expect(await types(["6", "7", "8"])).toEqual(["application/octet-stream", "application/octet-stream", "text/html"]);
+  });
+
+  it("a stored size that is negative or not a whole number is upstream_rejected and never lowers the total", async () => {
+    const { stub, box } = await signIn(A);
+    const source = messageOfA([
+      { name: "big.pdf", type: "application/pdf", size: 9_999_999, content: PDF },
+      { name: "neg.pdf", type: "application/pdf", content: PDF },
+      { name: "half.pdf", type: "application/pdf", content: PDF },
+    ]);
+    fake.email(A, source)!.attachments[1]!.size = -5_000_000;
+    fake.email(A, source)!.attachments[2]!.size = 1.5;
+    for (const attachment_id of ["4", "5"]) {
+      await expectCode(
+        box.sendMail({ ...msg, attachments: [{ message_id: source, attachment_id: "3" }, { message_id: source, attachment_id }, { filename: "a.txt", text: "ab" }] }),
+        "upstream_rejected",
+      );
+    }
+    expect(uploads()).toHaveLength(0);
+    expect(fake.sent(A)).toEqual([]);
     expect(await sendsCounted(stub)).toBe(0);
   });
 });

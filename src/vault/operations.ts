@@ -39,6 +39,7 @@ import {
   type OutgoingMessageBase,
   type PreparedMessage,
   ReadAttachmentInput,
+  requireWrittenAttachmentsFit,
   ReadThreadInput,
   SearchMailInput,
   SendMailInput,
@@ -137,9 +138,11 @@ function parse<S extends z.ZodTypeAny>(schema: S, input: unknown): z.output<S> {
  * taken and before the mailbox is touched. The text part is `body` when given, otherwise the text
  * of the sanitized HTML, cleaned as the reading side cleans mail text. HTML with nothing visible
  * left is refused without a `body` and left out with one. HTML the parser cannot place is
- * refused. Without HTML the message is returned as it is.
+ * refused. Files written into the call over `attachmentUploadTotalBytes` are `too_large` (checked
+ * in the Worker too). Without HTML the message is returned as it is.
  */
 async function prepareOutgoing(message: z.output<typeof OutgoingMessageBase>): Promise<PreparedMessage> {
+  requireWrittenAttachmentsFit(message);
   const { html, attachments: given, ...rest } = message;
   let body: string;
   let clean: string | undefined;

@@ -1,4 +1,4 @@
-import { OUTGOING_ATTACHMENTS_NOTE, OUTGOING_CONTENT_NOTE, SendMailInput, SendMailResult } from "../mail";
+import { OUTGOING_ATTACHMENTS_NOTE, OUTGOING_CONTENT_NOTE, requireWrittenAttachmentsFit, SendMailInput, SendMailResult } from "../mail";
 import { defineTool } from "./define-tool";
 
 export const sendMail = defineTool({
@@ -8,5 +8,6 @@ export const sendMail = defineTool({
   kind: "send",
   input: SendMailInput,
   output: SendMailResult,
+  precheck: requireWrittenAttachmentsFit,
   run: (mailbox, input) => mailbox.sendMail(input),
 });

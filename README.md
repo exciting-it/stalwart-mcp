@@ -75,10 +75,12 @@ the server, its stored name and type kept); a text file the AI tool writes (`fil
 `content_type` one of `text/plain`, `text/csv`, `text/markdown`, `text/calendar`, `text/html`,
 `application/json`), stored as UTF-8; or a small file as base64 (`filename`, `base64`,
 `content_type` one of those or `application/pdf`, `image/png`, `image/jpeg`, `image/gif`,
-`image/webp`; a PDF or an image must start with that type's signature). A name that ends like a
-program, a script or an HTML or SVG file (`.exe`, `.js`, `.html`, `.svg` and the others in
-`EXECUTABLE_EXTENSIONS` in `src/mail.ts`) is refused in all three ways, for a stored file by its
-stored name. Files are decoded, checked and uploaded to the session's `uploadUrl` in the
+`image/webp`; a PDF or an image must start with that type's signature). The files written into
+one call (text and base64 together) are at most 2 MB. A name that ends like a program, a script,
+a macro-enabled Office file or an HTML or SVG file (`.exe`, `.js`, `.py`, `.docm`, `.url`, `.html`,
+`.svg` and the others in `EXECUTABLE_EXTENSIONS` in `src/mail.ts`), or that carries
+`/ \ " : * ? < > |`, is refused in all three ways; a stored file counts by the last path segment of
+its stored name and goes out under that segment, or as `attachment` when nothing usable is left. Files are decoded, checked and uploaded to the session's `uploadUrl` in the
 mailbox's vault before the message is created; anything refused leaves nothing uploaded or sent.
 The send fingerprint covers the attachments (the ids of a stored file, name, type and SHA-256 of
 any other), so an identical call within 10 minutes is answered from the first and uploads nothing.
@@ -154,8 +156,9 @@ Constants live in `MAIL_LIMITS` in `src/mail.ts` and, for contacts and calendars
 | Attachments per `send_mail` or `create_draft` | 5 |
 | Text file written by the AI tool (`text`) | 200,000 characters |
 | File given as base64 | 1,000,000 bytes decoded |
+| Files written into one call (UTF-8 of every `text` plus decoded `base64`) | 2,000,000 bytes (`too_large`) |
 | All attachments of one message (stored files by the size the server reports) | 10,000,000 bytes (`too_large`) |
-| File name of a text or base64 file | 1 to 200 characters, one line, no path, no leading or trailing dot or space |
+| File name (a stored one by its last path segment) | 1 to 200 characters, one line, none of `/ \ " : * ? < > \|`, no leading or trailing dot or space |
 | Worker access token lifetime | 1 hour |
 | Worker refresh token | ends after 30 days without use |
 | Unused Stalwart connection | wiped after 30 days without a tool call |
@@ -583,9 +586,11 @@ production a request under a host other than `PUBLIC_ORIGIN` answers 404.
   as images only for PNG, JPEG, GIF and WebP; other image types are files. ISO-8859-1 text is
   decoded as windows-1252, as browsers do.
 - Sending attachments: one MCP request is read up to 4 MiB (the MCP SDK's default request body
-  limit; a larger one is answered 413 before any tool runs). One base64 file of 1 MB is about
-  1.33 MB of request, so three such files fit in one call and four or five do not; attaching a
-  file of the mailbox by its ids costs no request size. The Worker parses that JSON and
+  limit; a larger one is answered 413 before any tool runs, with the SDK's text and no audit row).
+  The 2 MB cap on the files written into one call is what prevents that: the largest valid call
+  (two 1 MB base64 files, full HTML and body) is about 3 MB. A client that escapes every non-ASCII
+  character as `\uXXXX`, or text full of control characters, can still make a valid call larger
+  than 4 MiB. Attaching a file of the mailbox by its ids costs no request size. The Worker parses that JSON and
   checks the base64 shape on the Workers Free plan's 10 ms of CPU per request; the decoding,
   hashing and uploads run in the vault. Uploaded files of a message that then fails are left to
   the server, which expires unused blobs.

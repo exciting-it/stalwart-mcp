@@ -44,6 +44,11 @@ export interface ToolSpec<I extends z.ZodTypeAny, O extends z.ZodTypeAny> {
   input: I;
   output: O;
   /** `grant` is the verified connection: its address may be shown, never chosen by the input. */
+  /**
+   * A check of the parsed input that has a code of its own (not `invalid_input`), run before
+   * anything else: a throw is the call's answer and audited like any refusal.
+   */
+  precheck?(input: z.infer<I>): void;
   run(mailbox: Mailbox, input: z.infer<I>, grant: Grant): Promise<z.infer<O>>;
   count?(result: z.infer<O>): number;
   /**
@@ -104,6 +109,7 @@ export function defineTool<I extends z.ZodTypeAny, O extends z.ZodTypeAny>(spec:
   async function attempt(deps: ToolDeps, grant: Grant, input: z.SafeParseReturnType<unknown, z.infer<I>>): Promise<Outcome> {
     try {
       if (!input.success) throw new MailError("invalid_input");
+      spec.precheck?.(input.data);
       if (await deps.blocked(grant)) throw new MailError("blocked");
       const raw: unknown = await spec.run(deps.mailbox(grant), input.data, grant);
       const output = spec.output.safeParse(raw);

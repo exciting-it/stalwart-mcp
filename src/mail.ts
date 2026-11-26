@@ -49,6 +49,11 @@ export const MAIL_LIMITS = {
   attachmentTextInputChars: 200_000,
   /** One file given as base64, decoded. */
   attachmentUploadBytes: 1_000_000,
+  /**
+   * The files an AI tool writes into one call (UTF-8 bytes of every `text`, decoded bytes of every
+   * `base64`), together. Keeps the largest valid call well under the MCP transport's 4 MiB.
+   */
+  attachmentUploadTotalBytes: 2_000_000,
   /** All attachments of one message: stored size for a file of the mailbox, byte length for the others. */
   attachmentsTotalBytes: 10_000_000,
   /** The `filename` of a text or base64 file. */
@@ -90,15 +95,20 @@ export const isCleanText = (value: string): boolean => !UNSAFE_IN_TEXT.test(valu
 
 /**
  * File types that run (or open in a browser) when the receiver opens them: an attachment whose
- * name ends in one of these is refused, whichever way it was given. Mail clients open HTML and
- * SVG files in a browser, so those go too; `text/html` as a content type stays allowed for a
- * file with another name.
+ * name ends in one of these is refused, whichever way it was given. Mail clients open HTML, MHTML
+ * and SVG files in a browser, so those go too; `text/html` as a content type stays allowed for a
+ * file with another name. Macro-enabled Office files (`.docm`, `.xlsm`, `.pptm` and their
+ * templates and add-ins) are on the list on purpose: their macros are programs. Scripts for
+ * interpreters that are often installed (Python, Perl, Ruby, PHP) are too.
  */
 export const EXECUTABLE_EXTENSIONS = [
   ".exe", ".com", ".bat", ".cmd", ".scr", ".pif", ".msi", ".msp", ".js", ".jse", ".vbs", ".vbe",
   ".wsf", ".wsh", ".ps1", ".jar", ".lnk", ".hta", ".cpl", ".dll", ".reg", ".iso", ".img", ".vhd",
   ".vhdx", ".apk", ".app", ".dmg", ".pkg", ".sh", ".command", ".scpt", ".html", ".htm", ".svg",
-  ".xhtml",
+  ".xhtml", ".url", ".scf", ".chm", ".hlp", ".wsc", ".sct", ".msc", ".gadget", ".inf",
+  ".application", ".appref-ms", ".xll", ".xlam", ".docm", ".dotm", ".xlsm", ".xltm", ".pptm",
+  ".potm", ".ppsm", ".mht", ".mhtml", ".svgz", ".ps1xml", ".psm1", ".psd1", ".psc1", ".vb", ".ws",
+  ".cab", ".diagcab", ".ade", ".adp", ".mde", ".accde", ".py", ".pyc", ".pl", ".rb", ".php",
 ] as const;
 
 /**
@@ -164,7 +174,7 @@ export const OUTGOING_CONTENT_NOTE =
 
 /** How `send_mail` and `create_draft` describe `attachments` to the AI tool. */
 export const OUTGOING_ATTACHMENTS_NOTE =
-  "`attachments` (at most 5, 10 MB in total): a file of a message in this mailbox by the ids read_thread lists (message_id, attachment_id); a text file you write (filename, text, content_type); or a small file as base64 (filename, base64, content_type), at most 1 MB. Programs, scripts and HTML or SVG files are refused by name. Confirm with the user which files go to whom.";
+  "`attachments` (at most 5, 10 MB in total): a file of a message in this mailbox by the ids read_thread lists (message_id, attachment_id); a text file you write (filename, text, content_type); or a small file as base64 (filename, base64, content_type), at most 1 MB; files you write or pass as base64: at most 2 MB together per message. Programs, scripts and HTML or SVG files are refused by name. Confirm with the user which files go to whom.";
 
 /** The content types of a text file written by the AI tool. */
 export const TEXT_ATTACHMENT_TYPES = [
@@ -203,12 +213,57 @@ export function base64DecodedLength(value: string): number | null {
 const BASE64_MAX_CHARS = Math.ceil(MAIL_LIMITS.attachmentUploadBytes / 3) * 4;
 
 /**
- * A file name the AI tool gives: one clean line (`isCleanLine`), no `/` or `\`, no leading or
- * trailing white space or dot (so never `.` or `..`), and no ending of a file type that runs
- * when opened (`isExecutableName`).
+ * A file name an attachment goes out with: 1 to `attachmentNameChars` characters, one clean line
+ * (`isCleanLine`), none of the characters Windows forbids in a name (`/ \ " : * ? < > |`; a `:`
+ * would name an NTFS stream, `x.exe::$DATA`), no leading or trailing white space or dot (so never
+ * `.` or `..`), and no ending of a file type that runs when opened (`isExecutableName`). A stored
+ * name of way 1 must meet the same rule (`outgoingStoredName` in the adapter).
  */
 export function isAttachmentFileName(name: string): boolean {
-  return isCleanLine(name) && !/[/\\]/.test(name) && !/^[\s.]|[\s.]$/u.test(name) && !isExecutableName(name);
+  return (
+    name.length >= 1 &&
+    name.length <= MAIL_LIMITS.attachmentNameChars &&
+    isCleanLine(name) &&
+    !/[/\\":*?<>|]/.test(name) &&
+    !/^[\s.]|[\s.]$/u.test(name) &&
+    !isExecutableName(name)
+  );
+}
+
+/** The UTF-8 length of `text`, counted without encoding it (a lone surrogate becomes U+FFFD, 3 bytes). */
+function utf8Length(text: string): number {
+  let n = 0;
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i);
+    if (c < 0x80) n += 1;
+    else if (c < 0x800) n += 2;
+    else if (c >= 0xd800 && c <= 0xdbff && i + 1 < text.length && (text.charCodeAt(i + 1) & 0xfc00) === 0xdc00) {
+      n += 4;
+      i++;
+    } else n += 3;
+  }
+  return n;
+}
+
+/**
+ * The bytes of the files an AI tool writes into one call: the UTF-8 length of every `text` and
+ * the decoded length of every `base64` (arithmetic, nothing is decoded). Files of the mailbox
+ * (way 1) do not count. Over `attachmentUploadTotalBytes` the call is `too_large`.
+ */
+export function writtenAttachmentBytes(attachments: readonly z.input<typeof OutgoingAttachmentInput>[]): number {
+  let total = 0;
+  for (const a of attachments) {
+    if ("text" in a) total += utf8Length(a.text);
+    else if ("base64" in a) total += base64DecodedLength(a.base64) ?? 0;
+  }
+  return total;
+}
+
+/** Throws `too_large` when the files written into one message exceed `attachmentUploadTotalBytes`. */
+export function requireWrittenAttachmentsFit(message: { attachments?: readonly z.input<typeof OutgoingAttachmentInput>[] }): void {
+  if (writtenAttachmentBytes(message.attachments ?? []) > MAIL_LIMITS.attachmentUploadTotalBytes) {
+    throw new MailError("too_large");
+  }
 }
 
 const AttachmentFileName = z

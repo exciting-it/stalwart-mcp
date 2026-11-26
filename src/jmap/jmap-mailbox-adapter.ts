@@ -19,6 +19,7 @@ import {
   type MarkMailOutcome,
   type MoveMailOutcome,
   type MoveMailRequestT,
+  isAttachmentFileName,
   isExecutableName,
   type PreparedAttachment,
   type PreparedMessage,
@@ -99,12 +100,19 @@ const isStored = (a: PreparedAttachment): a is StoredRef => "message_id" in a;
 const CHARSET_TOKEN = /^[a-z0-9][a-z0-9._-]{0,39}$/;
 
 /**
- * The name a stored attachment goes out with: the stored one, cleaned to one line and trimmed;
- * `attachment` when nothing usable is left (no name, or only dots).
+ * The name a stored attachment goes out with. Only its last path segment counts (what follows the
+ * last `/` or `\`); that is cleaned to one line (`attachmentName`: control and invisible
+ * characters removed, line breaks and tabs made spaces, capped) and stripped of white space and
+ * dots at both ends. Nothing left: `attachment`. Otherwise it must meet the rule of a written name
+ * (`isAttachmentFileName`), and the segment as stored must not end like a program either;
+ * else `invalid_input`.
  */
-function storedName(name: string | null | undefined): string {
-  const cleaned = attachmentName(name)?.trim() ?? "";
-  return /^\.*$/.test(cleaned) ? "attachment" : cleaned;
+function outgoingStoredName(name: string | null | undefined): string {
+  const segment = (name ?? "").split(/[/\\]/).at(-1) ?? "";
+  const cleaned = (attachmentName(segment) ?? "").replace(/^[\s.]+|[\s.]+$/gu, "");
+  if (cleaned === "") return "attachment";
+  if (isExecutableName(segment) || !isAttachmentFileName(cleaned)) throw new MailError("invalid_input");
+  return cleaned;
 }
 
 /** One entry of the Email's `attachments` (RFC 8621 §4.6); the server builds the MIME structure. */
@@ -329,8 +337,9 @@ export class JmapMailboxAdapter implements MailboxAdapter<PreparedMessage> {
       const part = stored.find((e) => e.id === ref.message_id)?.attachments?.find((p) => p.partId === ref.attachment_id);
       if (!part) throw new MailError("not_found");
       if (!MailIdSchema.safeParse(part.blobId).success) throw new MailError("upstream_rejected");
-      const name = storedName(part.name);
-      if (isExecutableName(part.name ?? "") || isExecutableName(name)) throw new MailError("invalid_input");
+      // A size that is not a whole number of bytes never enters the total.
+      if (!Number.isSafeInteger(part.size) || part.size < 0) throw new MailError("upstream_rejected");
+      const name = outgoingStoredName(part.name);
       const type = plainType(part.type) ?? "application/octet-stream";
       const charset = part.charset?.trim().toLowerCase() ?? "";
       const textCharset = type.startsWith("text/") && CHARSET_TOKEN.test(charset) ? charset : null;

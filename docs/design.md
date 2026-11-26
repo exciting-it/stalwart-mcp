@@ -246,6 +246,14 @@ file. So the input offers three ways, each a strict object, at most 5 per messag
    images the bytes must start with that type's signature (the check `read_attachment` uses), so
    a file declared a PDF is one.
 
+The files an AI tool writes into one call (ways 2 and 3 together: the UTF-8 bytes of every `text`
+and the decoded bytes of every `base64`) total at most 2,000,000 bytes, else `too_large`. This is
+checked right after the input schema, in the Worker (`precheck` in `defineTool`, so it is audited
+as a refusal) and again in the vault, before anything is uploaded; it is arithmetic on lengths,
+nothing is decoded. It keeps the largest valid call well under the 4 MiB the MCP transport reads
+(about 3 MB: 2.67 MB of base64, the HTML and body, the envelope), so a call is refused with the
+connector's own fixed sentence and an audit row rather than the SDK's 413.
+
 This is the most sensitive input so far: a mail the AI tool read can try to make it forward
 someone's files. The gate is the one every send has: outside production only allow-listed
 recipients, at most 50 sends a day, dedupe, and the tool description and the MCP instructions ask
@@ -254,21 +262,34 @@ mailbox: the lookup is in the grant's account, and a message that is not this ma
 has no attachment with that id, is `not_found` before anything is uploaded or sent. The limits
 keep the damage of a mistake small:
 
-- No file type that runs when opened, in all three ways (for way 1 judged by the stored name, both
-  as stored and as it goes out): a name ending in `.exe .com .bat .cmd .scr .pif .msi .msp .js .jse
-  .vbs .vbe .wsf .wsh .ps1 .jar .lnk .hta .cpl .dll .reg .iso .img .vhd .vhdx .apk .app .dmg .pkg
-  .sh .command .scpt .html .htm .svg .xhtml` is `invalid_input` (`EXECUTABLE_EXTENSIONS` in
-  `src/mail.ts`). The ending is compared in any case, after compatibility normalization (a
+- No file type that runs when opened, in all three ways (for way 1 judged by the last path segment
+  of the stored name, both as stored and as it goes out): a name ending in one of the 76 endings of
+  `EXECUTABLE_EXTENSIONS` in `src/mail.ts` is `invalid_input`: programs and installers (`.exe`,
+  `.msi`, `.dll`, `.app`, `.apk`, `.dmg`, `.pkg`, `.application`, ...), scripts (`.js`, `.vbs`,
+  `.ps1`, `.psm1`, `.sh`, `.py`, `.pl`, `.rb`, `.php`, ...), shortcuts and system files (`.lnk`,
+  `.url`, `.scf`, `.inf`, `.reg`, `.cpl`, `.msc`, `.chm`, ...), disk images and archives that
+  mount or install (`.iso`, `.img`, `.vhd`, `.cab`, `.diagcab`), Access and Office files with
+  macros (`.docm`, `.xlsm`, `.pptm`, `.xlam`, `.xll`, `.mde`, ..., on purpose: their macros are
+  programs), and pages that open in a browser (`.html`, `.htm`, `.xhtml`, `.mht`, `.mhtml`,
+  `.svg`, `.svgz`). The ending is compared in any case, after compatibility normalization (a
   full-width dot counts as a dot), without invisible format characters, and before trailing dots
   and white space, which Windows drops. HTML and SVG files go because mail clients open them in a
   browser; `text/html` as a content type stays allowed for a file named otherwise.
-- A file name (ways 2 and 3) is 1 to 200 characters on one line, without the control, separator
-  and bidi characters the contact and event writes refuse (`isCleanLine`, now in `src/mail.ts`),
-  without `/` or `\`, and without a leading or trailing dot or white space (so never `.` or `..`).
-  A stored name (way 1) goes out cleaned to one line as `read_thread` shows it; with nothing
-  usable left it is `attachment`. A stored type goes out when it is a plain media type, else as
-  `application/octet-stream` (the rule of `read_attachment`), and a stored text part keeps its
-  charset when that is a plain token.
+- A file name is 1 to 200 characters on one line, without the control, separator and bidi
+  characters the contact and event writes refuse (`isCleanLine`, now in `src/mail.ts`), without
+  the characters Windows forbids in a name (`/ \ " : * ? < > |`; a `:` names an NTFS stream, as in
+  `x.exe::$DATA`), and without a leading or trailing dot or white space (so never `.` or `..`)
+  (`isAttachmentFileName`).
+- A stored name (way 1) counts only by its last path segment (what follows the last `/` or `\`).
+  That segment is cleaned with `attachmentName` (control and invisible characters removed, line
+  breaks and tabs turned into spaces, at most 200 characters; `read_thread` shows names with
+  `clean`, which keeps line breaks), and white space and dots are stripped at both ends. With
+  nothing left it goes out as `attachment`; otherwise it must meet the rule of a written name, or
+  the call is `invalid_input` (so a stored `Re: invoice?.pdf` cannot be forwarded under its name).
+  A stored type goes out when it is a plain media type, else as `application/octet-stream` (the
+  rule of `read_attachment`); the type is not part of the program rule, so a stored `text/html`
+  part named `report.txt` goes out as `text/html`. A stored text part keeps its charset when that
+  is a plain token. A stored size that is negative or not a whole number is `upstream_rejected`.
 - The total of one message (stored size for way 1 as the server reports it, byte length for the
   others) is at most 10,000,000 bytes, else `too_large`. All of this is checked before anything is
   uploaded or sent.
