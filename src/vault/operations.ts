@@ -5,9 +5,9 @@
  * allow-list, deduplicated, and counted against the daily limit before it goes out. A send whose
  * outcome is unknown stays counted and blocks an identical send for the dedupe window.
  *
- * An event write that makes the mail server notify people (invitations, updates, cancellations)
- * is a send too: the same allow-list, the same daily counter (one per notified event) and, for a
- * create or update, the same dedupe. Whether it notifies is decided here (`event-notices.ts`); the
+ * An event write that makes the mail server notify people (invitations, updates, cancellations,
+ * the answer to an invitation) is a send too: the same allow-list, the same daily counter (one
+ * per notified event) and, for a create, update or answer, the same dedupe. Whether it notifies is decided here (`event-notices.ts`); the
  * adapter only reads the event and writes with that decision.
  *
  * The event writes of one mailbox run one after the other (`#oneEventWriteAtATime`): an update
@@ -23,6 +23,8 @@ import {
   type DeleteEventInputT,
   type DeleteEventResultT,
   type DestroyOutcome,
+  type RespondToEventInputT,
+  type RespondToEventResultT,
   type UpdateEventInputT,
   type UpdateEventResultT,
 } from "../collab";
@@ -46,7 +48,7 @@ import { JmapCollabAdapter } from "../jmap/jmap-collab-adapter";
 import { JmapMailboxAdapter } from "../jmap/jmap-mailbox-adapter";
 import { batchResult } from "../jmap/map";
 import { recipientsAllowed } from "../policy/environment";
-import { createNotice, deleteNotice, sendsFor, updateNotice } from "./event-notices";
+import { createNotice, deleteNotice, respondNotice, sendsFor, updateNotice } from "./event-notices";
 import {
   confirmSend,
   dropSend,
@@ -76,6 +78,7 @@ const COLLAB_OP_AREA: Record<z.output<typeof CollabRequest>["op"], Area> = {
   create_event: "calendars",
   update_event: "calendars",
   delete_event: "calendars",
+  respond_to_event: "calendars",
 };
 
 export type VaultResult<T> = { ok: true; value: T } | { ok: false; code: MailErrorCode };
@@ -191,6 +194,8 @@ export class MailboxOperations {
           return this.#sharedOrQueued("update_event", req.input, () => this.#updateEvent(accountId, req.input));
         case "delete_event":
           return this.#oneEventWriteAtATime(() => this.#deleteEvent(accountId, req.input));
+        case "respond_to_event":
+          return this.#sharedOrQueued("respond_to_event", req.input, () => this.#respondToEvent(accountId, req.input));
       }
       return this.#collabUpstream(accountId, (a): Promise<CollabValue> => {
         switch (req.op) {
@@ -251,8 +256,8 @@ export class MailboxOperations {
    * event-write queue.
    */
   async #sharedOrQueued<T extends { deduplicated: boolean }>(
-    op: "create_event" | "update_event",
-    input: CreateEventInputT | UpdateEventInputT,
+    op: "create_event" | "update_event" | "respond_to_event",
+    input: CreateEventInputT | UpdateEventInputT | RespondToEventInputT,
     task: () => Promise<T>,
   ): Promise<T> {
     const fingerprint = await eventWriteFingerprint(op, input);
@@ -317,6 +322,43 @@ export class MailboxOperations {
   }
 
   /**
+   * An answer to an invitation: the event is read first. Only someone else's meeting that lists
+   * the mailbox can be answered (`invalid_input` otherwise, nothing written). An answer that the
+   * stored one already equals writes and sends nothing. One that notifies the organizer is a send
+   * like a notifying update: allow-listed organizer, one send counted, deduplicated (an identical
+   * answer within the window answers from the first, also when the stored answer equals it by
+   * now). One that does not (the event ended) is written without scheduling messages.
+   */
+  async #respondToEvent(accountId: string, input: RespondToEventInputT): Promise<RespondToEventResultT> {
+    const audience = (await this.#collabUpstream(accountId, (a) => a.eventAudiences([input.event_id]))).get(input.event_id);
+    if (audience === undefined) throw new MailError("not_found");
+    if (audience.organizedByMailbox || audience.self === null) throw new MailError("invalid_input");
+    const answered = (organizer_notified: boolean, deduplicated: boolean): RespondToEventResultT => ({
+      event_id: input.event_id,
+      response: input.response,
+      organizer_notified,
+      deduplicated,
+    });
+    const unchanged = audience.self.status === input.response;
+    const notice = respondNotice(audience, clock.now());
+    if (!notice.notify) {
+      if (!unchanged) await this.#collabUpstream(accountId, (a) => a.respondToEvent(input, false, audience));
+      return answered(false, false);
+    }
+    this.#requireAllowed(notice.addresses);
+    return this.#exactlyOnce<RespondToEventResultT>(await eventWriteFingerprint("respond_to_event", input), sendsFor(notice), {
+      unchanged: () => (unchanged ? answered(false, false) : undefined),
+      send: async () => {
+        await this.#collabUpstream(accountId, (a) => a.respondToEvent(input, true, audience));
+        return answered(true, false);
+      },
+      record: (r) => ({ message_id: r.event_id, recipients: 1 }),
+      again: (r) => ({ ...r, deduplicated: true }),
+      recorded: (sent) => ({ ...answered(true, true), event_id: sent.message_id }),
+    });
+  }
+
+  /**
    * The events are read first. Every event that notifies costs one send (one per started ten
    * addresses), reserved all at once before anything is deleted: when fewer are left, nothing is
    * deleted. Those events go in one `/set` with `sendSchedulingMessages: true`, the others in a
@@ -376,12 +418,15 @@ export class MailboxOperations {
   /**
    * Runs `send` at most once per fingerprint within the dedupe window, counted against the daily
    * send limit as `sends` sends. An identical call in flight awaits it (`again`); one already confirmed answers
-   * from its row (`recorded`); one whose outcome is unknown is `send_unconfirmed`.
+   * from its row (`recorded`); one whose outcome is unknown is `send_unconfirmed`. Otherwise, when
+   * `unchanged` gives a result (the write would change nothing), that is the answer: nothing is
+   * reserved or sent.
    */
   async #exactlyOnce<T>(
     fingerprint: string,
     sends: number,
     o: {
+      unchanged?: () => T | undefined;
       send: () => Promise<T>;
       record: (result: T) => RecordedSend;
       again: (result: T) => T;
@@ -397,6 +442,8 @@ export class MailboxOperations {
     if (recent?.state === "sent") return o.recorded(recent.sent);
     // Unconfirmed, or pending with no twin in this instance (the object restarted mid-send).
     if (recent) throw new MailError("send_unconfirmed");
+    const skipped = o.unchanged?.();
+    if (skipped !== undefined) return skipped;
     const day = reserveSend(this.#sql, fingerprint, now, sends);
     if (day === null) throw new MailError("send_limit_reached");
 

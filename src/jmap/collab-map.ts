@@ -12,6 +12,7 @@ import {
   type CreateEventInputT,
   type EventAudience,
   type EventRecurrenceT,
+  type RespondToEventInputT,
   type StoredParticipant,
   type UpdateEventInputT,
   type UpdateContactInputT,
@@ -803,12 +804,15 @@ const addressOf = (uri: string | null | undefined): string => (uri == null ? "" 
  * Whom the server would notify about `e`: every participant with a calendar address, and the
  * organizer, except the mailbox itself (`owner`); and when the event ends. A floating or all-day
  * event's end is read with a day to spare, so it is never taken for past too early. The mailbox
- * organizes the event when the organizer is its own address or there is none.
+ * organizes the event when the organizer is its own address or there is none. `self` is the
+ * first participant entry with the mailbox's address (any case, with or without `mailto:`).
  */
 export function toEventAudience(e: CalendarEventObject, owner: string): EventAudience {
   const own = owner.toLowerCase();
   const organizer = addressOf(e.organizerCalendarAddress);
-  const people = values(e.participants).map((p) => ({ p, email: addressOf(p.calendarAddress) }));
+  const entries = Object.entries(e.participants ?? {});
+  const people = entries.map(([key, p]) => ({ key, p, email: addressOf(p.calendarAddress) }));
+  const mine = people.find((x) => x.email === own);
   const addresses = [...people.map((x) => x.email), organizer].filter((a) => a !== "" && a !== own);
   const end = e.utcEnd == null ? Number.NaN : Date.parse(e.utcEnd);
   const floating = e.timeZone == null || e.showWithoutTime === true;
@@ -822,7 +826,20 @@ export function toEventAudience(e: CalendarEventObject, owner: string): EventAud
     end: Number.isNaN(end) ? null : end + (floating ? DAY_MS : 0),
     recurring: isRecurring(e),
     organizedByMailbox: organizer === "" || organizer === own,
+    organizer: organizer === "" ? null : organizer,
+    self: mine === undefined ? null : { key: mine.key, status: mine.p.participationStatus ?? null },
     timeZone: floating ? null : (e.timeZone ?? null),
     participants: [...participants.values()],
   };
+}
+
+/** A key as one segment of a JSON Pointer (RFC 6901): `~` is `~0`, `/` is `~1`. */
+const pointerSegment = (key: string): string => key.replace(/~/g, "~0").replace(/\//g, "~1");
+
+/**
+ * The PatchObject of an answer: one path, the `participationStatus` of the participant `key` (the
+ * mailbox's own). No other property of the event is in it, so no other one can change.
+ */
+export function responsePatch(key: string, response: RespondToEventInputT["response"]): Record<string, string> {
+  return { [`participants/${pointerSegment(key)}/participationStatus`]: response };
 }

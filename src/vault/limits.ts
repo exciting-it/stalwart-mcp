@@ -4,9 +4,9 @@
  * synchronous SQL, so a check and its increment can never interleave with another call.
  *
  * Event writes that make the mail server notify people (invitations, updates, cancellations)
- * count as sends: the same counter, and for a notifying create or update the same `recent_sends`
- * rows. Such a row's `message_id` holds the event id (`<event id>/<calendar id>` for a create) and
- * `recipients` the number of attendees notified.
+ * count as sends: the same counter, and for a notifying create, update or answer the same
+ * `recent_sends` rows. Such a row's `message_id` holds the event id (`<event id>/<calendar id>`
+ * for a create) and `recipients` the number of people notified.
  *
  * `recent_sends` holds only a SHA-256 of the message, the time, the state of the send and, once
  * it is confirmed, the message id and the recipient count: no address, subject or body is
@@ -189,7 +189,7 @@ function canonical(value: unknown): unknown {
  * It starts with the operation's name, so it never equals the fingerprint of a mail.
  */
 export async function eventWriteFingerprint(
-  op: "create_event" | "update_event",
+  op: "create_event" | "update_event" | "respond_to_event",
   input: { participants?: { email: string; name?: string }[] } & Record<string, unknown>,
 ): Promise<string> {
   const participants = input.participants

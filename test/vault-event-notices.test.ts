@@ -11,7 +11,7 @@ import { clock } from "../src/clock";
 import type { CreateEventInputT, EventAudience } from "../src/collab";
 import type { Env } from "../src/env";
 import { STALWART } from "../src/stalwart/endpoints";
-import { createNotice, deleteNotice, updateNotice } from "../src/vault/event-notices";
+import { createNotice, deleteNotice, respondNotice, updateNotice } from "../src/vault/event-notices";
 import { eventWriteFingerprint, sendFingerprint, takeSend } from "../src/vault/limits";
 import { type MailboxVault, vaultFor, WITH_ACCESS_TOKEN } from "../src/vault/mailbox-vault";
 import { MailboxOperations } from "../src/vault/operations";
@@ -459,6 +459,8 @@ describe("the notice decision", () => {
     end: T0 + DAY,
     recurring: false,
     organizedByMailbox: true,
+    organizer: null,
+    self: null,
     timeZone: "Etc/UTC",
     participants: [{ email: OK, name: null, status: "needs-action" }],
     ...a,
@@ -825,5 +827,272 @@ describe("a delete that fails half-way", () => {
     expect(fake.schedulingMessages(A)).toEqual([{ kind: "CANCEL", eventId: meeting, attendees: [OK] }]);
     expect(await sendsCounted(stub)).toBe(1);
     expect(fake.eventsOf(A).map((e) => e.id)).toEqual([alone]);
+  });
+});
+
+// ---- respond_to_event: answering an invitation ----
+
+const B = "b@test.example";
+
+/**
+ * An invitation organized by `OK` (allow-listed) that lists the mailbox as participant `me`
+ * (upper-case, with `MAILTO:`) and a stranger; the mailbox has not answered yet.
+ */
+const invitation = (extra: Record<string, unknown> = {}, status = "needs-action") =>
+  fake.addEvent(A, {
+    title: "Invitation",
+    start: "2027-03-01T09:00:00",
+    duration: "PT1H",
+    organizerCalendarAddress: `mailto:${OK}`,
+    participants: {
+      org: { calendarAddress: `mailto:${OK}`, roles: { owner: true }, participationStatus: "accepted" },
+      me: { calendarAddress: `MAILTO:${A.toUpperCase()}`, roles: { required: true }, participationStatus: status, expectReply: true },
+      s: { calendarAddress: `mailto:${STRANGER}`, roles: { required: true } },
+    },
+    ...extra,
+  }).id;
+
+type StoredParticipants = Record<string, Record<string, unknown>>;
+const storedEvent = (id: string) => fake.eventsOf(A).find((e) => e.id === id)!;
+const ownStatus = (id: string) => (storedEvent(id).participants as StoredParticipants).me!.participationStatus;
+
+describe("answering an invitation (respond_to_event)", () => {
+  it("accept, decline and tentative: one path patched, one REPLY to the organizer and one send each", async () => {
+    const { stub, accountId, box } = await signIn(A);
+    const id = invitation();
+    const before = storedEvent(id);
+    let sends = 0;
+    for (const response of ["accepted", "declined", "tentative"] as const) {
+      expect(await box.respondToEvent({ event_id: id, response })).toEqual({
+        event_id: id,
+        response,
+        organizer_notified: true,
+        deduplicated: false,
+      });
+      sends++;
+      expect(eventSets().at(-1)).toEqual({
+        accountId,
+        update: { [id]: { "participants/me/participationStatus": response } },
+        sendSchedulingMessages: true,
+      });
+      expect(ownStatus(id)).toBe(response);
+      expect(await sendsCounted(stub)).toBe(sends);
+    }
+    // Nothing else of the event changed: the other participants, the title, the time, the organizer.
+    const after = storedEvent(id);
+    const participants = after.participants as StoredParticipants;
+    // `updated` and `uid` are set by the server on every write.
+    expect({ ...after, updated: null, uid: null, participants: { ...participants, me: { ...participants.me, participationStatus: "needs-action" } } }).toEqual({
+      ...before,
+      updated: null,
+      uid: null,
+    });
+    expect(fake.schedulingMessages(A)).toEqual([
+      { kind: "REPLY", eventId: id, attendees: [OK] },
+      { kind: "REPLY", eventId: id, attendees: [OK] },
+      { kind: "REPLY", eventId: id, attendees: [OK] },
+    ]);
+    // It is read first, in the same queue as the other event writes.
+    expect(eventMethods()).toEqual(Array.from({ length: 3 }, () => ["CalendarEvent/get", "CalendarEvent/set"]).flat());
+  });
+
+  it("the same answer twice within the window: one write, one REPLY, one send; the second is deduplicated", async () => {
+    const { stub, box } = await signIn(A);
+    const id = invitation();
+    const r1 = await box.respondToEvent({ event_id: id, response: "accepted" });
+    const r2 = await box.respondToEvent({ event_id: id, response: "accepted" });
+    expect(r1).toEqual({ event_id: id, response: "accepted", organizer_notified: true, deduplicated: false });
+    expect(r2).toEqual({ ...r1, deduplicated: true });
+    expect(eventSets()).toHaveLength(1);
+    expect(fake.schedulingMessages(A)).toHaveLength(1);
+    expect(await sendsCounted(stub)).toBe(1);
+    // After the window, the stored answer already equals it: nothing is written or sent.
+    now += (MAIL_LIMITS.sendDedupeSeconds + 1) * SECOND;
+    expect(await box.respondToEvent({ event_id: id, response: "accepted" })).toEqual({ ...r1, organizer_notified: false });
+    expect(eventSets()).toHaveLength(1);
+    expect(await sendsCounted(stub)).toBe(1);
+  });
+
+  it("two identical answers at the same time are one write and one send", async () => {
+    const { stub, box } = await signIn(A);
+    const id = invitation();
+    slowUpstream();
+    const [r1, r2] = await Promise.all([
+      box.respondToEvent({ event_id: id, response: "declined" }),
+      box.respondToEvent({ event_id: id, response: "declined" }),
+    ]);
+    expect([r1.deduplicated, r2.deduplicated].sort()).toEqual([false, true]);
+    expect(eventSets()).toHaveLength(1);
+    expect(fake.schedulingMessages(A)).toEqual([{ kind: "REPLY", eventId: id, attendees: [OK] }]);
+    expect(await sendsCounted(stub)).toBe(1);
+  });
+
+  it("the stored answer already equals it: no /set, no send, organizer_notified false", async () => {
+    const { stub, box } = await signIn(A);
+    const id = invitation({}, "tentative");
+    expect(await box.respondToEvent({ event_id: id, response: "tentative" })).toEqual({
+      event_id: id,
+      response: "tentative",
+      organizer_notified: false,
+      deduplicated: false,
+    });
+    expect(eventSets()).toEqual([]);
+    expect(fake.schedulingMessages(A)).toEqual([]);
+    expect(await sendsCounted(stub)).toBe(0);
+  });
+
+  it("refuses an event the mailbox organizes, one that does not list it, an unknown id and another mailbox's event", async () => {
+    const { stub, box } = await signIn(A);
+    fake.addMailbox(B);
+    const mine = invited();
+    const noOrganizer = fake.addEvent(A, { title: "No organizer", start: "2027-03-01T09:00:00", participants: { me: { calendarAddress: `mailto:${A}` } } }).id;
+    const notListed = invitation({ participants: { org: { calendarAddress: `mailto:${OK}`, roles: { owner: true } } } });
+    // Listed by `email` only: the server schedules by `calendarAddress`, so this is not the mailbox.
+    const emailOnly = invitation({ participants: { org: { calendarAddress: `mailto:${OK}` }, me: { email: A } } });
+    for (const event_id of [mine, noOrganizer, notListed, emailOnly]) {
+      await expectCode(box.respondToEvent({ event_id, response: "accepted" }), "invalid_input");
+    }
+    const theirs = fake.addEvent(B, {
+      title: "B's invitation",
+      start: "2027-03-01T09:00:00",
+      organizerCalendarAddress: `mailto:${OK}`,
+      participants: { org: { calendarAddress: `mailto:${OK}` }, me: { calendarAddress: `mailto:${A}` }, b: { calendarAddress: `mailto:${B}` } },
+    }).id;
+    const bBefore = fake.eventsOf(B);
+    await expectCode(box.respondToEvent({ event_id: "ev99999", response: "accepted" }), "not_found");
+    await expectCode(box.respondToEvent({ event_id: theirs, response: "accepted" }), "not_found");
+    expect(eventSets()).toEqual([]);
+    expect(fake.eventsOf(B)).toEqual(bBefore);
+    expect(fake.schedulingMessages(A)).toEqual([]);
+    expect(fake.schedulingMessages(B)).toEqual([]);
+    expect(await sendsCounted(stub)).toBe(0);
+  });
+
+  it("staging: an organizer not on the allow-list is refused before anything is written; production allows it", async () => {
+    const { stub, accountId, box } = await signIn(A);
+    const id = theirMeeting();
+    await expectCode(box.respondToEvent({ event_id: id, response: "declined" }), "recipient_not_allowed");
+    expect(eventSets()).toEqual([]);
+    expect(await sendsCounted(stub)).toBe(0);
+    expect(
+      await opsWith(stub, { ENVIRONMENT: "production" }, (ops) =>
+        ops.collab({ accountId, email: A }, { op: "respond_to_event", input: { event_id: id, response: "declined" } }),
+      ),
+    ).toEqual({ ok: true, value: { event_id: id, response: "declined", organizer_notified: true, deduplicated: false } });
+    expect(fake.schedulingMessages(A)).toEqual([{ kind: "REPLY", eventId: id, attendees: [BOSS] }]);
+    expect(await sendsCounted(stub)).toBe(1);
+  });
+
+  it("no sends left: refused before anything is written", async () => {
+    const { stub, box } = await signIn(A);
+    const id = invitation();
+    await countSends(stub, MAIL_LIMITS.sendsPerDay);
+    await expectCode(box.respondToEvent({ event_id: id, response: "accepted" }), "send_limit_reached");
+    expect(eventSets()).toEqual([]);
+    expect(ownStatus(id)).toBe("needs-action");
+    expect(await sendsCounted(stub)).toBe(MAIL_LIMITS.sendsPerDay);
+  });
+
+  it("an ended event is written without scheduling messages and costs nothing; a series never counts as ended", async () => {
+    const { stub, box } = await signIn(A);
+    const old = invitation({ start: "2026-12-01T09:00:00" });
+    // Staging with an organizer outside the allow-list: nobody is notified, so it is not refused.
+    const oldTheirs = fake.addEvent(A, {
+      title: "Old",
+      start: "2026-12-01T09:00:00",
+      organizerCalendarAddress: `mailto:${BOSS}`,
+      participants: { b: { calendarAddress: `mailto:${BOSS}` }, me: { calendarAddress: `mailto:${A}` } },
+    }).id;
+    for (const id of [old, oldTheirs]) {
+      expect(await box.respondToEvent({ event_id: id, response: "declined" })).toEqual({
+        event_id: id,
+        response: "declined",
+        organizer_notified: false,
+        deduplicated: false,
+      });
+    }
+    expect(eventSets().map((s) => s.sendSchedulingMessages)).toEqual([false, false]);
+    expect(fake.schedulingMessages(A)).toEqual([]);
+    expect(await sendsCounted(stub)).toBe(0);
+    const series = invitation({ start: "2026-12-01T09:00:00", recurrenceRule: { "@type": "RecurrenceRule", frequency: "weekly" } });
+    expect(await box.respondToEvent({ event_id: series, response: "accepted" })).toMatchObject({ organizer_notified: true });
+    expect(eventSets().at(-1)!.sendSchedulingMessages).toBe(true);
+    expect(await sendsCounted(stub)).toBe(1);
+  });
+
+  it("an unknown outcome is send_unconfirmed, stays counted and blocks the identical answer for the window", async () => {
+    const { stub, box } = await signIn(A);
+    const id = invitation();
+    fake.failNextEventWrite("accepted-then-invalid-json");
+    await expectCode(box.respondToEvent({ event_id: id, response: "accepted" }), "send_unconfirmed");
+    await expectCode(box.respondToEvent({ event_id: id, response: "accepted" }), "send_unconfirmed");
+    expect(eventSets()).toHaveLength(1);
+    expect(await sendsCounted(stub)).toBe(1);
+    expect(await recentSends(stub)).toEqual([expect.objectContaining({ state: "unconfirmed" })]);
+  });
+
+  it("an occurrence id answers that occurrence only", async () => {
+    const { stub, box } = await signIn(A);
+    const series = invitation({ recurrenceRule: { "@type": "RecurrenceRule", frequency: "daily", count: 3 } });
+    const second = `${series}-20270302T090000`;
+    expect(await box.respondToEvent({ event_id: second, response: "declined" })).toEqual({
+      event_id: second,
+      response: "declined",
+      organizer_notified: true,
+      deduplicated: false,
+    });
+    expect(eventSets()).toEqual([
+      expect.objectContaining({ update: { [second]: { "participants/me/participationStatus": "declined" } }, sendSchedulingMessages: true }),
+    ]);
+    const mine = async (event_id: string) =>
+      (await box.readEvent({ event_id })).event.participants.find((p) => p.email?.toLowerCase() === A)!.status;
+    expect(await mine(second)).toBe("declined");
+    expect(await mine(`${series}-20270301T090000`)).toBe("needs-action");
+    expect(await mine(`${series}-20270303T090000`)).toBe("needs-action");
+    expect(ownStatus(series)).toBe("needs-action");
+    expect(fake.schedulingMessages(A)).toEqual([{ kind: "REPLY", eventId: second, attendees: [OK] }]);
+    expect(await sendsCounted(stub)).toBe(1);
+  });
+
+  it("waits for the event write before it: an answer and an update never interleave", async () => {
+    const { box } = await signIn(A);
+    const id = invitation();
+    slowUpstream();
+    await Promise.all([box.updateEvent({ event_id: id, title: "My copy" }), box.respondToEvent({ event_id: id, response: "accepted" })]);
+    expect(eventMethods()).toEqual(["CalendarEvent/get", "CalendarEvent/set", "CalendarEvent/get", "CalendarEvent/set"]);
+    expect(storedEvent(id)).toMatchObject({ title: "My copy" });
+    expect(ownStatus(id)).toBe("accepted");
+  });
+});
+
+describe("the notice of an answer", () => {
+  const audience = (a: Partial<EventAudience> = {}): EventAudience => ({
+    attendees: [OK],
+    end: T0 + DAY,
+    recurring: false,
+    organizedByMailbox: false,
+    organizer: OK,
+    self: { key: "me", status: "needs-action" },
+    timeZone: "Etc/UTC",
+    participants: [],
+    ...a,
+  });
+
+  it("notifies the organizer only, unless the event ended; a series never ends; an unknown end notifies", () => {
+    expect(respondNotice(audience({ attendees: [OK, STRANGER] }), T0)).toEqual({ addresses: [OK], notify: true });
+    expect(respondNotice(audience({ end: T0 - 1 }), T0)).toEqual({ addresses: [OK], notify: false });
+    expect(respondNotice(audience({ end: T0 - 1, recurring: true }), T0).notify).toBe(true);
+    expect(respondNotice(audience({ end: null }), T0).notify).toBe(true);
+    expect(respondNotice(audience({ organizedByMailbox: true, organizer: A }), T0)).toEqual({ addresses: [], notify: false });
+    expect(respondNotice(audience({ organizedByMailbox: true, organizer: null }), T0)).toEqual({ addresses: [], notify: false });
+  });
+
+  it("the fingerprint of an answer is its own: never an update's with the same fields", async () => {
+    const input = { event_id: "ev1", response: "accepted" };
+    const fp = await eventWriteFingerprint("respond_to_event", input);
+    expect(await eventWriteFingerprint("respond_to_event", { response: "accepted", event_id: "ev1" })).toBe(fp);
+    expect(await eventWriteFingerprint("update_event", input)).not.toBe(fp);
+    expect(await eventWriteFingerprint("respond_to_event", { ...input, response: "declined" })).not.toBe(fp);
+    expect(await eventWriteFingerprint("respond_to_event", { ...input, event_id: "ev2" })).not.toBe(fp);
   });
 });

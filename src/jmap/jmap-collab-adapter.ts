@@ -31,6 +31,7 @@ import {
   type EventSummary,
   type ReadContactInputT,
   type ReadEventInputT,
+  type RespondToEventInputT,
   type SearchContactsInputT,
   type SearchEventsInputT,
   type UpdateContactInputT,
@@ -60,6 +61,7 @@ import {
   namesOwner,
   newCalendarEvent,
   newContactCard,
+  responsePatch,
   ruleSeriesIdOf,
   toCalendarInfo,
   toContactDetail,
@@ -379,6 +381,29 @@ export class JmapCollabAdapter implements CollabUpstream {
     const responses = await this.#call(
       "calendars",
       [["CalendarEvent/set", { update: { [input.event_id]: eventPatch(input, owner, current) }, sendSchedulingMessages: notify }, "s"]],
+      { write: true, notify },
+    );
+    requireUpdated(this.#writeResult(responses, "s", "CalendarEvent/set", { idsFromInput: true, notify }), input.event_id, notify);
+    return { event_id: input.event_id };
+  }
+
+  /**
+   * One `/set` update of a single path: the `participationStatus` of the mailbox's own participant
+   * as `current` (the vault's read of the event) names it. With `notify`, the server sends the
+   * organizer the answer (an iTIP REPLY).
+   */
+  async respondToEvent(input: RespondToEventInputT, notify: boolean, current: EventAudience): Promise<{ event_id: string }> {
+    this.#require("calendars");
+    if (current.self === null) throw new MailError("invalid_input");
+    const responses = await this.#call(
+      "calendars",
+      [
+        [
+          "CalendarEvent/set",
+          { update: { [input.event_id]: responsePatch(current.self.key, input.response) }, sendSchedulingMessages: notify },
+          "s",
+        ],
+      ],
       { write: true, notify },
     );
     requireUpdated(this.#writeResult(responses, "s", "CalendarEvent/set", { idsFromInput: true, notify }), input.event_id, notify);

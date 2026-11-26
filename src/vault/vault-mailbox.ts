@@ -14,6 +14,7 @@ import type {
   Mailbox,
   ReadContactInputT,
   ReadEventInputT,
+  RespondToEventInputT,
   SearchContactsInputT,
   SearchEventsInputT,
   UpdateContactInputT,
@@ -122,6 +123,10 @@ export class VaultMailbox implements Mailbox {
 
   deleteEvent(input: DeleteEventInputT) {
     return this.#collab<ReturnType<CollabAdapter["deleteEvent"]>>({ op: "delete_event", input });
+  }
+
+  respondToEvent(input: RespondToEventInputT) {
+    return this.#collab<ReturnType<CollabAdapter["respondToEvent"]>>({ op: "respond_to_event", input });
   }
 
   /** One thin call of the vault's `collab`; `T` is the promise of the operation's result. */

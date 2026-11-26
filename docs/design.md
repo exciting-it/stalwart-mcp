@@ -18,16 +18,18 @@ Goals
   messages between folders or to the trash, and mark them read, unread or flagged.
 - One mailbox user can never reach another mailbox.
 - Limits, an audit trail and a block list that the AI tool cannot bypass.
-- Optionally, the mailbox's contacts and calendar: read, create, change, delete, and events with
-  participants, whom the mail server then invites by email (see below).
+- Optionally, the mailbox's contacts and calendar: read, create, change, delete, events with
+  participants, whom the mail server then invites by email, and answers to invitations, which
+  the mail server sends to the organizer (see below).
 
 Not in scope
 
 - Removing mail for good; keywords other than read and flagged; folder management; Sieve filters
   and forwards.
 - Attachment contents (names and sizes only). Sending attachments.
-- Answering invitations, free/busy lookups. Shared mailboxes, address books and calendars (only
-  the user's own account is served). A trash for contacts and events (deleting them is permanent).
+- Free/busy lookups; a comment with the answer to an invitation. Shared mailboxes, address books
+  and calendars (only the user's own account is served). A trash for contacts and events
+  (deleting them is permanent).
 - Sending from an alias. Managing accounts, aliases or domains.
 
 A failure even if it works
@@ -164,8 +166,8 @@ cannot be relied on to supply one. The vault therefore derives the key itself, a
 recipients, subject, body and reply target. An identical send within 10 minutes is not sent
 again; the first result is returned. If the outcome of a send is unknown (a timeout or a 5xx
 after the request left), it is counted and an identical send is refused for the same window.
-Event writes that make the mail server send invitations or updates use the same rows (see
-below).
+Event writes that make the mail server send invitations, updates or answers use the same rows
+(see below).
 
 ## Contacts and calendars
 
@@ -185,17 +187,18 @@ like mail: reading, creating, changing and deleting.
 | `delete_contact` | contacts | Removes up to 50 contacts for good |
 | `create_event` | calendars | A new event, timed or all-day, with optional participants and recurrence |
 | `update_event` | calendars | Replaces the given fields of an event or of one occurrence; a `series_id` changes the whole series |
+| `respond_to_event` | calendars | Answers an invitation (accepted, declined, tentative) to a meeting someone else organized; the mail server tells the organizer |
 | `delete_event` | calendars | Removes up to 50 events or occurrences for good; a `series_id` removes the whole series |
 
-- **What is sent.** The contract (`src/collab.ts`) has eleven operations. The adapter
+- **What is sent.** The contract (`src/collab.ts`) has twelve operations. The adapter
   (`src/jmap/jmap-collab-adapter.ts`) sends `/get` and `/query`, and `/set` of `ContactCard` and
   `CalendarEvent` only: never `/copy`, `/parse`, or a `/set` of an address book or calendar. The
   tests check this over every request of the adapter tests, and that the read operations send
   no `/set` at all. The read tools are `kind: "read"` (`readOnlyHint`); `create_contact`,
   `update_contact` and `delete_contact` are `create`, `update` and `destroy` (`destructiveHint`).
-  `create_event` and `update_event` are `notify` and `delete_event` is `destroy_notify`: both
-  carry `openWorldHint`, because they can make the mail server send mail to third parties, and
-  `delete_event` carries `destructiveHint`.
+  `create_event`, `update_event` and `respond_to_event` are `notify` and `delete_event` is
+  `destroy_notify`: both carry `openWorldHint`, because they can make the mail server send mail
+  to third parties, and `delete_event` carries `destructiveHint`.
 - **Deleting is permanent.** JMAP has no trash for contacts and events; the delete tools use
   `/set destroy`. Guardrails: at most 50 ids per call, the destructive hint, and the plain
   statement in the tool description, the MCP instructions and the approval page. There is no
@@ -208,7 +211,8 @@ like mail: reading, creating, changing and deleting.
   answer that names the id in neither map is `not_found` (update) or lists it as not deleted
   (delete), and one that cannot be parsed is `upstream_rejected`. For a notifying update or
   delete these cases mean "we do not know whether the server sent mail": `send_unconfirmed`,
-  the sends stay counted, and an update keeps its dedupe row (blocking the identical request).
+  the sends stay counted, and an update or answer keeps its dedupe row (blocking the identical
+  request).
 - **Same rules as mail.** The tools go through `defineTool` and the vault. The account comes from
   the grant, no tool has an account parameter, ids are only used inside the grant's account, and
   a foreign id answers "not found". An `address_book_id` or `calendar_id` that is not the
@@ -227,7 +231,8 @@ like mail: reading, creating, changing and deleting.
   area was switched off has a token without the scope and has to connect again. The approval page
   names the areas in one line each, in the words of the mail server's own consent page, and the server's MCP instructions get
   sentences about them: third-party text, permanent deletion, and that an event write with
-  participants makes the mail server send them mail, so the AI tool asks first.
+  participants, or an answer to an invitation, makes the mail server send mail, so the AI tool
+  asks first.
 - **What the scope reaches.** As with mail, the scope is Stalwart's: a vault token with the
   contacts or calendars scope also works on CardDAV and CalDAV for that account. Only the
   connector's own code limits what is done with it.
@@ -269,22 +274,22 @@ like mail: reading, creating, changing and deleting.
   started ten addresses it involves (one send covers at most `eventParticipantsMax` people, like
   one message; more is possible for an existing event created elsewhere), refused with
   `send_limit_reached` before anything is written when fewer are left (a deletion of several
-  notifying events reserves the sum at once, or deletes nothing), and a notifying create or
-  update is deduplicated over a hash of the operation and its validated input with the same
+  notifying events reserves the sum at once, or deletes nothing), and a notifying create,
+  update or answer is deduplicated over a hash of the operation and its validated input with the same
   `recent_sends` rows and in-flight table as `send_mail`. A deletion sends the notifying ids and
   the others in two requests, and gives back the sends of events that were definitely not
   deleted; when the second request fails after the first went through, the result still
   reports the first (its cancellations) and names the second's ids in `not_deleted`.
   Non-notifying writes cost nothing beyond the call. The tools and the audit rows report how
-  many attendees were notified, never an address. A deduplicated create or update answers with
-  the first call's result and `deduplicated: true`; its audit row counts 0, because that call
-  notified nobody.
+  many attendees were notified, never an address. A deduplicated create, update or answer
+  answers with the first call's result and `deduplicated: true`; its audit row counts 0,
+  because that call notified nobody.
 - **One event write at a time.** An update reads the event, decides and then writes; another
   write in between could change who would be notified (a write decided as "notifies only
-  allow-listed people" would then notify someone else). So `create_event`, `update_event` and
-  `delete_event` of one vault run one after the other (a promise queue in `MailboxOperations`,
-  released on every exit). A notifying create or update identical to one already on its way
-  upstream still shares that one's result instead of queueing.
+  allow-listed people" would then notify someone else). So `create_event`, `update_event`,
+  `respond_to_event` and `delete_event` of one vault run one after the other (a promise queue in
+  `MailboxOperations`, released on every exit). A notifying create, update or answer identical
+  to one already on its way upstream still shares that one's result instead of queueing.
 - **The organizer rule.** The mailbox organizes an event when its `organizerCalendarAddress` is
   the mailbox's own address (case-insensitive, without `mailto:`) or the event names no
   organizer. Only then can a write notify. For a meeting someone else organized, an update with
@@ -292,7 +297,35 @@ like mail: reading, creating, changing and deleting.
   otherwise make the mailbox the organizer of a foreign meeting); every other update and every
   deletion is written with `sendSchedulingMessages: false`, costs no send and reports
   `invitations: 0` / `cancellations: 0`: it only changes the mailbox's own copy, and the
-  organizer is not informed. The tool descriptions say so.
+  organizer is not informed. The tool descriptions say so, and `update_event` points to
+  `respond_to_event` for answering.
+- **Answering an invitation** (`respond_to_event`). In JMAP an attendee answers by changing the
+  `participationStatus` of its own participant with `CalendarEvent/set`; with
+  `sendSchedulingMessages: true` the server then sends the organizer an iTIP `REPLY` by email
+  from the mailbox (Stalwart's `calendar_event/set.rs` and `scheduling/event_update.rs`). That
+  mail goes to a third party, so an answer is a send like the other notifying event writes. The
+  input is the event id and one of `accepted`, `declined`, `tentative`: no comment and no
+  address, so the participant answered for is always the mailbox's own. The vault reads the
+  event first (the same `eventAudiences` read): an unknown id is `not_found`; an event the
+  mailbox organizes (or one without organizer), or one whose participants do not include the
+  mailbox's address (by `calendarAddress`, any case, with or without `mailto:`), is
+  `invalid_input`, and nothing is written. The write is a PatchObject of exactly one path,
+  `participants/<key>/participationStatus`, where `<key>` is the first participant entry with
+  the mailbox's address (escaped as a JSON Pointer segment): no other property can change
+  through it. When the stored answer already equals the new one, nothing is written, sent or
+  counted (`organizer_notified: false`). Otherwise the notice rule decides
+  (`respondNotice`): the organizer is notified unless the event ended in the past (a series
+  never counts as ended; when unsure, it notifies). A notifying answer follows the send path:
+  the organizer must be allow-listed outside production, one send is reserved, it is
+  deduplicated over the operation and its validated input (an identical answer within the
+  window answers from the first with `deduplicated: true`, also when the stored answer equals it
+  by then), and an unknown outcome is `send_unconfirmed`, stays counted and blocks the identical
+  answer for the window. A non-notifying answer is written with
+  `sendSchedulingMessages: false` and costs nothing. The audit row counts 1 recipient when this
+  call made the server notify the organizer, else 0, never the address. Because the dedupe key is
+  the input, answering `accepted`, then `declined`, then `accepted` again within 10 minutes
+  answers the third call from the first (`deduplicated: true`) and leaves `declined` stored, as
+  for an identical `update_event`.
 - **Replacing participants** (`update_event` with `participants`) keeps what kept attendees
   answered: an address already on the event keeps its stored `participationStatus`, and its
   `name` when the input gives none; only new addresses start as `needs-action` with
@@ -315,7 +348,9 @@ like mail: reading, creating, changing and deleting.
   `replyTo` as inert, and records the iTIP messages it "sends" only for
   `sendSchedulingMessages: true`, attendees, no draft and an end not in the past; for an event
   organized by someone else that lists the mailbox, it records a `REPLY` to the organizer
-  instead.
+  instead, for an update only when it changed the mailbox's own `participationStatus` (and for a
+  removal of the copy). Its `CalendarEvent/set` takes patch paths inside a property (RFC 8620
+  PatchObject), also in an occurrence's override; `ContactCard/set` still refuses them.
 - **What is assumed, not known.** The tests run against a stand-in written from the same
   reading of the JMAP Contacts (RFC 9610) and the JMAP Calendars draft as the code, so they
   cannot show that Stalwart agrees. The unknowns are listed as live checks in the README: the
@@ -324,7 +359,9 @@ like mail: reading, creating, changing and deleting.
   the string filters of `ContactCard/query` match, the two scope names, that a session omits the
   capability of an area whose scope the token lacks, and for writing: that invitations, updates
   and cancellations really go out (and not for past events), the property names, recurrence
-  expansion, deleting an occurrence, and what the server does when it cannot send.
+  expansion, deleting an occurrence, and what the server does when it cannot send; for answers:
+  that a patch path into a participant is accepted and that the organizer really receives the
+  `REPLY` with the right status, for an event and for one occurrence.
 
 ## Mail content is untrusted input
 

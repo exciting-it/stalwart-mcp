@@ -457,6 +457,22 @@ export function createFakeMailStore() {
         const involved = new Set([...before, ...event.participants.map((p) => p.email ?? "")].filter((a) => a !== ""));
         return { event_id: input.event_id, invitations: involved.size, deduplicated: false };
       },
+      // The mailbox's own participant is the one with its address; the organizer is the participant
+      // with the role "owner". Not ended, not deduplicated: the vault decides that.
+      async respondToEvent(input) {
+        record("respondToEvent");
+        const event = account.events.find((e) => e.id === input.event_id);
+        if (event === undefined) throw new MailError("not_found");
+        const own = account.email.toLowerCase();
+        const self = event.participants.find((p) => p.email?.toLowerCase() === own);
+        const organizer = event.participants.find((p) => p.role === "owner");
+        if (self === undefined || organizer === undefined || organizer.email?.toLowerCase() === own) {
+          throw new MailError("invalid_input");
+        }
+        const changed = self.status !== input.response;
+        self.status = input.response;
+        return { event_id: input.event_id, response: input.response, organizer_notified: changed, deduplicated: false };
+      },
       async deleteEvent(input) {
         record("deleteEvent");
         const ids = [...new Set(input.event_ids)];
@@ -483,6 +499,33 @@ export function createFakeMailStore() {
       return ids("B");
     },
     mailboxFor,
+    /**
+     * Adds an invitation to `key`'s calendar: organized by `organizer`, listing the mailbox as not
+     * yet answered. Returns its id.
+     */
+    addInvitation(key: AccountKey, organizer = "ok@test.example"): string {
+      const a = accounts[key];
+      counter += 1;
+      const id = `${a.accountId}-event-x${counter}`;
+      a.events.push({
+        ...a.events[0]!,
+        id,
+        title: `Invitation to ${key}`,
+        start: "2026-12-10T09:00:00Z",
+        end: "2026-12-10T10:00:00Z",
+        participants: [
+          { name: null, email: organizer, role: "owner", status: "accepted" },
+          { name: null, email: a.email, role: "attendee", status: "needs-action" },
+        ],
+      });
+      return id;
+    },
+    /** The answer `key`'s mailbox gave to event `id`, as stored. */
+    ownStatus(key: AccountKey, id: string): string | null {
+      const a = accounts[key];
+      const event = a.events.find((e) => e.id === id);
+      return event?.participants.find((p) => p.email === a.email)?.status ?? null;
+    },
     /** Adds a message in its own thread to the inbox of `key`; returns its ids. */
     addMessage(key: AccountKey, m: { subject: string; body: string }): { messageId: string; threadId: string } {
       const a = accounts[key];

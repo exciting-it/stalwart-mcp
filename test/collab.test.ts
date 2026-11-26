@@ -728,7 +728,7 @@ describe("results of the write tools", () => {
   });
 });
 
-describe("the six write operations of the request that crosses the vault", () => {
+describe("the seven write operations of the request that crosses the vault", () => {
   it("accepts each with its input", () => {
     for (const request of [
       { op: "create_contact", input: { name: "Ada" } },
@@ -736,6 +736,7 @@ describe("the six write operations of the request that crosses the vault", () =>
       { op: "delete_contact", input: { contact_ids: ["ct1", "ct2"] } },
       { op: "create_event", input: { title: "x", date: "2026-11-27" } },
       { op: "update_event", input: { event_id: "ev1", title: "x" } },
+      { op: "respond_to_event", input: { event_id: "ev1", response: "tentative" } },
       { op: "delete_event", input: { event_ids: ["ev1"] } },
     ]) {
       ok(CollabRequest, request);
@@ -754,6 +755,10 @@ describe("the six write operations of the request that crosses the vault", () =>
       { op: "update_event", input: { event_id: "ev1" } },
       { op: "delete_event", input: { event_ids: ["ev1"], extra: 1 } },
       { op: "delete_event", input: { contact_ids: ["ct1"] } },
+      { op: "respond_to_event", input: { event_id: "ev1" } },
+      { op: "respond_to_event", input: { event_id: "ev1", response: "maybe" } },
+      { op: "respond_to_event", input: { event_id: "ev1", response: "accepted", comment: "x" } },
+      { op: "respond_to_event", input: { event_ids: ["ev1"], response: "accepted" } },
     ]) {
       refused(CollabRequest, bad);
     }

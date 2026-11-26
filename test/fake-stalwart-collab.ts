@@ -4,8 +4,9 @@
  * `CalendarEvent/query`, `CalendarEvent/get`, with `expandRecurrences` and `utcStart` / `utcEnd`),
  * and the table `fake-stalwart-jmap.ts` merges into its method table.
  *
- * The write side is one shared `/set` engine (`applySet`: `create`, `update` as a PatchObject of
- * top-level properties, `destroy`) with a spec per type: `ContactCard/set` and `CalendarEvent/set`.
+ * The write side is one shared `/set` engine (`applySet`: `create`, `update` as a PatchObject,
+ * `destroy`) with a spec per type: `ContactCard/set` (top-level properties only) and
+ * `CalendarEvent/set` (also patch paths such as `participants/<key>/participationStatus`).
  *
  * Events use the property names Stalwart 1.x implements: one `recurrenceRule` object, participants
  * addressed by `calendarAddress` (`mailto:` URI), `organizerCalendarAddress`. Like the server, the
@@ -13,8 +14,10 @@
  * no effect (an event with `recurrenceRules` does not recur; a participant with only `sendTo` is
  * not an attendee). With `sendSchedulingMessages: true` it records the iTIP messages the server
  * would send (`account.scheduling`). For an event organized by someone else that lists the account
- * as a participant, an update or destroy with `sendSchedulingMessages: true` sends a `REPLY` to that
- * organizer, never invitations or cancellations to the other attendees.
+ * as a participant, with `sendSchedulingMessages: true`, an update that changes the account's own
+ * `participationStatus` and a destroy send a `REPLY` to that organizer (not for a draft or an
+ * event that has ended); no other change of the account's copy sends anything, and the other
+ * attendees never get invitations or cancellations from it.
  *
  * Everything is scoped to the request's account: another account's ids are `notFound`.
  */
@@ -395,14 +398,49 @@ function eventEnd(e: FakeEvent): number {
   return last === undefined ? endUtc(e.start, zoneOf(e), e.duration) : endUtc(last.start, zoneOf(e), e.duration);
 }
 
+/** The segments of a PatchObject path (RFC 6901: `~1` is `/`, `~0` is `~`). */
+const pointerParts = (path: string): string[] => path.split("/").map((p) => p.replace(/~1/g, "/").replace(/~0/g, "~"));
+
+/**
+ * Applies one patch path to `object` in place (RFC 8620 §5.3): every part before the last must
+ * already exist as an object; `null` removes the last. False (nothing changed) when a part is missing.
+ */
+function applyPointer(object: Args, path: string, value: unknown): boolean {
+  const parts = pointerParts(path);
+  const last = parts.pop()!;
+  let target: Args = object;
+  for (const part of parts) {
+    const next = target[part];
+    if (!isObject(next)) return false;
+    target = next;
+  }
+  if (value === null) delete target[last];
+  else target[last] = structuredClone(value);
+  return true;
+}
+
+/** A PatchObject (top-level keys first, then paths) applied to a copy of `object`; null when a path is invalid. */
+function patched<T extends Args>(object: T, patch: Args): T | null {
+  const out: Args = structuredClone(object);
+  const keys = Object.keys(patch);
+  for (const k of [...keys.filter((k) => !k.includes("/")), ...keys.filter((k) => k.includes("/"))]) {
+    if (k.includes("/")) {
+      if (!applyPointer(out, k, patch[k])) return null;
+    } else if (patch[k] === null) delete out[k];
+    else out[k] = structuredClone(patch[k]);
+  }
+  return out as T;
+}
+
 /** The event as the server shows it for one occurrence: its own start and overrides, `recurrenceId`, no rule. */
 function occurrenceView(e: FakeEvent, occurrence: Occurrence): FakeEvent {
   if (occurrence.id === e.id) return e;
   const overrides = isObject(e.recurrenceOverrides) ? e.recurrenceOverrides : {};
   const override = isObject(overrides[occurrence.start]) ? (overrides[occurrence.start] as Args) : {};
+  // An override is itself a PatchObject (RFC 8984): top-level properties and paths.
+  const view = patched(e, override) ?? e;
   return {
-    ...e,
-    ...override,
+    ...view,
     id: occurrence.id,
     start: occurrence.start,
     recurrenceId: occurrence.start,
@@ -582,6 +620,8 @@ interface SetSpec {
   writable: ReadonlySet<string> | null;
   /** Properties only the server sets: refused in a create or update. */
   serverSet?: ReadonlySet<string>;
+  /** True: an update may name a path inside a property (`participants/p1/participationStatus`). */
+  patchPaths?: boolean;
   /** The invalid properties of a whole object (after the patch, for an update); empty when it is fine. */
   invalid(object: Record<string, unknown>, account: FakeAccount): string[];
   /** Server-set properties, written after every create and update. */
@@ -594,11 +634,17 @@ interface SetSpec {
   destroyed?(object: Stored, ctx: Ctx): void;
 }
 
-/** The keys of a create or patch the spec refuses: unknown ones, server-set ones, nested paths. */
-function refusedKeys(object: Args, spec: SetSpec): string[] {
-  return Object.keys(object).filter(
-    (k) => (spec.writable !== null && !spec.writable.has(k)) || spec.serverSet?.has(k) === true || k.includes("/"),
-  );
+/**
+ * The keys of a create or patch the spec refuses: unknown ones, server-set ones (also as the start
+ * of a path), and paths, except in a patch of a spec that takes them.
+ */
+function refusedKeys(object: Args, spec: SetSpec, patch = false): string[] {
+  return Object.keys(object).filter((k) => {
+    const path = k.includes("/");
+    const top = path ? pointerParts(k)[0]! : k;
+    if (path && !(patch && spec.patchPaths === true)) return true;
+    return (spec.writable !== null && !spec.writable.has(top)) || spec.serverSet?.has(top) === true;
+  });
 }
 
 const notFoundError = { type: "notFound" };
@@ -606,8 +652,9 @@ const invalidProperties = (properties: string[]) => ({ type: "invalidProperties"
 
 /**
  * The answer of a `/set` call (RFC 8620 §5.3) for `create`, `update` and `destroy`. An update is a
- * PatchObject: each key names one top-level property and replaces it, `null` removes it; a key with
- * a `/` (a deeper path) is not supported and refused. Ids of other accounts are `notFound`.
+ * PatchObject: a key names one top-level property and replaces it, `null` removes it. A key with a
+ * `/` (a path inside a property) is refused, unless the spec takes paths (`patchPaths`); then a
+ * path whose parent does not exist is `invalidPatch`. Ids of other accounts are `notFound`.
  */
 function applySet(args: Args, ctx: Ctx, spec: SetSpec): Args {
   const { account } = ctx;
@@ -659,15 +706,15 @@ function applySet(args: Args, ctx: Ctx, spec: SetSpec): Args {
       notUpdated[id] = invalidProperties([]);
       continue;
     }
-    const unknown = refusedKeys(patch, spec);
+    const unknown = refusedKeys(patch, spec, true);
     if (unknown.length > 0) {
       notUpdated[id] = invalidProperties(unknown);
       continue;
     }
-    const merged: Record<string, unknown> = structuredClone(current);
-    for (const [k, v] of Object.entries(patch)) {
-      if (v === null) delete merged[k];
-      else merged[k] = structuredClone(v);
+    const merged = patched(current, patch);
+    if (merged === null) {
+      notUpdated[id] = { type: "invalidPatch" };
+      continue;
     }
     const bad = spec.invalid(merged, account);
     if (bad.length > 0) {
@@ -783,22 +830,43 @@ function foreignOrganizer(e: Args, account: FakeAccount): string | null {
   return organizer !== null && organizer !== account.email.toLowerCase() ? organizer : null;
 }
 
+/** The account's own participant entry in `e` (the first with its calendar address), or undefined. */
+function ownParticipant(e: Args, account: FakeAccount): Args | undefined {
+  const own = account.email.toLowerCase();
+  return values(e.participants).find((p) => stripMailto(p.calendarAddress) === own);
+}
+
+/** The account's answer in `e`; JSCalendar's default is `needs-action`. */
+function ownStatus(e: Args, account: FakeAccount): unknown {
+  const p = ownParticipant(e, account);
+  return p === undefined ? undefined : (p.participationStatus ?? "needs-action");
+}
+
 /**
- * Whom the account answers when it changes or removes its copy of someone else's meeting with
+ * Whom the account answers about its copy of someone else's meeting with
  * `sendSchedulingMessages: true`: the organizer, if the account is a participant and the event is
  * not a draft and has not ended. Else null.
  */
 function replyTo(e: FakeEvent, account: FakeAccount): string | null {
   const organizer = foreignOrganizer(e, account);
-  const own = account.email.toLowerCase();
-  const listed = values(e.participants).some((p) => stripMailto(p.calendarAddress) === own);
+  const listed = ownParticipant(e, account) !== undefined;
   return organizer !== null && listed && e.isDraft !== true && !endsInPast(e) ? organizer : null;
 }
 
-/** For someone else's meeting: the REPLY a notifying write sends, and true (nothing else is sent). */
+/**
+ * For someone else's meeting: the REPLY a notifying write sends, and true (nothing else is sent).
+ * An update answers only when it changed the account's own `participationStatus`; a removal
+ * always answers (the account leaves the meeting).
+ */
 function replied(ctx: Ctx, notify: boolean, eventId: string, before: FakeEvent, after: FakeEvent | null): boolean {
   if (foreignOrganizer(before, ctx.account) === null) return false;
-  const to = notify ? ((after === null ? null : replyTo(after, ctx.account)) ?? replyTo(before, ctx.account)) : null;
+  if (!notify) return true;
+  const to =
+    after === null
+      ? replyTo(before, ctx.account)
+      : ownStatus(after, ctx.account) !== ownStatus(before, ctx.account)
+        ? replyTo(after, ctx.account)
+        : null;
   if (to !== null) record(ctx, "REPLY", eventId, [to]);
   return true;
 }
@@ -854,13 +922,27 @@ function applyToOccurrences(args: Args, ctx: Ctx, notify: boolean): { rest: Args
       update[id] = patch;
       continue;
     }
-    if (!isObject(patch) || Object.keys(patch).some((k) => EVENT_SERVER_SET.has(k) || k.includes("/") || k === "recurrenceRule")) {
-      notUpdated[id] = invalidProperties(isObject(patch) ? Object.keys(patch) : []);
+    const refused = isObject(patch)
+      ? Object.keys(patch).filter((k) => {
+          const top = pointerParts(k)[0]!;
+          return EVENT_SERVER_SET.has(top) || top === "recurrenceRule";
+        })
+      : [];
+    if (!isObject(patch) || refused.length > 0) {
+      notUpdated[id] = invalidProperties(refused);
       continue;
     }
     const overrides = isObject(found.event.recurrenceOverrides) ? found.event.recurrenceOverrides : {};
     const before = occurrenceView(found.event, found.occurrence);
-    found.event.recurrenceOverrides = { ...overrides, [found.occurrence.start]: { ...(isObject(overrides[found.occurrence.start]) ? overrides[found.occurrence.start] as Args : {}), ...structuredClone(patch) } };
+    if (patched(before, patch) === null) {
+      notUpdated[id] = { type: "invalidPatch" };
+      continue;
+    }
+    // The override is a PatchObject: a new top-level property replaces the paths stored inside it.
+    const previous = isObject(overrides[found.occurrence.start]) ? (overrides[found.occurrence.start] as Args) : {};
+    const replaced = Object.keys(patch).filter((k) => !k.includes("/"));
+    const kept = Object.fromEntries(Object.entries(previous).filter(([k]) => !replaced.some((r) => k.startsWith(`${r}/`))));
+    found.event.recurrenceOverrides = { ...overrides, [found.occurrence.start]: { ...kept, ...structuredClone(patch) } };
     const after = occurrenceView(found.event, found.occurrence);
     updated[id] = null;
     if (replied(ctx, notify, id, before, after)) continue;
@@ -918,6 +1000,7 @@ const calendarEventSet: Handler = (args, ctx) => {
     idPrefix: "ev",
     writable: null,
     serverSet: EVENT_SERVER_SET,
+    patchPaths: true,
     invalid: invalidEventProperties,
     stamp: (object, c) => {
       if (typeof object.uid !== "string") object.uid = c.state.nextId("ev-uid-");

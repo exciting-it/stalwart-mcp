@@ -366,6 +366,15 @@ export const UpdateEventInput = UpdateEventInputBase.superRefine((m, ctx) => {
 
 export const DeleteEventInput = DeleteIds("event_ids");
 
+/** The answers `respond_to_event` gives: JSCalendar `participationStatus` values, nothing else. */
+export const EVENT_RESPONSES = ["accepted", "declined", "tentative"] as const;
+
+/**
+ * An answer to an invitation: the event (or occurrence, or series) and the answer. No comment,
+ * no address: the participant answered for is always the mailbox's own.
+ */
+export const RespondToEventInput = z.object({ event_id: MailIdSchema, response: z.enum(EVENT_RESPONSES) }).strict();
+
 // ---- result parts ----
 
 const Labelled = z.string().nullable();
@@ -462,6 +471,7 @@ export type DeleteContactInputT = z.infer<typeof DeleteContactInput>;
 export type CreateEventInputT = z.infer<typeof CreateEventInput>;
 export type UpdateEventInputT = z.infer<typeof UpdateEventInput>;
 export type DeleteEventInputT = z.infer<typeof DeleteEventInput>;
+export type RespondToEventInputT = z.infer<typeof RespondToEventInput>;
 export type EventRecurrenceT = z.infer<typeof EventRecurrence>;
 
 // ---- tool results ----
@@ -516,9 +526,22 @@ export const DeleteEventResult = DeleteResult.extend({
   cancelled_attendees: z.number().int(),
 });
 
+/**
+ * `organizer_notified`: the mail server was asked to send the organizer the answer (false when
+ * the stored answer already was this one, or the event has ended). `deduplicated`: the identical
+ * answer went out within the dedupe window; this call wrote and sent nothing.
+ */
+export const RespondToEventResult = z.object({
+  event_id: z.string(),
+  response: z.enum(EVENT_RESPONSES),
+  organizer_notified: z.boolean(),
+  deduplicated: z.boolean(),
+});
+
 export type CreateEventResultT = z.infer<typeof CreateEventResult>;
 export type UpdateEventResultT = z.infer<typeof UpdateEventResult>;
 export type DeleteEventResultT = z.infer<typeof DeleteEventResult>;
+export type RespondToEventResultT = z.infer<typeof RespondToEventResult>;
 
 // ---- the request that crosses the vault ----
 
@@ -534,6 +557,7 @@ export const CollabRequest = z.discriminatedUnion("op", [
   z.object({ op: z.literal("create_event"), input: CreateEventInput }).strict(),
   z.object({ op: z.literal("update_event"), input: UpdateEventInput }).strict(),
   z.object({ op: z.literal("delete_event"), input: DeleteEventInput }).strict(),
+  z.object({ op: z.literal("respond_to_event"), input: RespondToEventInput }).strict(),
 ]);
 
 export type CollabRequestT = z.infer<typeof CollabRequest>;
@@ -557,6 +581,8 @@ export interface CollabAdapter {
   updateEvent(input: UpdateEventInputT): Promise<UpdateEventResultT>;
   /** Removes the events for good; attendees get cancellations. Throws when none could be removed. */
   deleteEvent(input: DeleteEventInputT): Promise<DeleteEventResultT>;
+  /** Answers an invitation to someone else's meeting; the mail server sends the organizer the answer. */
+  respondToEvent(input: RespondToEventInputT): Promise<RespondToEventResultT>;
 }
 
 /** What the vault learns about an existing event before it changes or deletes it. */
@@ -572,6 +598,14 @@ export interface EventAudience {
    * names no organizer. Otherwise someone else's meeting: a write only changes the mailbox's copy.
    */
   organizedByMailbox: boolean;
+  /** The organizer's address (lower-cased, without `mailto:`); null when the event names none. */
+  organizer: string | null;
+  /**
+   * The mailbox's own participant: its key in the event's `participants` and its answer
+   * (`participationStatus`). The first entry whose calendar address is the mailbox's; null when
+   * the event does not list the mailbox.
+   */
+  self: { key: string; status: string | null } | null;
   /** The event's own time zone; null for a floating or all-day event. */
   timeZone: string | null;
   /** The stored participants with a calendar address other than the mailbox's, with what they answered. */
@@ -601,6 +635,11 @@ export interface CalendarEventWriter {
   updateEvent(input: UpdateEventInputT, notify: boolean, current?: EventAudience): Promise<{ event_id: string }>;
   /** One `/set` destroying `ids`; never throws for ids that were not deleted. */
   deleteEvents(ids: string[], notify: boolean): Promise<DestroyOutcome>;
+  /**
+   * Sets the answer of the mailbox's own participant (`current.self`, as the vault read it) and
+   * nothing else. Without such a participant it is `invalid_input`, nothing written.
+   */
+  respondToEvent(input: RespondToEventInputT, notify: boolean, current: EventAudience): Promise<{ event_id: string }>;
 }
 
 /** What one `/set` destroy did: the ids deleted, and those that were not. */
@@ -612,7 +651,8 @@ export interface DestroyOutcome {
 }
 
 /** The JMAP side of the contacts and calendars: reads and contact writes as the tools see them, event writes for the vault. */
-export type CollabUpstream = Omit<CollabAdapter, "createEvent" | "updateEvent" | "deleteEvent"> & CalendarEventWriter;
+export type CollabUpstream = Omit<CollabAdapter, "createEvent" | "updateEvent" | "deleteEvent" | "respondToEvent"> &
+  CalendarEventWriter;
 
 /** What a tool works with: the mail operations and the contacts and calendar ones. */
 export type Mailbox = MailboxAdapter & CollabAdapter;

@@ -2052,6 +2052,110 @@ describe("writing events", () => {
     });
   });
 
+  describe("respondToEvent", () => {
+    /** Someone else's meeting that lists the mailbox (any case, with or without `mailto:`). */
+    const invitation = (me: Record<string, unknown>, extra: Record<string, unknown> = {}) =>
+      fake.addEvent(A, {
+        title: "Invitation",
+        start: "2031-03-03T09:00:00",
+        organizerCalendarAddress: `mailto:${OK}`,
+        participants: { org: { calendarAddress: `mailto:${OK}`, roles: { owner: true } }, ...me },
+        ...extra,
+      }).id;
+
+    it("patches exactly one path, the answer of the mailbox's own participant, with the decision", async () => {
+      const { accountId } = fake.addMailbox(A);
+      const adapter = await adapterFor(A);
+      const id = invitation({ me: { calendarAddress: `MAILTO:${A.toUpperCase()}`, participationStatus: "needs-action" } });
+      const current = (await adapter.eventAudiences([id])).get(id)!;
+      expect(current).toMatchObject({ organizedByMailbox: false, organizer: OK, self: { key: "me", status: "needs-action" } });
+      expect(await adapter.respondToEvent({ event_id: id, response: "tentative" }, true, current)).toEqual({ event_id: id });
+      expect(lastEventSet()).toEqual({
+        accountId,
+        update: { [id]: { "participants/me/participationStatus": "tentative" } },
+        sendSchedulingMessages: true,
+      });
+      await adapter.respondToEvent({ event_id: id, response: "declined" }, false, current);
+      expect(lastEventSet()).toEqual({
+        accountId,
+        update: { [id]: { "participants/me/participationStatus": "declined" } },
+        sendSchedulingMessages: false,
+      });
+      const { event } = await adapter.readEvent({ event_id: id });
+      expect(event.participants.map((p) => [p.email, p.status])).toEqual([
+        [OK, null],
+        [A.toUpperCase(), "declined"],
+      ]);
+    });
+
+    it("finds the mailbox without mailto: too, takes its first entry, and escapes the key in the path", async () => {
+      fake.addMailbox(A);
+      const adapter = await adapterFor(A);
+      const plain = invitation({ x: { calendarAddress: A, participationStatus: "accepted" } });
+      const odd = invitation({
+        "a/b~c": { calendarAddress: `mailto:${A}`, participationStatus: "needs-action" },
+        second: { calendarAddress: `mailto:${A}`, participationStatus: "declined" },
+      });
+      const audiences = await adapter.eventAudiences([plain, odd]);
+      expect(audiences.get(plain)!.self).toEqual({ key: "x", status: "accepted" });
+      expect(audiences.get(odd)!.self).toEqual({ key: "a/b~c", status: "needs-action" });
+      await adapter.respondToEvent({ event_id: odd, response: "accepted" }, false, audiences.get(odd)!);
+      expect(lastEventSet().update).toEqual({ [odd]: { "participants/a~1b~0c/participationStatus": "accepted" } });
+      expect(fake.eventsOf(A).find((e) => e.id === odd)!.participants).toMatchObject({
+        "a/b~c": { participationStatus: "accepted" },
+        second: { participationStatus: "declined" },
+      });
+    });
+
+    it("is invalid_input without the mailbox's own participant, and not_found for another account's event", async () => {
+      fake.addMailbox(A);
+      fake.addMailbox(B);
+      const adapter = await adapterFor(A);
+      const notListed = invitation({});
+      const current = (await adapter.eventAudiences([notListed])).get(notListed)!;
+      expect(current.self).toBeNull();
+      const before = eventSets().length;
+      await expectMailError(adapter.respondToEvent({ event_id: notListed, response: "accepted" }, true, current), "invalid_input");
+      expect(eventSets()).toHaveLength(before);
+      const theirs = fake.addEvent(B, {
+        start: "2031-03-03T09:00:00",
+        organizerCalendarAddress: `mailto:${OK}`,
+        participants: { me: { calendarAddress: `mailto:${A}`, participationStatus: "needs-action" } },
+      });
+      const borrowed = { ...current, self: { key: "me", status: "needs-action" } };
+      await expectMailError(adapter.respondToEvent({ event_id: theirs.id, response: "accepted" }, false, borrowed), "not_found");
+      expect(fake.eventsOf(B)[0]!.participants).toEqual({ me: { calendarAddress: `mailto:${A}`, participationStatus: "needs-action" } });
+    });
+
+    it("an occurrence id changes that occurrence only", async () => {
+      fake.addMailbox(A);
+      const adapter = await adapterFor(A);
+      const series = invitation(
+        { me: { calendarAddress: `mailto:${A}`, participationStatus: "needs-action" } },
+        { recurrenceRule: { frequency: "daily", count: 3 } },
+      );
+      const second = `${series}-20310304T090000`;
+      const current = (await adapter.eventAudiences([second])).get(second)!;
+      await adapter.respondToEvent({ event_id: second, response: "accepted" }, false, current);
+      const status = async (event_id: string) =>
+        (await adapter.readEvent({ event_id })).event.participants.find((p) => p.email === A)!.status;
+      expect(await status(second)).toBe("accepted");
+      expect(await status(`${series}-20310303T090000`)).toBe("needs-action");
+      expect(await status(series)).toBe("needs-action");
+    });
+
+    it("an unknown outcome is send_unconfirmed when it notifies, upstream_unavailable when it does not", async () => {
+      fake.addMailbox(A);
+      const adapter = await adapterFor(A);
+      const id = invitation({ me: { calendarAddress: `mailto:${A}` } });
+      const current = (await adapter.eventAudiences([id])).get(id)!;
+      fake.failNextEventWrite("accepted-then-503");
+      await expectMailError(adapter.respondToEvent({ event_id: id, response: "accepted" }, true, current), "send_unconfirmed");
+      fake.failNextEventWrite("accepted-then-503");
+      await expectMailError(adapter.respondToEvent({ event_id: id, response: "declined" }, false, current), "upstream_unavailable");
+    });
+  });
+
   describe("deleteEvents", () => {
     it("destroys for good with one /set carrying the decision; duplicates count once, others are named", async () => {
       const { accountId } = fake.addMailbox(A);
@@ -2132,6 +2236,8 @@ describe("writing events", () => {
         end: Date.parse("2031-03-03T10:00:00Z"),
         recurring: false,
         organizedByMailbox: false,
+        organizer: "boss@example.org",
+        self: { key: "me", status: null },
         timeZone: "Europe/Berlin",
         participants: [
           { email: OK, name: null, status: null },
@@ -2144,6 +2250,8 @@ describe("writing events", () => {
         end: Date.parse("2031-03-05T00:00:00Z"),
         recurring: false,
         organizedByMailbox: true,
+        organizer: null,
+        self: null,
         timeZone: null,
         participants: [],
       });
@@ -2235,16 +2343,62 @@ describe("writing events", () => {
         }).id;
       const one = theirs();
       const two = theirs();
+      // A change of the own copy that leaves the mailbox's answer as it is sends nothing.
       await adapter.updateEvent({ event_id: one, title: "Mine" }, true);
+      expect(fake.schedulingMessages(A)).toEqual([]);
+      // A changed answer of the mailbox's own participant is a REPLY; so is removing the copy.
+      const current = (await adapter.eventAudiences([one])).get(one)!;
+      await adapter.respondToEvent({ event_id: one, response: "accepted" }, true, current);
       expect(await adapter.deleteEvents([two], true)).toMatchObject({ deleted: [two] });
       expect(fake.schedulingMessages(A)).toEqual([
         { kind: "REPLY", eventId: one, attendees: ["boss@example.org"] },
         { kind: "REPLY", eventId: two, attendees: ["boss@example.org"] },
       ]);
+      // The same answer again changes nothing: no REPLY.
+      await adapter.respondToEvent({ event_id: one, response: "accepted" }, true, current);
       // Without sendSchedulingMessages nothing is sent.
+      await adapter.respondToEvent({ event_id: one, response: "declined" }, false, current);
       await adapter.updateEvent({ event_id: one, title: "Quiet" }, false);
       expect(await adapter.deleteEvents([one], false)).toMatchObject({ deleted: [one] });
       expect(fake.schedulingMessages(A)).toHaveLength(2);
+    });
+
+    it("answers no REPLY for an answer to an event that ended or is a draft", async () => {
+      fake.addMailbox(A);
+      const adapter = await adapterFor(A);
+      const theirs = (extra: Record<string, unknown>) =>
+        fake.addEvent(A, {
+          start: "2031-03-03T09:00:00",
+          organizerCalendarAddress: "mailto:boss@example.org",
+          participants: { b: { calendarAddress: "mailto:boss@example.org" }, me: attendee(A) },
+          ...extra,
+        }).id;
+      for (const id of [theirs({ start: "2020-03-03T09:00:00" }), theirs({ isDraft: true })]) {
+        const current = (await adapter.eventAudiences([id])).get(id)!;
+        await adapter.respondToEvent({ event_id: id, response: "declined" }, true, current);
+        expect(fake.eventsOf(A).find((e) => e.id === id)!.participants).toMatchObject({ me: { participationStatus: "declined" } });
+      }
+      expect(fake.schedulingMessages(A)).toEqual([]);
+    });
+
+    it("applies a patch path (JSON pointer) inside a property, and refuses one whose parent does not exist", async () => {
+      fake.addMailbox(A);
+      const { id } = fake.addEvent(A, {
+        start: "2031-03-03T09:00:00",
+        title: "Kept",
+        participants: { "a/b~c": { calendarAddress: `mailto:${A}`, participationStatus: "needs-action", name: "Me" } },
+      });
+      const [, ok] = await setCall({ update: { [id]: { "participants/a~1b~0c/participationStatus": "tentative" } } });
+      expect(ok.updated).toEqual({ [id]: null });
+      expect(fake.eventsOf(A)[0]).toMatchObject({
+        title: "Kept",
+        participants: { "a/b~c": { calendarAddress: `mailto:${A}`, participationStatus: "tentative", name: "Me" } },
+      });
+      const [, bad] = await setCall({ update: { [id]: { "participants/nobody/participationStatus": "accepted", title: "Changed" } } });
+      expect(bad.notUpdated).toEqual({ [id]: { type: "invalidPatch" } });
+      const [, serverSet] = await setCall({ update: { [id]: { "utcStart/x": "y" } } });
+      expect(serverSet.notUpdated).toEqual({ [id]: { type: "invalidProperties", properties: ["utcStart/x"] } });
+      expect(fake.eventsOf(A)[0]).toMatchObject({ title: "Kept" });
     });
 
     it("keeps unknown property names as inert data: recurrenceRules does not recur, sendTo is no attendee", async () => {

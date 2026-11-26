@@ -9,6 +9,8 @@
  *
  * A meeting someone else organized (`organizedByMailbox` false) is never notified about: a change
  * or deletion only affects the mailbox's own copy, and is written without scheduling messages.
+ * The one write that reaches its organizer is an answer (`respond_to_event`): the server sends the
+ * organizer the answer, unless the event ended in the past.
  *
  * One counted send covers at most `eventParticipantsMax` addresses, like one sent message: a write
  * that involves more (an existing event created elsewhere) counts one send per started ten.
@@ -70,4 +72,14 @@ export function deleteNotice(audience: EventAudience, now: number): Notice {
     addresses: audience.attendees,
     notify: audience.organizedByMailbox && audience.attendees.length > 0 && !endsInPast(end, now),
   };
+}
+
+/**
+ * An answer to an invitation notifies the organizer of someone else's meeting (the server sends
+ * the answer), unless the event ended in the past. Nobody for an event the mailbox organizes.
+ */
+export function respondNotice(audience: EventAudience, now: number): Notice {
+  if (audience.organizedByMailbox || audience.organizer === null) return { addresses: [], notify: false };
+  const end = audience.recurring ? null : audience.end;
+  return { addresses: [audience.organizer], notify: !endsInPast(end, now) };
 }

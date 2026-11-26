@@ -208,6 +208,40 @@ describe("mail connector isolation, end to end", () => {
     }
   });
 
+  it("user A cannot answer an invitation in user B's calendar; A's own answer reaches the organizer once", async () => {
+    fake.addMailbox(A);
+    fake.addMailbox(B);
+    const a = await connect(fake, A);
+    const invite = (email: string) =>
+      fake.addEvent(email, {
+        title: "Invitation",
+        start: "2031-03-03T09:00:00",
+        organizerCalendarAddress: "mailto:ok@test.example",
+        participants: {
+          o: { calendarAddress: "mailto:ok@test.example", roles: { owner: true } },
+          a: { calendarAddress: `mailto:${A}`, participationStatus: "needs-action" },
+          b: { calendarAddress: `mailto:${B}`, participationStatus: "needs-action" },
+        },
+      }).id;
+    const theirs = invite(B);
+    const mine = invite(A);
+    const before = fake.eventsOf(B);
+
+    const foreign = await callTool(a.accessToken!, "respond_to_event", { event_id: theirs, response: "declined" });
+    expect(foreign).toEqual({ isError: true, content: [{ type: "text", text: MAIL_ERROR_MESSAGES.not_found }] });
+    expect(fake.eventsOf(B)).toEqual(before);
+    expect(fake.schedulingMessages(B)).toEqual([]);
+
+    const args = { event_id: mine, response: "accepted" };
+    const first = await callTool(a.accessToken!, "respond_to_event", args);
+    const second = await callTool(a.accessToken!, "respond_to_event", args);
+    expect(first.structuredContent).toEqual({ event_id: mine, response: "accepted", organizer_notified: true, deduplicated: false });
+    expect(second.structuredContent).toEqual({ event_id: mine, response: "accepted", organizer_notified: true, deduplicated: true });
+    expect(fake.eventsOf(A)[0]!.participants).toMatchObject({ a: { participationStatus: "accepted" }, b: { participationStatus: "needs-action" } });
+    expect(fake.schedulingMessages(A)).toEqual([{ kind: "REPLY", eventId: mine, attendees: ["ok@test.example"] }]);
+    expect(fake.eventsOf(B)).toEqual(before);
+  });
+
   it("user A cannot read user B's calendars or events", async () => {
     const accountIdA = fake.addMailbox(A).accountId;
     const accountIdB = fake.addMailbox(B).accountId;

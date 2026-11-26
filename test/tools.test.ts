@@ -9,6 +9,7 @@ import {
   CreateContactInputBase,
   CreateEventInputBase,
   SearchEventsInputBase,
+  RespondToEventInput,
   UpdateContactInputBase,
   UpdateEventInputBase,
 } from "../src/collab";
@@ -70,12 +71,15 @@ const validInputFor = (tool: Tool): Record<string, unknown> =>
     delete_contact: { contact_ids: [store.b.contactId] },
     create_event: { title: "Planning", date: "2026-12-01", calendar_id: store.b.calendarId },
     update_event: { event_id: store.b.eventId, title: "Renamed" },
+    respond_to_event: { event_id: store.b.eventId, response: "accepted" },
     delete_event: { event_ids: [store.b.eventId] },
   })[tool.spec.name]!;
 
-// The same calls with A's own ids, where a tool needs an id that exists.
-const ownInputFor = (tool: Tool): Record<string, unknown> =>
-  ({
+// The same calls with A's own ids, where a tool needs an id that exists. An answer needs an
+// invitation in A's calendar, added only when that tool is called.
+const ownInputFor = (tool: Tool): Record<string, unknown> => {
+  if (tool.spec.name === "respond_to_event") return { event_id: store.addInvitation("A"), response: "accepted" };
+  const own: Record<string, Record<string, unknown>> = {
     read_thread: { thread_id: store.a.threadId },
     move_mail: { message_ids: [store.a.messageId], folder_id: "a-drafts" },
     delete_mail: { message_ids: [store.a.messageId] },
@@ -89,7 +93,9 @@ const ownInputFor = (tool: Tool): Record<string, unknown> =>
     create_event: { title: "Planning", date: "2026-12-01", participants: [{ email: "ok@test.example", name: "Ok" }] },
     update_event: { event_id: store.a.eventId, location: "Room 2" },
     delete_event: { event_ids: [store.a.eventId] },
-  })[tool.spec.name] ?? validInputFor(tool);
+  };
+  return own[tool.spec.name] ?? validInputFor(tool);
+};
 
 /** The tools of the always-offered mail part; the contacts and calendar tools are tested apart. */
 const MAIL_TOOLS = TOOLS.filter((t) => t.spec.area === undefined);
@@ -119,6 +125,7 @@ describe("tools", () => {
       "read_event",
       "create_event",
       "update_event",
+      "respond_to_event",
       "delete_event",
     ]);
   });
@@ -405,6 +412,7 @@ describe("tools", () => {
       "read_event",
       "create_event",
       "update_event",
+      "respond_to_event",
       "delete_event",
     ]);
     expect(names(new Set(["contacts", "calendars"]))).toEqual(TOOLS.map((t) => t.spec.name));
@@ -703,7 +711,7 @@ describe("tools", () => {
       expect(update).toContain("without time_zone stay in the event's own time zone (UTC for an event without one)");
       expect(update).toContain("attendees who stay keep their answers");
       expect(update).toContain(
-        "For a meeting someone else organized, a change only affects your own copy: the organizer is not informed, and participants and recurrence cannot be changed.",
+        "For a meeting someone else organized, a change only affects your own copy: the organizer is not informed, and participants and recurrence cannot be changed;",
       );
       expect(remove).toContain("For a deleted event the mailbox organizes that has not ended");
       expect(remove).toContain("For a meeting someone else organized, deleting only removes your own copy: the organizer is not informed.");
@@ -796,6 +804,12 @@ describe("tools", () => {
       expect(store.calls).toEqual([]);
     });
 
+    it("update_event points to respond_to_event for answering an invitation", () => {
+      expect(byName("update_event").spec.description).toContain(
+        "the organizer is not informed, and participants and recurrence cannot be changed; to answer an invitation, use respond_to_event.",
+      );
+    });
+
     it("reach only the grant's own account: B's calendar and event answer not found", async () => {
       for (const [name, input] of [
         ["create_event", { title: "x", date: "2026-12-01", calendar_id: store.b.calendarId }],
@@ -807,6 +821,81 @@ describe("tools", () => {
       expect(store.calls.every((c) => c.accountId === grantA.accountId)).toBe(true);
       const b = await store.mailboxFor(store.b.accountId).readEvent({ event_id: store.b.eventId });
       expect(b.event.title).toBe("Meeting of B");
+    });
+  });
+
+  describe("respond_to_event", () => {
+    const base = () => ({ event: "tool_call", accountId: grantA.accountId, email: grantA.email, clientId: "client-1" });
+
+    it("is a notify tool of the calendars area that takes an event id and an answer, nothing else", () => {
+      const { spec } = byName("respond_to_event");
+      expect(spec).toMatchObject({ kind: "notify", area: "calendars" });
+      expect(Object.keys(RespondToEventInput.shape)).toEqual(["event_id", "response"]);
+      expect(RespondToEventInput.shape.response.options).toEqual(["accepted", "declined", "tentative"]);
+      expect(spec.description).toContain("Answer an invitation to a meeting someone else organized");
+      expect(spec.description).toContain("sends the organizer the answer by email from the mailbox's address");
+      expect(spec.description).toContain("counts as one of the mailbox's 50 sent messages per day");
+      expect(spec.description).toContain("Not for events the mailbox organizes");
+      expect(spec.description).toContain("answers that occurrence only");
+      expect(spec.description).toContain("not sent again (deduplicated: true)");
+      expect(spec.description).toContain("Ask the user first.");
+    });
+
+    it("answers with the result and audits whether the organizer was notified, without any address or content", async () => {
+      const id = store.addInvitation("A", "secret.organizer@test.example");
+      const first = await byName("respond_to_event").execute(deps, grantA, { event_id: id, response: "declined" });
+      expect(first.structuredContent).toEqual({ event_id: id, response: "declined", organizer_notified: true, deduplicated: false });
+      expect(store.ownStatus("A", id)).toBe("declined");
+      // The stored answer already equals it: nobody is notified.
+      const same = await byName("respond_to_event").execute(deps, grantA, { event_id: id, response: "declined" });
+      expect(same.structuredContent).toEqual({ event_id: id, response: "declined", organizer_notified: false, deduplicated: false });
+      expect(audits).toEqual([
+        { ...base(), tool: "respond_to_event", outcome: "ok", resultCount: 1, recipientCount: 1 },
+        { ...base(), tool: "respond_to_event", outcome: "ok", resultCount: 1, recipientCount: 0 },
+      ]);
+      expect(JSON.stringify(audits)).not.toMatch(/secret|Invitation/);
+    });
+
+    it("audits a deduplicated answer as notifying nobody", async () => {
+      const real = deps.mailbox;
+      deps.mailbox = (g) => ({
+        ...real(g),
+        respondToEvent: async () => ({ event_id: "ev-first", response: "accepted" as const, organizer_notified: true, deduplicated: true }),
+      });
+      const r = await byName("respond_to_event").execute(deps, grantA, { event_id: "ev-first", response: "accepted" });
+      expect(r.structuredContent).toEqual({ event_id: "ev-first", response: "accepted", organizer_notified: true, deduplicated: true });
+      expect(audits).toEqual([{ ...base(), tool: "respond_to_event", outcome: "ok", resultCount: 1, recipientCount: 0 }]);
+    });
+
+    it("refuses a bad input before the mailbox is touched", async () => {
+      for (const input of [
+        {},
+        { event_id: store.a.eventId },
+        { response: "accepted" },
+        { event_id: store.a.eventId, response: "needs-action" },
+        { event_id: store.a.eventId, response: "ACCEPTED" },
+        { event_id: "../x", response: "accepted" },
+        { event_id: store.a.eventId, response: "accepted", comment: "See you" },
+        { event_id: store.a.eventId, response: "accepted", email: "a@test.example" },
+        { event_id: store.a.eventId, response: "accepted", account_id: store.b.accountId },
+      ]) {
+        expect(text(await byName("respond_to_event").execute(deps, grantA, input))).toBe(MAIL_ERROR_MESSAGES.invalid_input);
+      }
+      expect(store.calls).toEqual([]);
+      expect(audits.every((a) => a.outcome === "refused" && a.errorCode === "invalid_input" && !("recipientCount" in a))).toBe(true);
+    });
+
+    it("reaches only the grant's own account: B's invitation is not found and stays unanswered", async () => {
+      const theirs = store.addInvitation("B");
+      expect(text(await byName("respond_to_event").execute(deps, grantA, { event_id: theirs, response: "accepted" }))).toBe(
+        MAIL_ERROR_MESSAGES.not_found,
+      );
+      expect(store.ownStatus("B", theirs)).toBe("needs-action");
+      expect(store.calls.every((c) => c.accountId === grantA.accountId)).toBe(true);
+      // An event of A's own without an organizer is not an invitation.
+      expect(text(await byName("respond_to_event").execute(deps, grantA, { event_id: store.a.eventId, response: "accepted" }))).toBe(
+        MAIL_ERROR_MESSAGES.invalid_input,
+      );
     });
   });
 });
