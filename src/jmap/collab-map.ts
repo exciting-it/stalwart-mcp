@@ -15,6 +15,7 @@ import {
   type StoredParticipant,
   type UpdateEventInputT,
   type UpdateContactInputT,
+  WEEKDAYS,
   type ContactSummary,
   type EventDetail,
   type EventSummary,
@@ -345,6 +346,8 @@ const Rule = z.object({
   interval: z.number().int().nullish(),
   count: z.number().int().nullish(),
   until: z.string().nullish(),
+  /** RFC 8984 `NDay`: a weekday, with `nthOfPeriod` the n-th one of the month or year (negative: from the end). */
+  byDay: z.array(z.object({ day: z.string().nullish(), nthOfPeriod: z.number().int().nullish() })).nullish(),
 });
 
 export const JmapCalendarEvent = z.object({
@@ -455,12 +458,36 @@ export function toEventSummary(e: CalendarEventObject): EventSummary {
   };
 }
 
-/** A short plain summary of the rule, from its own fields only: `weekly, every 2, until 2027-01-01`. */
+/** How many weekdays of a rule the summary names; a rule from elsewhere may list any number. */
+const SUMMARY_DAYS_MAX = 14;
+
+/**
+ * The weekdays of a rule in the words `create_event` takes (`mo th`), an n-th one with its number
+ * (`2tu`, `-1fr` for the last Friday). Only the seven names and a number a calendar can have are
+ * passed on; an entry that is anything else is left out.
+ */
+function ruleWeekdays(rule: z.infer<typeof Rule>): string | null {
+  const days: string[] = [];
+  for (const entry of rule.byDay ?? []) {
+    const day = WEEKDAYS.find((name) => name === entry.day?.toLowerCase());
+    const nth = entry.nthOfPeriod ?? null;
+    if (day === undefined || (nth !== null && (nth === 0 || Math.abs(nth) > 53))) continue;
+    const text = `${nth ?? ""}${day}`;
+    if (!days.includes(text)) days.push(text);
+  }
+  if (days.length === 0) return null;
+  const named = days.slice(0, SUMMARY_DAYS_MAX).join(" ");
+  return days.length > SUMMARY_DAYS_MAX ? `${named} and more` : named;
+}
+
+/** A short plain summary of the rule, from its own fields only: `weekly, every 2, on mo th, until 2027-01-01`. */
 function recurrenceSummary(e: CalendarEventObject): string | null {
   const rule = ruleOf(e);
   if (rule == null) return null;
   const parts = [optionalLine(rule.frequency, 32) ?? "recurring"];
   if (rule.interval != null && rule.interval > 1) parts.push(`every ${rule.interval}`);
+  const days = ruleWeekdays(rule);
+  if (days !== null) parts.push(`on ${days}`);
   if (rule.count != null) parts.push(`${rule.count} times`);
   if (rule.until != null) {
     const until = clean(rule.until, 64).trim();

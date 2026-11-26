@@ -258,7 +258,8 @@ and is not named on the approval page.
   them to UTC and sends them to Stalwart as local times in `Etc/UTC`. `start` and `end` in the
   results are the server's `utcStart` and `utcEnd`; `local_start` and `time_zone` are the event's
   own. All-day events carry `all_day: true`. The recurrence summary of `read_event` is built from
-  the first rule's own fields only (for example `weekly, every 2, until 2027-01-01`); the tool
+  the first rule's own fields only (for example `weekly, every 2, on mo th, until 2027-01-01`,
+  with `2tu` for the second Tuesday and `-1fr` for the last Friday of the month or year); the tool
   does not expand rules itself, the server does (`expandRecurrences`).
 
 ### Branding

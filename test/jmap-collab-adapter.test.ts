@@ -792,6 +792,28 @@ describe("readEvent", () => {
     expect(await recurrence(c)).toBeNull();
   });
 
+  it("names the weekdays of a rule, an n-th one with its number, and leaves out what it does not know", async () => {
+    fake.addMailbox(A);
+    const rule = (recurrenceRule: Record<string, unknown>) => fake.addEvent(A, { start: "2026-11-02T09:00:00", recurrenceRule }).id;
+    const days = (...list: (string | [string, number])[]) =>
+      list.map((d) => (typeof d === "string" ? { "@type": "NDay", day: d } : { "@type": "NDay", day: d[0], nthOfPeriod: d[1] }));
+    const weekly = rule({ frequency: "weekly", byDay: days("mo", "we", "fr"), count: 12 });
+    const monthly = rule({ frequency: "monthly", byDay: days(["tu", 2], ["fr", -1]) });
+    // Upper case, a repeated day, a name that is no weekday, and counts no calendar has.
+    const odd = rule({ frequency: "weekly", byDay: [...days("MO", "mo", "x<b>y", ["tu", 0], ["we", 400]), { "@type": "NDay" }] });
+    const none = rule({ frequency: "weekly", byDay: days("someday") });
+    const empty = rule({ frequency: "weekly", byDay: [] });
+    const many = rule({ frequency: "yearly", byDay: Array.from({ length: 40 }, (_, i) => ({ day: "mo", nthOfPeriod: i + 1 })) });
+    const adapter = await adapterFor(A);
+    const recurrence = async (id: string) => (await adapter.readEvent({ event_id: id })).event.recurrence;
+    expect(await recurrence(weekly)).toBe("weekly, on mo we fr, 12 times");
+    expect(await recurrence(monthly)).toBe("monthly, on 2tu -1fr");
+    expect(await recurrence(odd)).toBe("weekly, on mo");
+    expect(await recurrence(none)).toBe("weekly");
+    expect(await recurrence(empty)).toBe("weekly");
+    expect(await recurrence(many)).toBe(`yearly, on ${Array.from({ length: 14 }, (_, i) => `${i + 1}mo`).join(" ")} and more`);
+  });
+
   it("reads the older names as a fallback: recurrenceRules, a participant's email or sendTo, and required as attendee", async () => {
     fake.addMailbox(A);
     const { id } = fake.addEvent(A, {
@@ -1769,7 +1791,7 @@ describe("writing events", () => {
         { name: "Ok Person", email: OK, role: "attendee", status: "needs-action" },
         { name: null, email: OTHER, role: "attendee", status: "needs-action" },
       ]);
-      expect(event).toMatchObject({ recurring: true, recurrence: "weekly, every 2, until 2031-06-30" });
+      expect(event).toMatchObject({ recurring: true, recurrence: "weekly, every 2, on mo th, until 2031-06-30" });
       // Expanded by the rule: Monday and Thursday of every other week.
       const { events } = await search(adapter, { after: "2031-03-01T00:00:00Z", before: "2031-03-21T00:00:00Z" });
       expect(events.map((e) => e.local_start)).toEqual(["2031-03-03T10:00:00", "2031-03-06T10:00:00", "2031-03-17T10:00:00", "2031-03-20T10:00:00"]);
