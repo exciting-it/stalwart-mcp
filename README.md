@@ -611,11 +611,18 @@ production a request under a host other than `PUBLIC_ORIGIN` answers 404.
   `read_thread` lists it. The server cannot filter this way, so with the filter one call looks
   through at most 300 of the other filters' results (three requests of 100) and answers where to
   go on: a page can hold fewer results than `limit`, even none, while `next_offset` is set.
-- `respond_to_event` answers an invitation that is in the calendar. Stalwart puts an incoming
-  invitation there on its own only when the sender is a local account or is in the recipient's
-  address book, unless the server-wide setting `autoAddInvitations` (Settings > Calendar &
-  Contacts > Scheduling, off by default) is on. Otherwise the invitation stays a mail and there
-  is no event to answer.
+- `respond_to_event` answers an invitation that is in the calendar; an invitation that stayed a
+  mail has no event to answer. Stalwart (1.2.1, read in its source) puts an incoming invitation
+  into the calendar only when it has flagged the message itself as authenticated: sent by an
+  account signed in on this server, or DMARC pass in Stalwart's own check. On top of that the
+  sender must be a local account or in the recipient's address book, unless the server-wide
+  setting `autoAddInvitations` (Settings > Calendar & Contacts > Scheduling, off by default) is
+  on. On a server that sits behind a mail gateway and leaves the DMARC check to it (Stalwart's
+  own verification disabled), no invitation from outside ever reaches a calendar, whatever
+  `autoAddInvitations` says: only invitations between accounts of the server can be answered.
+  Switching Stalwart's own DMARC verification on (relaxed) helps only for mail whose DKIM
+  signature survives the gateway; in a live check an ordinary mail did, a Google Calendar
+  invitation did not.
 - The tool-call limit counts per clock minute, not a sliding minute: up to 120 calls can land
   within a few seconds around a minute boundary.
 - `/token` and `/register` are limited per source address. AI vendors call them from shared
