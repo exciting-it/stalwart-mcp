@@ -262,7 +262,10 @@ and is not named on the approval page.
   own. All-day events carry `all_day: true`. The recurrence summary of `read_event` is built from
   the first rule's own fields only (for example `weekly, every 2, on mo th, until 2027-01-01`,
   with `2tu` for the second Tuesday and `-1fr` for the last Friday of the month or year); the tool
-  does not expand rules itself, the server does (`expandRecurrences`).
+  does not expand rules itself, the server does (`expandRecurrences`). The server shows one
+  occurrence of a series without its rule and names the series in `baseEventId`; `read_event`
+  then reads the rule from that series with a second request, so an occurrence found with
+  `search_events` carries the rule of its series too (no rule when the series is gone by then).
 
 ### Branding
 
@@ -343,9 +346,11 @@ same assumptions as the code):
   occurrence, and that the occurrence ids contain only letters, digits, `-` and `_` (the tools
   refuse other ids as input, and an id that fails this makes the search answer a fixed error).
 - [ ] `CalendarEvent/get` returns `utcStart` and `utcEnd` when asked for, and `read_event` on an
-  occurrence id returns that occurrence (own `start`, `recurrenceId`, no rules). Asking for
-  `utcStart` together with `recurrenceOverrides` is refused by the server, which is why the
-  connector never asks for `recurrenceOverrides`.
+  occurrence id returns that occurrence (own `start`, `recurrenceId`, no rules) and, when asked
+  for, `baseEventId` with the id of its series (null for a stored event), so `read_event` shows
+  the rule of the series for an occurrence. Asking for `utcStart` together with
+  `recurrenceOverrides` is refused by the server, which is why the connector never asks for
+  `recurrenceOverrides`.
 - [ ] Events in a time zone with a daylight-saving change, all-day events (`showWithoutTime`),
   and events spanning midnight: `start`, `end` and the overlap with the window are right.
 - [ ] `ContactCard/query` accepts the filter keys `text`, `name`, `email`, `phone`,

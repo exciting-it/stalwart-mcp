@@ -235,7 +235,10 @@ like mail: reading, creating, changing and deleting.
   condition holding both `after` and `before`) and computes `utcStart` and `utcEnd`, which become
   `start` and `end`; the event's own `start` and `timeZone` are `local_start` and `time_zone`.
   The connector never asks for `recurrenceOverrides`, because the server refuses it together
-  with `utcStart`.
+  with `utcStart`. An occurrence comes without its rule; `read_event` asks for `baseEventId`
+  (server-set, the series of an occurrence, null for a stored event) and reads the rule from
+  that series in a second request. The id comes from the server's answer for this account,
+  never from the input.
 - **Invitations are sends.** An event write that makes the mail server notify people is treated
   like `send_mail`, because the server then sends mail to third parties on the user's behalf.
   JMAP has one switch per `CalendarEvent/set` request, `sendSchedulingMessages`; the connector
@@ -303,8 +306,8 @@ like mail: reading, creating, changing and deleting.
   reading of the JMAP Contacts (RFC 9610) and the JMAP Calendars draft as the code, so they
   cannot show that Stalwart agrees. The unknowns are listed as live checks in the README: the
   draft revision, the capability names and `primaryAccounts` keys, `utcStart` / `utcEnd`,
-  `expandRecurrences`, the `inCalendar` key, the format of occurrence ids, how the string
-  filters of `ContactCard/query` match, the two scope names, that a session omits the
+  `expandRecurrences`, the `inCalendar` key, the format of occurrence ids, `baseEventId`, how
+  the string filters of `ContactCard/query` match, the two scope names, that a session omits the
   capability of an area whose scope the token lacks, and for writing: that invitations, updates
   and cancellations really go out (and not for past events), the property names, recurrence
   expansion, deleting an occurrence, and what the server does when it cannot send.

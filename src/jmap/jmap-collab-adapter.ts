@@ -47,8 +47,10 @@ import {
   eventFilter,
   EVENT_AUDIENCE_PROPERTIES,
   EVENT_DETAIL_PROPERTIES,
+  EVENT_RULE_PROPERTIES,
   EVENT_SUMMARY_REQUEST,
   EVENT_TIME_ZONE,
+  type CalendarEventObject,
   JmapAddressBook,
   JmapCalendar,
   JmapCalendarEvent,
@@ -58,6 +60,7 @@ import {
   namesOwner,
   newCalendarEvent,
   newContactCard,
+  seriesIdOf,
   toCalendarInfo,
   toContactDetail,
   toContactSummary,
@@ -275,7 +278,22 @@ export class JmapCollabAdapter implements CollabUpstream {
     );
     const event = list.find((e) => e.id === input.event_id);
     if (!event || notFound.includes(input.event_id)) throw new MailError("not_found");
-    return { event: toEventDetail(event) };
+    return { event: toEventDetail(event, await this.#seriesOf(event)) };
+  }
+
+  /**
+   * The series an occurrence belongs to, read for its rule: the server shows one occurrence
+   * without it. The id comes from the server's own answer for this account, never from the
+   * input. Null for a stored event, and when the series is gone by now.
+   */
+  async #seriesOf(event: CalendarEventObject): Promise<CalendarEventObject | null> {
+    const seriesId = seriesIdOf(event);
+    if (seriesId === null) return null;
+    const responses = await this.#call("calendars", [
+      ["CalendarEvent/get", { ids: [seriesId], properties: EVENT_RULE_PROPERTIES }, "b"],
+    ]);
+    const { list } = getResult(JmapCalendarEvent, this.#result(responses, "b", "CalendarEvent/get"));
+    return list.find((e) => e.id === seriesId) ?? null;
   }
 
   async createContact(input: CreateContactInputT): Promise<{ contact_id: string; address_book_id: string }> {

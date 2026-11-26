@@ -516,7 +516,7 @@ const EVENT_PROPS = [
   "id", "calendarIds", "uid", "title", "description", "descriptionContentType", "start", "timeZone", "duration",
   "showWithoutTime", "utcStart", "utcEnd", "status", "freeBusyStatus", "privacy", "recurrenceId", "recurrenceRule",
   "recurrenceRules", "recurrenceOverrides", "locations", "virtualLocations", "participants", "organizerCalendarAddress",
-  "isDraft", "created", "updated",
+  "isDraft", "created", "updated", "baseEventId",
 ] as const;
 
 /** The event or occurrence `id` names in this account, or null. */
@@ -547,11 +547,18 @@ const calendarEventGet: Handler = (args, { account, callId, out }) => {
     }
     const view = occurrenceView(found.event, found.occurrence);
     const begin = localToUtc(view.start, zoneOf(view));
-    const full: Args = { ...structuredClone(view), utcStart: formatUtc(begin), utcEnd: formatUtc(endUtc(view.start, zoneOf(view), view.duration)) };
-    // `utcStart` and `utcEnd` are only returned when asked for.
+    const full: Args = {
+      ...structuredClone(view),
+      utcStart: formatUtc(begin),
+      utcEnd: formatUtc(endUtc(view.start, zoneOf(view), view.duration)),
+      // As the server: the series an occurrence belongs to, null for a stored event.
+      baseEventId: view === found.event ? null : found.event.id,
+    };
+    // `utcStart`, `utcEnd` and `baseEventId` are only returned when asked for.
     if (args.properties === null || args.properties === undefined) {
       delete full.utcStart;
       delete full.utcEnd;
+      delete full.baseEventId;
       list.push(full);
     } else {
       list.push(pick(full, args.properties, EVENT_PROPS));
@@ -746,7 +753,7 @@ const PARTICIPANTS_MAX = 20;
 const UNREACHABLE = /@unreachable\.example$/i;
 
 /** Properties the server computes; a client must not send them. */
-const EVENT_SERVER_SET = new Set(["id", "utcStart", "utcEnd", "isOrigin", "created", "updated"]);
+const EVENT_SERVER_SET = new Set(["id", "baseEventId", "utcStart", "utcEnd", "isOrigin", "created", "updated"]);
 
 const stripMailto = (v: unknown): string | null =>
   typeof v === "string" && /^mailto:/i.test(v) ? v.slice("mailto:".length).toLowerCase() : null;

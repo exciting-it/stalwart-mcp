@@ -750,15 +750,20 @@ describe("readEvent", () => {
 
     const [request] = jmapRequests();
     expect(request!.body.using).toEqual([CORE, CALENDARS]);
-    const properties = [...EVENT_SUMMARY_REQUEST, "description", "descriptionContentType", "virtualLocations", "participants", "freeBusyStatus", "privacy"];
+    const properties = [
+      ...EVENT_SUMMARY_REQUEST, "description", "descriptionContentType", "virtualLocations", "participants", "freeBusyStatus", "privacy",
+      "baseEventId",
+    ];
     expect(calls(request!)).toEqual([["CalendarEvent/get", { ids: [id], properties, timeZone: "Etc/UTC", accountId }, "g"]]);
+    // A stored event carries its own rule: nothing else is asked.
+    expect(jmapRequests()).toHaveLength(1);
     // utcStart together with recurrenceOverrides would be refused by the server.
     expect(properties).toContain("utcStart");
     expect(properties).not.toContain("recurrenceOverrides");
   });
 
-  it("reads one occurrence of a recurring event by its id", async () => {
-    fake.addMailbox(A);
+  it("reads one occurrence of a recurring event by its id, with the rule of its series", async () => {
+    const { accountId } = fake.addMailbox(A);
     const series = fake.addEvent(A, {
       title: "Standup",
       start: "2026-11-01T09:00:00",
@@ -775,9 +780,47 @@ describe("readEvent", () => {
       start: "2026-11-03T09:00:00Z",
       local_start: "2026-11-03T09:00:00",
       recurring: true,
-      recurrence: null,
+      recurrence: "daily, 5 times",
     });
+    // The server shows an occurrence without its rule, so the rule is read from the series it names.
+    const [, first, second] = jmapRequests();
+    expect(calls(first!)[0]![1]).toMatchObject({ ids: [occurrenceId] });
+    expect(calls(second!)).toEqual([
+      ["CalendarEvent/get", { ids: [series], properties: ["id", "recurrenceRule", "recurrenceRules"], accountId }, "b"],
+    ]);
+    expect(jmapRequests()).toHaveLength(3);
     await expectMailError(adapter.readEvent({ event_id: `${series}-20261109T090000` }), "not_found");
+  });
+
+  it("an occurrence whose series cannot be read any more has no rule; a server that names an event as its own series is not asked twice", async () => {
+    fake.addMailbox(A);
+    const series = fake.addEvent(A, { start: "2026-11-01T09:00:00", recurrenceRule: { frequency: "weekly", byDay: [{ day: "su" }] } }).id;
+    const single = fake.addEvent(A, { start: "2026-11-01T09:00:00" }).id;
+    const adapter = await adapterFor(A);
+    type Body = { methodResponses?: [string, { list?: Record<string, unknown>[]; notFound?: string[] }, string][] };
+    const answering = (change: (responses: NonNullable<Body["methodResponses"]>) => void) =>
+      vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+        const response = await fake.fetch(input, init);
+        const body = (await response.clone().json()) as Body;
+        if (body.methodResponses) change(body.methodResponses);
+        return Response.json(body);
+      });
+    // The series is deleted between the two reads.
+    answering((responses) => {
+      for (const [, args, callId] of responses) {
+        if (callId === "b") Object.assign(args, { list: [], notFound: [series] });
+      }
+    });
+    const occurrence = await adapter.readEvent({ event_id: `${series}-20261108T090000` });
+    expect(occurrence.event).toMatchObject({ recurring: true, recurrence: null });
+    // Stalwart before 0.16.22 answered `baseEventId` with the event's own id.
+    answering((responses) => {
+      for (const [, args] of responses) for (const e of args.list ?? []) e.baseEventId = e.id;
+    });
+    const before = jmapRequests().length;
+    expect((await adapter.readEvent({ event_id: single })).event.recurrence).toBeNull();
+    expect((await adapter.readEvent({ event_id: series })).event.recurrence).toBe("weekly, on su");
+    expect(jmapRequests().length).toBe(before + 2);
   });
 
   it("describes rules from their own fields only", async () => {

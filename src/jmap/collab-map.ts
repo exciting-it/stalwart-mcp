@@ -366,6 +366,8 @@ export const JmapCalendarEvent = z.object({
   freeBusyStatus: z.string().nullish(),
   privacy: z.string().nullish(),
   recurrenceId: z.string().nullish(),
+  /** Server-set: the series an occurrence belongs to; null (or, on older servers, its own id) for a stored event. */
+  baseEventId: MailIdSchema.nullish(),
   recurrenceRule: Rule.nullish(),
   /** The older JSCalendar name (an array); Stalwart uses `recurrenceRule`. Read as a fallback only. */
   recurrenceRules: z.array(Rule).nullish(),
@@ -384,7 +386,7 @@ export const JmapCalendarEvent = z.object({
   organizerCalendarAddress: z.string().nullish(),
 });
 
-type CalendarEventObject = z.infer<typeof JmapCalendarEvent>;
+export type CalendarEventObject = z.infer<typeof JmapCalendarEvent>;
 
 export const CALENDAR_PROPERTIES = ["id", "name", "description", "color", "isDefault", "timeZone", "myRights"] as const;
 
@@ -397,8 +399,10 @@ const EVENT_SUMMARY_PROPERTIES = [
 export const EVENT_SUMMARY_REQUEST = EVENT_SUMMARY_PROPERTIES;
 export const EVENT_DETAIL_PROPERTIES = [
   ...EVENT_SUMMARY_PROPERTIES, "description", "descriptionContentType", "virtualLocations", "participants",
-  "freeBusyStatus", "privacy",
+  "freeBusyStatus", "privacy", "baseEventId",
 ] as const;
+/** What is read of the series of an occurrence: its rule. */
+export const EVENT_RULE_PROPERTIES = ["id", "recurrenceRule", "recurrenceRules"] as const;
 
 /** The zone the server computes `utcStart` / `utcEnd` for and reads the query's bounds in. */
 export const EVENT_TIME_ZONE = "Etc/UTC";
@@ -433,6 +437,15 @@ const ruleOf = (e: CalendarEventObject) => e.recurrenceRule ?? (e.recurrenceRule
 
 function isRecurring(e: CalendarEventObject): boolean {
   return e.recurrenceId != null || ruleOf(e) !== null;
+}
+
+/**
+ * The id of the series `e` is one occurrence of, when its rule has to be read from there: the
+ * server shows an occurrence without the rule and names its series in `baseEventId`.
+ */
+export function seriesIdOf(e: CalendarEventObject): string | null {
+  const base = e.baseEventId ?? null;
+  return base === null || base === e.id || ruleOf(e) !== null ? null : base;
 }
 
 /** The ids of a JMAP id map, as far as they are well-formed ids: nothing else is passed on. */
@@ -532,7 +545,8 @@ function onlineMeetings(e: CalendarEventObject): string[] {
   return out;
 }
 
-export function toEventDetail(e: CalendarEventObject): EventDetail {
+/** `series`: the series `e` is an occurrence of, when it was read; its rule describes the occurrence too. */
+export function toEventDetail(e: CalendarEventObject, series: CalendarEventObject | null = null): EventDetail {
   const raw = e.description ?? "";
   const description = cleanText(
     e.descriptionContentType?.toLowerCase().startsWith("text/html") === true ? htmlToText(raw) : raw,
@@ -552,7 +566,7 @@ export function toEventDetail(e: CalendarEventObject): EventDetail {
       status: optionalLine(p.participationStatus),
     })),
     participants_omitted: Math.max(0, people.length - COLLAB_LIMITS.participantsMax),
-    recurrence: recurrenceSummary(e),
+    recurrence: recurrenceSummary(e) ?? (series === null ? null : recurrenceSummary(series)),
     free_busy: optionalLine(e.freeBusyStatus),
     privacy: optionalLine(e.privacy),
   };
