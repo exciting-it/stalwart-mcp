@@ -26,12 +26,13 @@ Why it is built this way, and what its security rests on: [docs/design.md](docs/
 |---|---|
 | `list_mailboxes` | Folders with role and message counts, and the address of the connected mailbox |
 | `search_mail` | Search by text, sender, recipient, subject, date, folder, unread, attachment |
-| `read_thread` | A whole conversation as plain text |
+| `read_thread` | A whole conversation as plain text, with each attachment's name, size, type and id |
 | `create_draft` | Save a new mail or a reply in Drafts, plain text or with sanitized HTML |
 | `send_mail` | Send a new mail or a reply from the mailbox's own address, plain text or with sanitized HTML |
 | `move_mail` | Move messages into another folder of the mailbox |
 | `delete_mail` | Move messages to the Trash folder |
 | `mark_mail` | Mark messages read or unread, flagged or not; nothing else of a message changes |
+| `read_attachment` | One attachment of a message, by the ids `read_thread` lists: text files as text (paged), images as images, other files as an embedded file the AI tool reads itself; at most 3 MB |
 | `search_contacts` | Search the address book by text, name, email, phone, organization or address book (needs `contacts`) |
 | `read_contact` | One contact: names, emails, phones, organizations, addresses, birthday, notes (needs `contacts`) |
 | `list_calendars` | The mailbox's calendars with id, name and whether they are writable (needs `calendars`) |
@@ -65,8 +66,20 @@ message goes out as `multipart/alternative` with a `text/plain` and a `text/html
 `body` the plain part is the text of the sanitized HTML. HTML with nothing visible left is
 refused when no `body` is given, and left out when one is.
 
+`read_attachment` hands one attachment to the AI tool; it does not interpret files. What it is
+delivered as is decided from the bytes, not from the type the sender declared: PNG, JPEG, GIF
+and WebP (by their signatures) come back as an MCP `image` block; a text file (`text/*`, JSON,
+XML, `+json`, `+xml`) that decodes in its declared charset (UTF-8, US-ASCII, ISO-8859-1,
+windows-1252, UTF-16LE or UTF-16BE; UTF-8 when none or another is declared) comes back as text,
+HTML reduced to plain text, cleaned like mail bodies and paged with `offset` and `max_chars`;
+everything else (PDF, Office files, archives, text that does not decode) comes back as an
+embedded `resource` with the bytes as `blob`, of type `application/pdf` when the bytes start
+with `%PDF-`. Every result starts with a text block that stands on its own (name, type, size,
+kind and, for text, the text itself); the image or file follows it. The download, the decoding
+and the base64 happen in the mailbox's vault, not in the Worker that answers the request.
+
 It cannot remove mail for good, set marks other than read and flagged, manage folders, touch
-filters, or send from another address. Deleting always means moving to Trash, and `move_mail`
+filters, send attachments, convert PDF or Office files into text, or send from another address. Deleting always means moving to Trash, and `move_mail`
 brings a message back. The connector never empties the Trash; whether the mail server does is
 its own setting (see Known limits).
 
@@ -115,6 +128,9 @@ Constants live in `MAIL_LIMITS` in `src/mail.ts` and, for contacts and calendars
 | Emails, phones, addresses, titles, nicknames, organizations in a contact | 20 each |
 | Locations, online meeting links, participants of an event | 5, 3 (http and https only), 50 (the rest counted in `participants_omitted`) |
 | Body text returned per message | 20,000 characters, then cut with a marker |
+| Attachment delivered by `read_attachment` | 3,000,000 bytes, checked by the size the server reports before the download and again while reading it (`too_large`) |
+| Text of one text attachment | the first 500,000 characters, then `text_truncated` |
+| Page of a text attachment (`max_chars`) | at most 50,000 characters (default 20,000); `offset` 0 to 10,000,000 |
 | Body text accepted when writing | 100,000 characters |
 | HTML accepted when writing (before sanitizing) | 200,000 characters |
 | Worker access token lifetime | 1 hour |
@@ -361,6 +377,15 @@ These need the OAuth client and a test mailbox on your server:
   Sent holds the same two parts; a draft made with `html` shows the formatting in a mail client.
 - [ ] `move_mail` and `delete_mail` against the real server: a moved message is in the target folder only; a foreign or malformed id is reported as not found.
 - [ ] `mark_mail` against the real server: `Email/set` accepts the patch paths `keywords/$seen` and `keywords/$flagged` with `true` and `null`, leaves the other keywords (`$answered`, `$draft`) as they were, and answers a foreign id with `notUpdated` `notFound`; `search_mail` and other mail clients (IMAP `\Seen`, `\Flagged`) show the new state.
+- [ ] `read_attachment` against the real server: the session's `downloadUrl` is on the server's
+  origin and names `{accountId}`, `{blobId}`, `{name}` and `{type}`; `Email/get` with
+  `bodyProperties` lists each attachment with `partId` and `blobId` (and the `partId` matches
+  `^[A-Za-z0-9._-]{1,64}$`, else `read_thread` shows the id as null); the download answers the
+  bytes with the bearer token and refuses another account's id in the path.
+- [ ] Through Claude (claude.ai and Claude Code): a text file, an image and a PDF from a real mail,
+  each read with `read_attachment`; whether the model sees the image and can read the PDF.
+- [ ] How large an attachment each client you use accepts in a tool result (an image block, an
+  embedded file of close to 3 MB, which is about 4 MB as base64).
 - [ ] Whether the server empties Trash on its own (Stalwart's auto-expunge), and whether that is what you want now that an AI tool can move mail there.
 - [ ] Whether Stalwart ever reuses an account id (a reused id would meet the old vault).
 - [ ] Remove the application and reconnect with two AI tools: do the earlier tools regain access (see "Known limits")?
@@ -513,6 +538,13 @@ production a request under a host other than `PUBLIC_ORIGIN` answers 404.
   the capability for that token or does not implement the method (for example another draft of
   JMAP for Calendars). The connector cannot tell these apart from a connection made while the
   area was switched off.
+- `read_attachment` does not convert files. A PDF, an Office file or an archive reaches the AI tool
+  as an embedded file, and whether it can read it is the AI tool's matter. What clients do with
+  such a block varies: Claude Code saves it to a file, claude.ai rejected embedded files in tool
+  results for some time, and n8n's agent passes binary blocks on as text (the JSON of the block).
+  The text block that leads every result names the attachment either way. Images are delivered
+  as images only for PNG, JPEG, GIF and WebP; other image types are files. ISO-8859-1 text is
+  decoded as windows-1252, as browsers do.
 - The tool-call limit counts per clock minute, not a sliding minute: up to 120 calls can land
   within a few seconds around a minute boundary.
 - `/token` and `/register` are limited per source address. AI vendors call them from shared

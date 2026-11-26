@@ -28,6 +28,7 @@ import {
   type MarkMailInputT,
   type MoveMailRequestT,
   type OutgoingMessage,
+  type ReadAttachmentInputT,
   type ReadThreadInputT,
   type SearchMailInputT,
 } from "../mail";
@@ -75,6 +76,10 @@ export class VaultMailbox implements Mailbox {
 
   markMail(input: MarkMailInputT) {
     return this.#call<Awaited<ReturnType<MailboxAdapter["markMail"]>>>((v, id, email) => v.markMail(id, email, input));
+  }
+
+  readAttachment(input: ReadAttachmentInputT) {
+    return this.#call<Awaited<ReturnType<MailboxAdapter["readAttachment"]>>>((v, id, email) => v.readAttachment(id, email, input));
   }
 
   sendMail(input: OutgoingMessage) {

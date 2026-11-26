@@ -53,7 +53,11 @@ export interface AddMessageOptions {
   unread?: boolean; // default true (no $seen)
   flagged?: boolean;
   keywords?: string[];
-  attachments?: { name: string | null; size: number; type: string }[];
+  /**
+   * `content` (bytes, or a string written as UTF-8) is what the download serves, zero bytes of
+   * `size` when not given; `size` is what the server reports, by default the content's length.
+   */
+  attachments?: { name: string | null; type: string; size?: number; content?: Uint8Array | string; charset?: string | null; partId?: string }[];
   messageId?: string;
   inReplyTo?: string[];
   references?: string[];
@@ -308,7 +312,10 @@ export function createFakeStalwart(): FakeStalwart {
       text,
       html,
       preview: o.preview ?? plain.replace(/\s+/g, " ").trim().slice(0, 256),
-      attachments: (o.attachments ?? []).map((a) => ({ ...a, blobId: nextId("bl") })),
+      attachments: (o.attachments ?? []).map(({ content, size, ...a }) => {
+        const bytes = typeof content === "string" ? new TextEncoder().encode(content) : (content ?? new Uint8Array(size ?? 0));
+        return { ...a, size: size ?? bytes.length, content: bytes, blobId: nextId("bl") };
+      }),
     };
     account.emails.set(id, message);
     return { id, threadId: message.threadId, folderId: folder.id };
@@ -461,6 +468,23 @@ export function createFakeStalwart(): FakeStalwart {
     };
   }
 
+  /**
+   * RFC 8620 §6.2: the blob `blobId` of the account in the path, with `accept` as its Content-Type.
+   * The token's own account only; a blob the account does not hold is 404.
+   */
+  function downloadEndpoint(req: Request, url: URL, match: RegExpExecArray): Response {
+    const bearer = bearerAccount(req);
+    if (!bearer) return unauthorized();
+    const [accountId, blobId] = [match[1]!, match[2]!].map(decodeURIComponent);
+    if (accountId !== bearer.account.accountId) return new Response("fake-stalwart: forbidden", { status: 403 });
+    const blob = [...bearer.account.emails.values()].flatMap((e) => e.attachments).find((a) => a.blobId === blobId);
+    if (!blob) return new Response("fake-stalwart: blob not found", { status: 404 });
+    return new Response(blob.content.slice(), {
+      status: 200,
+      headers: { "Content-Type": url.searchParams.get("accept") ?? "application/octet-stream" },
+    });
+  }
+
   function unauthorized(): Response {
     return new Response("fake-stalwart: unauthorized", {
       status: 401,
@@ -512,6 +536,8 @@ export function createFakeStalwart(): FakeStalwart {
       if (submitFailure === "accepted-then-empty") return json({ methodResponses: [], sessionState: "fake-session-1" });
       return json(result.body, result.status);
     }
+    const download = /^\/jmap\/download\/([^/]+)\/([^/]+)\/([^/]+)$/.exec(url.pathname);
+    if (download && req.method === "GET") return downloadEndpoint(req, url, download);
     if (url.pathname === "/auth/token" && req.method === "POST") {
       return tokenEndpoint(req, new URLSearchParams(text));
     }

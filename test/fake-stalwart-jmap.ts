@@ -247,6 +247,7 @@ const EMAIL_PROPS = [
   "inReplyTo", "references", "from", "to", "cc", "bcc", "replyTo", "subject", "sentAt",
   "hasAttachment", "preview", "bodyValues", "textBody", "htmlBody", "attachments",
 ] as const;
+const PART_PROPS = ["partId", "blobId", "size", "name", "type", "charset", "disposition"];
 const DEFAULT_EMAIL_PROPS = EMAIL_PROPS.filter((p) => p !== "bodyValues" && p !== "textBody" && p !== "htmlBody" && p !== "attachments");
 
 function truncateUtf8(value: string, maxBytes: number): { value: string; truncated: boolean } {
@@ -266,11 +267,22 @@ function truncateUtf8(value: string, maxBytes: number): { value: string; truncat
 
 function emailObject(e: FakeEmail, args: Args): Args {
   const utf8 = (s: string | null) => new TextEncoder().encode(s ?? "").length;
-  const part = (partId: string, type: string, size: number, blobId: string, name: string | null = null, disposition: string | null = null) =>
-    ({ partId, blobId, size, name, type, charset: type.startsWith("text/") ? "utf-8" : null, disposition });
+  const part = (
+    partId: string,
+    type: string,
+    size: number,
+    blobId: string,
+    name: string | null = null,
+    disposition: string | null = null,
+    charset: string | null = type.startsWith("text/") ? "utf-8" : null,
+  ) => ({ partId, blobId, size, name, type, charset, disposition });
   const textPart = e.text !== null ? part("1", "text/plain", utf8(e.text), `${e.blobId}-1`) : null;
   const htmlPart = e.html !== null ? part("2", "text/html", utf8(e.html), `${e.blobId}-2`) : null;
-  const attachments = e.attachments.map((a, i) => part(String(i + 3), a.type, a.size, a.blobId, a.name, "attachment"));
+  const attachments = e.attachments.map((a, i) =>
+    a.charset === undefined
+      ? part(a.partId ?? String(i + 3), a.type, a.size, a.blobId, a.name, "attachment")
+      : part(a.partId ?? String(i + 3), a.type, a.size, a.blobId, a.name, "attachment", a.charset),
+  );
   // RFC 8621 §4.1.4: each list falls back to the other alternative when its own type is absent.
   const textBody = textPart ? [textPart] : htmlPart ? [htmlPart] : [];
   const htmlBody = htmlPart ? [htmlPart] : textPart ? [textPart] : [];
@@ -287,6 +299,16 @@ function emailObject(e: FakeEmail, args: Args): Args {
   };
   if (args.fetchTextBodyValues === true || args.fetchAllBodyValues === true) addValues(textBody);
   if (args.fetchHTMLBodyValues === true || args.fetchAllBodyValues === true) addValues(htmlBody);
+
+  // `bodyProperties` (RFC 8621 §4.2): the properties of each body part; all of them without it.
+  const partProps = (parts: Args[]): Args[] => {
+    const wanted = args.bodyProperties;
+    if (wanted === undefined || wanted === null) return parts;
+    if (!Array.isArray(wanted) || wanted.some((p) => typeof p !== "string" || !PART_PROPS.includes(p))) {
+      throw new MethodError("invalidArguments");
+    }
+    return parts.map((p) => Object.fromEntries((wanted as string[]).map((k) => [k, p[k] ?? null])));
+  };
 
   const full: Args = {
     id: e.id,
@@ -309,9 +331,9 @@ function emailObject(e: FakeEmail, args: Args): Args {
     hasAttachment: e.attachments.length > 0,
     preview: e.preview,
     bodyValues,
-    textBody,
-    htmlBody,
-    attachments,
+    textBody: partProps(textBody),
+    htmlBody: partProps(htmlBody),
+    attachments: partProps(attachments),
   };
   return clone(pick(full, args.properties ?? DEFAULT_EMAIL_PROPS, EMAIL_PROPS));
 }

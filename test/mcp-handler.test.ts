@@ -91,9 +91,9 @@ const INVITATIONS =
 const AREA_SENTENCE = `${THIRD_PARTIES("contacts and calendar entries")} Deleting a contact or an event removes it for good.${INVITATIONS}${ASK}`;
 
 describe("MCP endpoint", () => {
-  it("lists the eight mail tools with the pinned annotations, then the tools of the areas", async () => {
+  it("lists the nine mail tools with the pinned annotations, then the tools of the areas", async () => {
     const byName = await listTools();
-    expect(Object.keys(byName).slice(0, 8)).toEqual([
+    expect(Object.keys(byName).slice(0, 9)).toEqual([
       "list_mailboxes",
       "search_mail",
       "read_thread",
@@ -102,8 +102,9 @@ describe("MCP endpoint", () => {
       "move_mail",
       "delete_mail",
       "mark_mail",
+      "read_attachment",
     ]);
-    expect(Object.keys(byName).slice(8)).toEqual([
+    expect(Object.keys(byName).slice(9)).toEqual([
       "search_contacts",
       "read_contact",
       "list_calendars",
@@ -146,6 +147,9 @@ describe("MCP endpoint", () => {
     expect(byName.list_mailboxes!.annotations).toEqual(read);
     expect(byName.search_mail!.annotations).toEqual(read);
     expect(byName.read_thread!.annotations).toEqual(read);
+    expect(byName.read_attachment!.annotations).toEqual(read);
+    expect(Object.keys(byName.read_attachment!.inputSchema.properties ?? {})).toEqual(["message_id", "attachment_id", "offset", "max_chars"]);
+    expect(byName.read_attachment!.inputSchema.required).toEqual(["message_id", "attachment_id"]);
     expect(byName.create_draft!.annotations).toEqual({
       readOnlyHint: false,
       destructiveHint: false,
@@ -265,6 +269,30 @@ describe("MCP endpoint", () => {
     expect(JSON.parse(r.content[0]!.text)).toEqual(r.structuredContent);
     expect(store.calls).toEqual([{ accountId: store.a.accountId, method: "listMailboxes" }]);
     expect(audits).toEqual([expect.objectContaining({ tool: "list_mailboxes", outcome: "ok", clientId: "client-1" })]);
+  });
+
+  it("delivers an attachment over JSON-RPC: the text block, then the image or the embedded file", async () => {
+    type Out = { structuredContent: Record<string, unknown>; content: Record<string, unknown>[] };
+    const call = (attachment_id: string) =>
+      result<Out>("tools/call", { name: "read_attachment", arguments: { message_id: store.a.messageId, attachment_id } });
+    const text = await call("1");
+    expect(text.content).toEqual([{ type: "text", text: JSON.stringify(text.structuredContent) }]);
+    const image = await call("2");
+    expect(image.content).toEqual([
+      { type: "text", text: JSON.stringify(image.structuredContent) },
+      { type: "image", data: "iVBORw0KGgo=", mimeType: "image/png" },
+    ]);
+    const file = await call("3");
+    expect(file.content).toEqual([
+      { type: "text", text: JSON.stringify(file.structuredContent) },
+      { type: "resource", resource: { uri: `attachment:///${store.a.messageId}/3`, mimeType: "application/pdf", blob: "JVBERi0xLjc=" } },
+    ]);
+    expect(file.structuredContent).not.toHaveProperty("data");
+    expect(audits.map((a) => [a.tool, a.outcome, a.resultCount])).toEqual([
+      ["read_attachment", "ok", 1],
+      ["read_attachment", "ok", 1],
+      ["read_attachment", "ok", 1],
+    ]);
   });
 
   it("reconnect_required from the mailbox ends the calling grant; other errors do not", async () => {

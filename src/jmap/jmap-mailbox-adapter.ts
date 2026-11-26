@@ -3,11 +3,14 @@
  * token and the account id from the OAuth grant; every method call carries that account id,
  * so the adapter cannot act on another account. It never destroys anything and never calls a
  * `/set` method other than `Email/set` create/update and `EmailSubmission/set` create. Deleting
- * a message means moving it to the Trash folder.
+ * a message means moving it to the Trash folder. It downloads only attachments of this account,
+ * by a blob id the server named for them, through the session's download template.
  */
 import {
+  type AttachmentDelivery,
   MAIL_LIMITS,
   MailError,
+  MailIdSchema,
   type MailboxAdapter,
   type MailFolder,
   type MailSummary,
@@ -16,15 +19,20 @@ import {
   type MoveMailOutcome,
   type MoveMailRequestT,
   type OutgoingMessage,
+  type ReadAttachmentInputT,
   type ReadThreadInputT,
   type SearchMailInputT,
   type ThreadMessage,
 } from "../mail";
 import { z } from "zod";
-import { jmapCall, methodResult, type JmapInvocation, type JmapSession } from "./jmap-client";
+import { attachmentContent } from "../content/attachment";
+import { downloadBlob, jmapCall, methodResult, type JmapInvocation, type JmapSession, usableDownloadUrl } from "./jmap-client";
 import {
+  ATTACHMENT_PART_PROPERTIES,
+  attachmentName,
   createdId,
   getResult,
+  JmapEmailAttachments,
   JmapEmailFull,
   JmapEmailSummary,
   JmapIdentity,
@@ -178,6 +186,34 @@ export class JmapMailboxAdapter implements MailboxAdapter {
       thread_id: thread.id,
       messages,
       omitted_messages: thread.emailIds.length - newest.length,
+    };
+  }
+
+  /**
+   * One attachment of one message of this account. The message's attachments are looked up first:
+   * a message that is not this account's, or that has no attachment with that part id, is
+   * `not_found`. The blob id comes only from that answer, and the size the server reports is
+   * checked before the download (and again while reading it). Then the bytes decide what is
+   * delivered (`attachmentContent`).
+   */
+  async readAttachment(input: ReadAttachmentInputT): Promise<AttachmentDelivery> {
+    // Checked before anything is asked, so a session that cannot download costs no request.
+    if (usableDownloadUrl(this.#session.downloadUrl) === null) throw new MailError("mailbox_unsupported");
+    const answer = await this.#call([
+      ["Email/get", { ids: [input.message_id], properties: ["id", "attachments"], bodyProperties: ATTACHMENT_PART_PROPERTIES }, "a"],
+    ]);
+    const { list } = getResult(JmapEmailAttachments, methodResult(answer, "a", "Email/get", { idsFromInput: true }));
+    const part = list.find((e) => e.id === input.message_id)?.attachments?.find((a) => a.partId === input.attachment_id);
+    if (!part) throw new MailError("not_found");
+    if (!MailIdSchema.safeParse(part.blobId).success) throw new MailError("upstream_rejected");
+    if (part.size > MAIL_LIMITS.attachmentBytes) throw new MailError("too_large");
+
+    const bytes = await downloadBlob(this.#session, this.#accessToken, this.#accountId, part.blobId!, MAIL_LIMITS.attachmentBytes);
+    return {
+      message_id: input.message_id,
+      attachment_id: input.attachment_id,
+      name: attachmentName(part.name),
+      ...attachmentContent(bytes, { type: part.type, charset: part.charset ?? null }, input.offset, input.max_chars),
     };
   }
 

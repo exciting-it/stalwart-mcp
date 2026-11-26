@@ -453,6 +453,39 @@ describe("admission", () => {
     expect(fake.email(A, m.id)!.keywords).toEqual({ $seen: true });
   });
 
+  it("readAttachment is admitted like every operation, and the work on the bytes happens here", async () => {
+    const { stub, accountId, box } = await signIn(A);
+    const m = fake.addMessage(A, { attachments: [{ name: "n.txt", type: "text/plain", content: "notes\u202e" }] });
+    const other = fake.addMailbox(B).accountId;
+    const bad = <T>(v: unknown) => v as T;
+    const before = fake.requests.length;
+    expect(await stub.readAttachment(other, A, { message_id: m.id, attachment_id: "3", offset: 0, max_chars: 10 })).toEqual({
+      ok: false,
+      code: "account_mismatch",
+    });
+    expect(await stub.readAttachment(accountId, A, bad({ message_id: m.id, attachment_id: "../3" }))).toEqual({ ok: false, code: "invalid_input" });
+    expect(await stub.readAttachment(accountId, A, bad({ message_id: m.id, attachment_id: "3", blob_id: "bl1" }))).toEqual({
+      ok: false,
+      code: "invalid_input",
+    });
+    expect(fake.requests).toHaveLength(before);
+
+    // The vault answers the finished delivery: decoded, cleaned and paged; defaults filled in.
+    expect(await box.readAttachment(bad({ message_id: m.id, attachment_id: "3" }))).toMatchObject({
+      kind: "text",
+      text: "notes",
+      total_chars: 5,
+      data: null,
+    });
+
+    now = Math.floor(T0 / MINUTE) * MINUTE;
+    // The delivery above was the first call of this minute.
+    for (let i = 0; i < MAIL_LIMITS.toolCallsPerMinute - 1; i++) await box.listMailboxes();
+    const counted = fake.requests.length;
+    await expectCode(box.readAttachment({ message_id: m.id, attachment_id: "3", offset: 0, max_chars: 10 }), "rate_limited");
+    expect(fake.requests).toHaveLength(counted);
+  });
+
   it("an unexpected failure becomes internal and is logged by operation name only", async () => {
     const { box } = await signIn(A);
     const log = vi.spyOn(console, "error").mockImplementation(() => {});
@@ -507,6 +540,7 @@ describe("token door", () => {
     "listMailboxes",
     "markMail",
     "moveMail",
+    "readAttachment",
     "readThread",
     "searchMail",
     "sendMail",

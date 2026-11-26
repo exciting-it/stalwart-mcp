@@ -1,9 +1,11 @@
 /**
  * JMAP objects → tool results. Upstream answers are parsed with the schemas below (anything
  * unexpected is `upstream_rejected`), and every mail-derived string leaves through `clean` or
- * `bodyText` here, so no path can skip the sanitizer.
+ * `bodyText` here, so no path can skip the sanitizer. The text of an attachment leaves through
+ * `attachmentContent` (src/content/attachment.ts), which applies the same `cleanText`.
  */
 import {
+  AttachmentIdSchema,
   MAIL_LIMITS,
   MailError,
   MailIdSchema,
@@ -22,6 +24,16 @@ const LIMITS = { subject: 998, name: 200, address: 320, type: 255, date: 64 } as
 /** Every mail-derived string except bodies goes through here. */
 export function clean(value: string, maxChars: number): string {
   return cleanText(value, maxChars).text;
+}
+
+/** An attachment's name for `read_attachment`: cleaned, one line, capped; null without one. */
+export function attachmentName(name: string | null | undefined): string | null {
+  return name == null ? null : clean(name.replace(/[\r\n\t]+/g, " "), LIMITS.name);
+}
+
+/** The id `read_attachment` takes for a part: its `partId` when that fits the id pattern, else null. */
+export function attachmentId(partId: string | null | undefined): string | null {
+  return AttachmentIdSchema.safeParse(partId).success ? (partId as string) : null;
 }
 
 // ---- upstream shapes (RFC 8621) ----
@@ -55,7 +67,12 @@ export const JmapEmailSummary = z.object({
 });
 
 const BodyPart = z.object({ partId: z.string().nullish(), type: z.string() });
-const Attachment = z.object({ name: z.string().nullish(), size: z.number(), type: z.string() });
+const Attachment = z.object({ partId: z.string().nullish(), name: z.string().nullish(), size: z.number(), type: z.string() });
+
+/** An attachment as `read_attachment` looks it up: the part properties it asks for. */
+const AttachmentPart = Attachment.extend({ blobId: z.string().nullish(), charset: z.string().nullish() });
+export const JmapEmailAttachments = z.object({ id: Id, attachments: z.array(AttachmentPart).nullish() });
+export const ATTACHMENT_PART_PROPERTIES = ["partId", "blobId", "size", "name", "type", "charset"] as const;
 
 export const JmapEmailFull = z.object({
   id: Id,
@@ -308,6 +325,7 @@ export function toThreadMessage(e: z.infer<typeof JmapEmailFull>): ThreadMessage
     body: body.text,
     body_truncated: body.truncated,
     attachments: (e.attachments ?? []).map((a) => ({
+      id: attachmentId(a.partId),
       name: a.name == null ? null : clean(a.name, LIMITS.name),
       size: a.size,
       type: clean(a.type, LIMITS.type),

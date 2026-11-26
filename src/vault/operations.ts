@@ -37,6 +37,7 @@ import {
   MailError,
   type MailErrorCode,
   type OutgoingMessage,
+  ReadAttachmentInput,
   ReadThreadInput,
   SearchMailInput,
   SendMailInput,
@@ -202,6 +203,16 @@ export class MailboxOperations {
   markMail(caller: Caller, input: unknown) {
     return this.#operation("markMail", caller, () => parse(MarkMailInput, input), (mark) =>
       this.#upstream(caller.accountId, (a) => a.markMail(mark)),
+    );
+  }
+
+  /**
+   * One attachment, downloaded and prepared here (decoding, cleaning, paging, base64), so the
+   * Worker that answers the request only passes the finished strings on.
+   */
+  readAttachment(caller: Caller, input: unknown) {
+    return this.#operation("readAttachment", caller, () => parse(ReadAttachmentInput, input), (attachment) =>
+      this.#upstream(caller.accountId, (a) => a.readAttachment(attachment)),
     );
   }
 

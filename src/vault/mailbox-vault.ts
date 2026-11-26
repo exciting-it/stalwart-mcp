@@ -14,6 +14,7 @@
 import { DurableObject } from "cloudflare:workers";
 import type { CollabRequestT, CollabValue } from "../collab";
 import {
+  type AttachmentDelivery,
   MAIL_LIMITS,
   MailError,
   type MailFolder,
@@ -23,6 +24,7 @@ import {
   type MoveMailOutcome,
   type MoveMailRequestT,
   type OutgoingMessage,
+  type ReadAttachmentInputT,
   type ReadThreadInputT,
   type SearchMailInputT,
   type ThreadMessage,
@@ -222,6 +224,10 @@ export class MailboxVault extends DurableObject<Env> {
 
   markMail(accountId: string, email: string, input: MarkMailInputT): Promise<VaultResult<MarkMailOutcome>> {
     return this.#operations.markMail({ accountId, email }, input);
+  }
+
+  readAttachment(accountId: string, email: string, input: ReadAttachmentInputT): Promise<VaultResult<AttachmentDelivery>> {
+    return this.#operations.readAttachment({ accountId, email }, input);
   }
 
   /** The read-only contacts and calendar operations; `request` is validated by the operations. */

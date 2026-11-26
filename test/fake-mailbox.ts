@@ -13,6 +13,7 @@ import type {
   UpdateContactInputT,
 } from "../src/collab";
 import {
+  type AttachmentDelivery,
   MailError,
   type MailFolder,
   type MailSummary,
@@ -202,6 +203,16 @@ function seedAccount(key: AccountKey): Account {
   };
 }
 
+/**
+ * The attachments every message of the fake has, by id, as the adapter delivers them: a text file,
+ * a PNG (its signature as base64) and a PDF ("%PDF-1.7" as base64).
+ */
+export const ATTACHMENTS: Record<string, Omit<AttachmentDelivery, "message_id" | "attachment_id">> = {
+  "1": { name: "notes.txt", type: "text/plain", size: 17, kind: "text", text: "Invoice total: 42", total_chars: 17, next_offset: null, text_truncated: false, data: null },
+  "2": { name: "photo.png", type: "image/png", size: 8, kind: "image", text: null, total_chars: null, next_offset: null, text_truncated: false, data: "iVBORw0KGgo=" },
+  "3": { name: "invoice.pdf", type: "application/pdf", size: 8, kind: "file", text: null, total_chars: null, next_offset: null, text_truncated: false, data: "JVBERi0xLjc=" },
+};
+
 export function createFakeMailStore() {
   const accounts: Record<AccountKey, Account> = { A: seedAccount("A"), B: seedAccount("B") };
   const calls: FakeCall[] = [];
@@ -330,6 +341,13 @@ export function createFakeMailStore() {
         }
         if (marked === 0) throw new MailError("not_found");
         return { marked, not_marked: notFound };
+      },
+      async readAttachment(input) {
+        record("readAttachment");
+        assertOwnMessage(input.message_id);
+        const delivery = ATTACHMENTS[input.attachment_id];
+        if (delivery === undefined) throw new MailError("not_found");
+        return { message_id: input.message_id, attachment_id: input.attachment_id, ...delivery };
       },
       async sendMail(input: OutgoingMessage) {
         record("sendMail");

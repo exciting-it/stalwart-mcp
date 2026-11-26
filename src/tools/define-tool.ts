@@ -12,7 +12,7 @@ import {
   type MailErrorCode,
   type SearchMailResult,
 } from "../mail";
-import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import type { CallToolResult, ContentBlock } from "@modelcontextprotocol/sdk/types.js";
 import type { z } from "zod";
 import type { AuditEntry } from "../audit";
 
@@ -46,6 +46,12 @@ export interface ToolSpec<I extends z.ZodTypeAny, O extends z.ZodTypeAny> {
   /** `grant` is the verified connection: its address may be shown, never chosen by the input. */
   run(mailbox: Mailbox, input: z.infer<I>, grant: Grant): Promise<z.infer<O>>;
   count?(result: z.infer<O>): number;
+  /**
+   * Content blocks that follow the text block, made from what `run` returned before the output
+   * schema dropped everything it does not name (`read_attachment`: the file itself). Never part of
+   * the structured result. A throw is `internal`: nothing is half-delivered.
+   */
+  blocks?(raw: unknown, result: z.infer<O>): ContentBlock[];
   /** How many addresses a successful call made the mail server notify (the event writes); never an address. */
   recipients?(result: z.infer<O>): number;
 }
@@ -65,9 +71,10 @@ const REFUSED_CODES: ReadonlySet<MailErrorCode> = new Set<MailErrorCode>([
   "recipient_not_allowed",
   "reconnect_required",
   "not_granted",
+  "too_large",
 ]);
 
-type Outcome = { ok: true; result: Record<string, unknown> } | { ok: false; code: MailErrorCode };
+type Outcome = { ok: true; result: Record<string, unknown>; blocks: ContentBlock[] } | { ok: false; code: MailErrorCode };
 
 interface Recipients {
   to: unknown[];
@@ -98,9 +105,11 @@ export function defineTool<I extends z.ZodTypeAny, O extends z.ZodTypeAny>(spec:
     try {
       if (!input.success) throw new MailError("invalid_input");
       if (await deps.blocked(grant)) throw new MailError("blocked");
-      const output = spec.output.safeParse(await spec.run(deps.mailbox(grant), input.data, grant));
+      const raw: unknown = await spec.run(deps.mailbox(grant), input.data, grant);
+      const output = spec.output.safeParse(raw);
       if (!output.success) throw new MailError("internal");
-      return { ok: true, result: noticeFirst(output.data as Record<string, unknown>) };
+      const blocks = spec.blocks?.(raw, output.data) ?? [];
+      return { ok: true, result: noticeFirst(output.data as Record<string, unknown>), blocks };
     } catch (error) {
       return { ok: false, code: error instanceof MailError ? error.code : "internal" };
     }
@@ -142,7 +151,10 @@ export function defineTool<I extends z.ZodTypeAny, O extends z.ZodTypeAny>(spec:
       if (!outcome.ok) {
         return { isError: true, content: [{ type: "text", text: MAIL_ERROR_MESSAGES[outcome.code] }] };
       }
-      return { structuredContent: outcome.result, content: [{ type: "text", text: JSON.stringify(outcome.result) }] };
+      return {
+        structuredContent: outcome.result,
+        content: [{ type: "text", text: JSON.stringify(outcome.result) }, ...outcome.blocks],
+      };
     },
   };
 }

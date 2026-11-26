@@ -22,9 +22,16 @@ export interface FakeIdentity {
 
 export interface FakeAttachment {
   blobId: string;
+  /** The body part's id; by default the attachment's position after the two body parts ("3", "4", ...). */
+  partId?: string;
   name: string | null;
+  /** The size the server reports; by default the length of `content`. */
   size: number;
   type: string;
+  /** The charset the server reports; by default `utf-8` for `text/*` and null otherwise. */
+  charset?: string | null;
+  /** The bytes the download endpoint serves for `blobId`. */
+  content: Uint8Array;
 }
 
 export interface FakeEmail {

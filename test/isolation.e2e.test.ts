@@ -379,6 +379,48 @@ describe("mail connector isolation, end to end", () => {
     expect(search.structuredContent).toMatchObject({ messages: [{ id: mine.id, unread: false, flagged: true }] });
   });
 
+  it("user A cannot read user B's attachments; A's own arrive as text, image and file", async () => {
+    const accountIdA = fake.addMailbox(A).accountId;
+    const a = await connect(fake, A);
+    await connect(fake, B);
+    const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3]);
+    const mine = fake.addMessage(A, {
+      subject: "mine",
+      attachments: [
+        { name: "notes.txt", type: "text/plain", content: "A's notes" },
+        { name: "photo", type: "application/octet-stream", content: png },
+        { name: "invoice", type: "application/octet-stream", content: "%PDF-1.4 A's invoice" },
+      ],
+    });
+    const theirs = fake.addMessage(B, { subject: "theirs", attachments: [{ name: "secret.txt", type: "text/plain", content: "B's secret" }] });
+    const downloads = () => fake.requests.filter((r) => new URL(r.url).pathname.startsWith("/jmap/download/"));
+
+    const foreign = await callTool(a.accessToken!, "read_attachment", { message_id: theirs.id, attachment_id: "3" });
+    expect(foreign).toEqual({ isError: true, content: [{ type: "text", text: MAIL_ERROR_MESSAGES.not_found }] });
+    expect(downloads()).toHaveLength(0);
+
+    const text = await callTool(a.accessToken!, "read_attachment", { message_id: mine.id, attachment_id: "3" });
+    expect(text.structuredContent).toMatchObject({ kind: "text", text: "A's notes", name: "notes.txt" });
+    expect(text.content).toHaveLength(1);
+    const image = await callTool(a.accessToken!, "read_attachment", { message_id: mine.id, attachment_id: "4" });
+    expect(image.content[1]).toEqual({ type: "image", mimeType: "image/png", data: btoa(String.fromCharCode(...png)) });
+    const file = await callTool(a.accessToken!, "read_attachment", { message_id: mine.id, attachment_id: "5" });
+    expect(file.content[1]).toEqual({
+      type: "resource",
+      resource: { uri: `attachment:///${mine.id}/5`, mimeType: "application/pdf", blob: btoa("%PDF-1.4 A's invoice") },
+    });
+    expect(JSON.stringify([foreign, text, image, file])).not.toContain("secret");
+
+    // Every download carries A's token and A's account id; none names B's blob.
+    const tokenA = fake.tokensFor(A).accessToken;
+    expect(downloads()).toHaveLength(3);
+    for (const r of downloads()) {
+      expect(r.authorization).toBe(`Bearer ${tokenA}`);
+      expect(new URL(r.url).pathname.split("/")[3]).toBe(accountIdA);
+      expect(r.url).not.toContain(fake.email(B, theirs.id)!.attachments[0]!.blobId);
+    }
+  });
+
   it("the same send_mail call twice over MCP delivers one message", async () => {
     const a = await connect(fake, A);
     const args = { to: ["ok@test.example"], subject: "Once", body: "Only one copy" };

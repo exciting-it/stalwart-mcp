@@ -10,6 +10,7 @@ import { listCalendars } from "./list-calendars";
 import { listMailboxes } from "./list-mailboxes";
 import { markMail } from "./mark-mail";
 import { moveMail } from "./move-mail";
+import { readAttachment } from "./read-attachment";
 import { readContact } from "./read-contact";
 import { readEvent } from "./read-event";
 import { readThread } from "./read-thread";
@@ -21,7 +22,7 @@ import { sendMail } from "./send-mail";
 import { updateContact } from "./update-contact";
 import { updateEvent } from "./update-event";
 
-export const TOOLS: Tool[] = [listMailboxes, searchMail, readThread, createDraft, sendMail, moveMail, deleteMail, markMail, searchContacts, readContact, listCalendars, searchEvents, readEvent, createContact, updateContact, deleteContact, createEvent, updateEvent, respondToEvent, deleteEvent];
+export const TOOLS: Tool[] = [listMailboxes, searchMail, readThread, createDraft, sendMail, moveMail, deleteMail, markMail, readAttachment, searchContacts, readContact, listCalendars, searchEvents, readEvent, createContact, updateContact, deleteContact, createEvent, updateEvent, respondToEvent, deleteEvent];
 
 /** The tools a deployment offers: every mail tool, and those of the areas it has switched on. */
 export function toolsFor(areas: ReadonlySet<Area>): Tool[] {
