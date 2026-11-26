@@ -30,6 +30,10 @@ export interface FakeAttachment {
   type: string;
   /** The charset the server reports; by default `utf-8` for `text/*` and null otherwise. */
   charset?: string | null;
+  /** The part's Content-Disposition; `attachment` by default. Mail programs send some files `inline`. */
+  disposition?: "attachment" | "inline";
+  /** The part's Content-Id, set for a picture the HTML body shows. */
+  cid?: string | null;
   /** The bytes the download endpoint serves for `blobId`. */
   content: Uint8Array;
 }

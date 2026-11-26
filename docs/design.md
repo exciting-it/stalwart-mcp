@@ -152,7 +152,7 @@ call.
 | Tool | Kind | What it does |
 |---|---|---|
 | `list_mailboxes` | read | Folders with role, total and unread counts, and the connected mailbox's address |
-| `search_mail` | read | Filter by text, from, to, subject, date range, folder, unread, has attachment; newest first; summaries with a short preview |
+| `search_mail` | read | Filter by text, from, to, subject, date range, folder, unread, has attachment; newest first; summaries with a short preview. Whether a message has an attachment is decided from its parts, not by the server's `hasAttachment`, which is false for a file sent `Content-Disposition: inline`; the filter is therefore applied by the connector over the other filters' results (at most 300 per call) |
 | `read_thread` | read | All messages of a conversation as plain text with headers, attachment names, sizes, types and ids; long bodies are cut with a marker |
 | `create_draft` | write | New mail or reply, plain text or with sanitized HTML, up to 5 attachments, saved in Drafts |
 | `send_mail` | write, external effect | Sends a new mail or reply, plain text or with sanitized HTML, up to 5 attachments, copy in Sent |

@@ -8,6 +8,10 @@ import { z } from "zod";
 export const MAIL_LIMITS = {
   searchPageMax: 25,
   searchPageDefault: 10,
+  /** Messages one request looks at when `search_mail` filters by attachment. */
+  attachmentScanPage: 100,
+  /** Messages one `search_mail` call looks at for that filter, before it answers where to go on. */
+  attachmentScanMessages: 300,
   previewChars: 200,
   bodyChars: 20_000,
   threadMessagesMax: 25,

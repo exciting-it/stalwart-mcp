@@ -45,6 +45,7 @@ import {
   attachmentName,
   createdId,
   getResult,
+  hasFile,
   JmapEmailAttachments,
   JmapEmailFull,
   JmapEmailSummary,
@@ -58,6 +59,7 @@ import {
   replySubject,
   replyThreading,
   searchFilter,
+  SUMMARY_PART_PROPERTIES,
   SUMMARY_PROPERTIES,
   THREAD_MESSAGE_PROPERTIES,
   toFolder,
@@ -158,8 +160,16 @@ export class JmapMailboxAdapter implements MailboxAdapter<PreparedMessage> {
     return { folders: list.map(toFolder) };
   }
 
-  async searchMail(input: SearchMailInputT): Promise<{ messages: MailSummary[]; next_offset: number | null }> {
-    const { limit, offset } = input;
+  /**
+   * One page of the search: at most `count` summaries from `position`, newest first, and whether
+   * the search has more behind them. Null for a folder that is not this account's. `ids` are the
+   * positions looked at; a message deleted between the query and the get has no summary.
+   */
+  async #summaries(
+    input: SearchMailInputT,
+    position: number,
+    count: number,
+  ): Promise<{ ids: string[]; byId: Map<string, z.infer<typeof JmapEmailSummary>>; more: boolean } | null> {
     // A folder id from the input is looked up in the same request: only a folder that is not
     // this account's turns the query's error into an empty page.
     const folderCheck: Call[] =
@@ -171,33 +181,73 @@ export class JmapMailboxAdapter implements MailboxAdapter<PreparedMessage> {
         {
           filter: searchFilter(input),
           sort: [{ property: "receivedAt", isAscending: false }],
-          position: offset,
-          limit: limit + 1,
+          position,
+          limit: count + 1,
         },
         "q",
       ],
       [
         "Email/get",
-        { "#ids": { resultOf: "q", name: "Email/query", path: "/ids" }, properties: SUMMARY_PROPERTIES },
+        {
+          "#ids": { resultOf: "q", name: "Email/query", path: "/ids" },
+          properties: SUMMARY_PROPERTIES,
+          bodyProperties: SUMMARY_PART_PROPERTIES,
+        },
         "g",
       ],
     ]);
     if (input.folder_id !== undefined) {
       const folder = getResult(JmapMailboxRole, methodResult(responses, "f", "Mailbox/get"));
       // A folder id that is not one of this account's folders matches nothing.
-      if (!folder.list.some((f) => f.id === input.folder_id)) return { messages: [], next_offset: null };
+      if (!folder.list.some((f) => f.id === input.folder_id)) return null;
     }
     const query = methodResult(responses, "q", "Email/query");
     const ids = parseUpstream(z.array(z.string()), query.ids);
     const { list } = getResult(JmapEmailSummary, methodResult(responses, "g", "Email/get"));
-    const byId = new Map(list.map((e) => [e.id, e]));
-    const messages = ids
-      .slice(0, limit)
-      .flatMap((id) => {
-        const e = byId.get(id);
-        return e ? [toSummary(e)] : [];
-      });
-    return { messages, next_offset: ids.length > limit ? offset + limit : null };
+    return { ids: ids.slice(0, count), byId: new Map(list.map((e) => [e.id, e])), more: ids.length > count };
+  }
+
+  async searchMail(input: SearchMailInputT): Promise<{ messages: MailSummary[]; next_offset: number | null }> {
+    const { limit, offset } = input;
+    if (input.has_attachment !== undefined) return this.#searchByAttachment(input, input.has_attachment);
+    const page = await this.#summaries(input, offset, limit);
+    if (page === null) return { messages: [], next_offset: null };
+    const messages = page.ids.flatMap((id) => {
+      const e = page.byId.get(id);
+      return e ? [toSummary(e)] : [];
+    });
+    return { messages, next_offset: page.more ? offset + limit : null };
+  }
+
+  /**
+   * The search with `has_attachment`: the server's flag is not the filter (`hasFile`), so the
+   * other filters' results are looked through from `offset`, a page per request, until `limit`
+   * messages match, the results end, or `attachmentScanMessages` were looked at. `next_offset`
+   * is the position after the last message looked at, so a page can hold fewer messages than
+   * `limit`, even none, and still have a next one.
+   */
+  async #searchByAttachment(
+    input: SearchMailInputT,
+    wanted: boolean,
+  ): Promise<{ messages: MailSummary[]; next_offset: number | null }> {
+    const messages: MailSummary[] = [];
+    let position = input.offset;
+    const end = input.offset + MAIL_LIMITS.attachmentScanMessages;
+    while (position < end) {
+      const page = await this.#summaries(input, position, MAIL_LIMITS.attachmentScanPage);
+      if (page === null) return { messages: [], next_offset: null };
+      for (const [i, id] of page.ids.entries()) {
+        const e = page.byId.get(id);
+        if (!e || hasFile(e) !== wanted) continue;
+        messages.push(toSummary(e));
+        if (messages.length < input.limit) continue;
+        const more = page.more || i + 1 < page.ids.length;
+        return { messages, next_offset: more ? position + i + 1 : null };
+      }
+      if (!page.more) return { messages, next_offset: null };
+      position += page.ids.length;
+    }
+    return { messages, next_offset: position };
   }
 
   async readThread(input: ReadThreadInputT): Promise<{

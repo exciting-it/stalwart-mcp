@@ -603,10 +603,14 @@ production a request under a host other than `PUBLIC_ORIGIN` answers 404.
   checks the base64 shape on the Workers Free plan's 10 ms of CPU per request; the decoding,
   hashing and uploads run in the vault. Uploaded files of a message that then fails are left to
   the server, which expires unused blobs.
-- `has_attachment` in `search_mail` (the filter and the field) is the mail server's own flag. A
-  file the sender's mail program put inline is not counted there, although `read_thread` lists
-  it and `read_attachment` delivers it (seen in a live check with a PDF). To find such a
-  message, search without the filter.
+- `has_attachment` in `search_mail` (the filter and the field) is decided by the connector, not
+  by the mail server's own flag: that flag leaves out a file the sender's mail program put inline
+  (seen in a live check with a PDF, which `read_thread` listed). Every attachment part counts,
+  except a picture with a Content-Id (one the HTML body shows, such as a signature logo); a
+  photo pasted into the text of an HTML message is such a picture and is not counted, although
+  `read_thread` lists it. The server cannot filter this way, so with the filter one call looks
+  through at most 300 of the other filters' results (three requests of 100) and answers where to
+  go on: a page can hold fewer results than `limit`, even none, while `next_offset` is set.
 - `respond_to_event` answers an invitation that is in the calendar. Stalwart puts an incoming
   invitation there on its own only when the sender is a local account or is in the recipient's
   address book, unless the server-wide setting `autoAddInvitations` (Settings > Calendar &

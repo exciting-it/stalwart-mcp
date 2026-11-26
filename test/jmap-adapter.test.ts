@@ -1,4 +1,4 @@
-import { MAIL_ERROR_MESSAGES, MailError } from "../src/mail";
+import { MAIL_ERROR_MESSAGES, MAIL_LIMITS, MailError } from "../src/mail";
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fetchSession, jmapCall, UpstreamAuthError, type JmapSession } from "../src/jmap/jmap-client";
 import { JmapMailboxAdapter } from "../src/jmap/jmap-mailbox-adapter";
@@ -178,7 +178,6 @@ describe("JmapMailboxAdapter", () => {
       from: "shop@",
       subject: "invoice",
       notKeyword: "$seen",
-      hasAttachment: true,
       inMailbox: hit.folderId,
       after: "2025-01-01T00:00:00.000Z",
       before: "2027-01-01T00:00:00.000Z",
@@ -188,6 +187,116 @@ describe("JmapMailboxAdapter", () => {
     expect(read.messages).toHaveLength(1);
     expect(read.messages[0]).toMatchObject({ unread: false, flagged: true, answered: true });
     expect(jmapRequests()[1]!.body.methodCalls[0][1].filter).toEqual({ text: "read", hasKeyword: "$seen" });
+  });
+
+  it("counts a file the sender's mail program put inline, which the server's flag leaves out", async () => {
+    fake.addMailbox(A);
+    const pdf = fake.addMessage(A, {
+      subject: "pdf inline",
+      attachments: [{ name: "manual.pdf", size: 10, type: "application/pdf", disposition: "inline" }],
+    });
+    const logo = fake.addMessage(A, {
+      subject: "logo",
+      html: '<p>Hi</p><img src="cid:logo@x">',
+      attachments: [{ name: "logo.png", size: 10, type: "image/png", disposition: "inline", cid: "logo@x" }],
+    });
+    const photo = fake.addMessage(A, {
+      subject: "photo inline",
+      attachments: [{ name: "IMG_1.jpg", size: 10, type: "image/jpeg", disposition: "inline" }],
+    });
+    const plain = fake.addMessage(A, { subject: "plain" });
+    const usual = fake.addMessage(A, {
+      subject: "usual",
+      attachments: [{ name: "a.txt", size: 3, type: "text/plain" }],
+    });
+    const a = await adapterFor(A);
+
+    const all = await a.searchMail({ limit: 10, offset: 0 });
+    expect(Object.fromEntries(all.messages.map((m) => [m.subject, m.has_attachment]))).toEqual({
+      "pdf inline": true,
+      // A picture the HTML shows (a signature logo) is not a file of the message.
+      logo: false,
+      "photo inline": true,
+      plain: false,
+      usual: true,
+    });
+    // One request, and the parts are asked for by type and Content-Id only.
+    expect(jmapRequests()).toHaveLength(1);
+    const get = jmapRequests()[0]!.body.methodCalls.find((c: [string]) => c[0] === "Email/get")[1];
+    expect(get.properties).toContain("attachments");
+    expect(get.bodyProperties).toEqual(["type", "cid"]);
+
+    const withFile = await a.searchMail({ has_attachment: true, limit: 10, offset: 0 });
+    expect(withFile.messages.map((m) => m.id)).toEqual([usual.id, photo.id, pdf.id]);
+    expect(withFile.next_offset).toBeNull();
+    const without = await a.searchMail({ has_attachment: false, limit: 10, offset: 0 });
+    expect(without.messages.map((m) => m.id)).toEqual([plain.id, logo.id]);
+    expect(without.next_offset).toBeNull();
+    // The server's own flag is never the filter: it would leave the inline files out.
+    for (const r of jmapRequests()) {
+      const query = r.body.methodCalls.find((c: [string]) => c[0] === "Email/query")[1];
+      expect(query.filter).not.toHaveProperty("hasAttachment");
+    }
+  });
+
+  it("pages a search by attachment through the messages it looked at", async () => {
+    fake.addMailbox(A);
+    // Newest first: m11 … m0; every third one (m0, m3, m6, m9) has a file.
+    for (let i = 0; i < 12; i++) {
+      fake.addMessage(A, {
+        subject: `m${i}`,
+        attachments: i % 3 === 0 ? [{ name: "f.pdf", size: 1, type: "application/pdf", disposition: "inline" }] : [],
+      });
+    }
+    const a = await adapterFor(A);
+    const first = await a.searchMail({ has_attachment: true, limit: 2, offset: 0 });
+    expect(first.messages.map((m) => m.subject)).toEqual(["m9", "m6"]);
+    // m11, m10, m9, m8, m7, m6 were looked at: the next page starts after them.
+    expect(first.next_offset).toBe(6);
+    const second = await a.searchMail({ has_attachment: true, limit: 2, offset: first.next_offset! });
+    expect(second.messages.map((m) => m.subject)).toEqual(["m3", "m0"]);
+    expect(second.next_offset).toBeNull();
+
+    // The other filters still go to the server.
+    const one = await a.searchMail({ has_attachment: true, subject: "m3", limit: 2, offset: 0 });
+    expect(one.messages.map((m) => m.subject)).toEqual(["m3"]);
+    expect(jmapRequests().at(-1)!.body.methodCalls.find((c: [string]) => c[0] === "Email/query")[1].filter).toEqual({
+      subject: "m3",
+    });
+  });
+
+  it("stops looking for attachments after a fixed number of messages and says where to go on", async () => {
+    fake.addMailbox(A);
+    const total = MAIL_LIMITS.attachmentScanMessages + 20;
+    // Only the two oldest messages have a file.
+    for (let i = 0; i < total; i++) {
+      fake.addMessage(A, {
+        subject: `m${i}`,
+        attachments: i < 2 ? [{ name: "f.pdf", size: 1, type: "application/pdf" }] : [],
+      });
+    }
+    const a = await adapterFor(A);
+    const first = await a.searchMail({ has_attachment: true, limit: 5, offset: 0 });
+    expect(first.messages).toEqual([]);
+    expect(first.next_offset).toBe(MAIL_LIMITS.attachmentScanMessages);
+    expect(jmapRequests()).toHaveLength(MAIL_LIMITS.attachmentScanMessages / MAIL_LIMITS.attachmentScanPage);
+    for (const r of jmapRequests()) {
+      const query = r.body.methodCalls.find((c: [string]) => c[0] === "Email/query")[1];
+      expect(query.limit).toBe(MAIL_LIMITS.attachmentScanPage + 1);
+    }
+    const second = await a.searchMail({ has_attachment: true, limit: 5, offset: first.next_offset! });
+    expect(second.messages.map((m) => m.subject)).toEqual(["m1", "m0"]);
+    expect(second.next_offset).toBeNull();
+  });
+
+  it("answers an empty page for a foreign folder when searching by attachment", async () => {
+    fake.addMailbox(A);
+    fake.addMailbox(B);
+    const foreign = fake.addMessage(B, { attachments: [{ name: "f.pdf", size: 1, type: "application/pdf" }] });
+    fake.addMessage(A, { attachments: [{ name: "f.pdf", size: 1, type: "application/pdf" }] });
+    const a = await adapterFor(A);
+    const r = await a.searchMail({ has_attachment: true, folder_id: foreign.folderId, limit: 5, offset: 0 });
+    expect(r).toEqual({ messages: [], next_offset: null });
   });
 
   it("cuts previews to 200 characters and strips control characters from subjects", async () => {

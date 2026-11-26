@@ -64,6 +64,7 @@ export const JmapEmailSummary = z.object({
   receivedAt: z.string(),
   preview: z.string().nullish(),
   hasAttachment: z.boolean().nullish(),
+  attachments: z.array(z.object({ type: z.string(), cid: z.string().nullish() })).nullish(),
 });
 
 const BodyPart = z.object({ partId: z.string().nullish(), type: z.string() });
@@ -102,7 +103,10 @@ export const JmapReplySource = z.object({
 
 export const SUMMARY_PROPERTIES = [
   "id", "threadId", "mailboxIds", "keywords", "from", "to", "subject", "receivedAt", "preview", "hasAttachment",
+  "attachments",
 ] as const;
+/** What `hasFile` needs of each attachment part. */
+export const SUMMARY_PART_PROPERTIES = ["type", "cid"] as const;
 export const THREAD_MESSAGE_PROPERTIES = [
   "id", "from", "to", "cc", "subject", "receivedAt", "textBody", "htmlBody", "bodyValues", "attachments",
 ] as const;
@@ -276,6 +280,17 @@ export function toFolder(m: z.infer<typeof JmapMailbox>): MailFolder {
   };
 }
 
+/**
+ * Whether a message carries a file. The server's `hasAttachment` (RFC 8621 §4.1.4) is true only
+ * when a part is not `Content-Disposition: inline`, and mail programs send whole PDFs inline. So
+ * the parts decide as well: every attachment part is a file, except a picture with a Content-Id,
+ * which is one the HTML body shows (a signature logo).
+ */
+export function hasFile(e: z.infer<typeof JmapEmailSummary>): boolean {
+  if (e.hasAttachment === true) return true;
+  return (e.attachments ?? []).some((a) => !(a.type.toLowerCase().startsWith("image/") && a.cid != null));
+}
+
 export function toSummary(e: z.infer<typeof JmapEmailSummary>): MailSummary {
   const keywords = e.keywords ?? {};
   return {
@@ -291,7 +306,7 @@ export function toSummary(e: z.infer<typeof JmapEmailSummary>): MailSummary {
     flagged: keywords.$flagged === true,
     answered: keywords.$answered === true,
     draft: keywords.$draft === true,
-    has_attachment: e.hasAttachment === true,
+    has_attachment: hasFile(e),
   };
 }
 
@@ -339,7 +354,10 @@ export function replySubject(original: string | null | undefined): string {
   return /^re:/i.test(subject) ? subject : `Re: ${subject}`;
 }
 
-/** Search input → JMAP `Email/query` FilterCondition. */
+/**
+ * Search input → JMAP `Email/query` FilterCondition. `has_attachment` is not among it: the
+ * server's flag leaves inline files out, so the adapter filters by `hasFile` itself.
+ */
 export function searchFilter(input: SearchMailInputT): Record<string, unknown> {
   const f: Record<string, unknown> = {};
   if (input.text !== undefined) f.text = input.text;
@@ -352,6 +370,5 @@ export function searchFilter(input: SearchMailInputT): Record<string, unknown> {
   if (input.folder_id !== undefined) f.inMailbox = input.folder_id;
   if (input.unread === true) f.notKeyword = "$seen";
   if (input.unread === false) f.hasKeyword = "$seen";
-  if (input.has_attachment !== undefined) f.hasAttachment = input.has_attachment;
   return f;
 }

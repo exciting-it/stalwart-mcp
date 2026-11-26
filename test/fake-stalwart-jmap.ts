@@ -178,6 +178,12 @@ const FILTER_KEYS = new Set([
 const addressesContain = (list: FakeAddress[], needle: string) =>
   list.some((a) => contains(a.name, needle) || contains(a.email, needle));
 
+/**
+ * `hasAttachment` as Stalwart sets it (RFC 8621 §4.1.4): true when at least one attachment is not
+ * `Content-Disposition: inline`. A file a mail program sent inline does not count.
+ */
+const hasAttachment = (e: FakeEmail) => e.attachments.some((a) => a.disposition !== "inline");
+
 function matches(e: FakeEmail, filter: unknown): boolean {
   if (filter === null || filter === undefined) return true;
   if (!isObject(filter)) throw new MethodError("invalidArguments");
@@ -206,7 +212,7 @@ function matches(e: FakeEmail, filter: unknown): boolean {
       : k === "before" ? Date.parse(e.receivedAt) < Date.parse(s)
       : k === "hasKeyword" ? e.keywords[s] === true
       : k === "notKeyword" ? e.keywords[s] !== true
-      : (e.attachments.length > 0) === (v === true);
+      : hasAttachment(e) === (v === true);
     if (!ok) return false;
   }
   return true;
@@ -247,7 +253,7 @@ const EMAIL_PROPS = [
   "inReplyTo", "references", "from", "to", "cc", "bcc", "replyTo", "subject", "sentAt",
   "hasAttachment", "preview", "bodyValues", "textBody", "htmlBody", "attachments",
 ] as const;
-const PART_PROPS = ["partId", "blobId", "size", "name", "type", "charset", "disposition"];
+const PART_PROPS = ["partId", "blobId", "size", "name", "type", "charset", "disposition", "cid"];
 const DEFAULT_EMAIL_PROPS = EMAIL_PROPS.filter((p) => p !== "bodyValues" && p !== "textBody" && p !== "htmlBody" && p !== "attachments");
 
 function truncateUtf8(value: string, maxBytes: number): { value: string; truncated: boolean } {
@@ -275,14 +281,17 @@ function emailObject(e: FakeEmail, args: Args): Args {
     name: string | null = null,
     disposition: string | null = null,
     charset: string | null = type.startsWith("text/") ? "utf-8" : null,
-  ) => ({ partId, blobId, size, name, type, charset, disposition });
+  ) => ({ partId, blobId, size, name, type, charset, disposition, cid: null as string | null });
   const textPart = e.text !== null ? part("1", "text/plain", utf8(e.text), `${e.blobId}-1`) : null;
   const htmlPart = e.html !== null ? part("2", "text/html", utf8(e.html), `${e.blobId}-2`) : null;
-  const attachments = e.attachments.map((a, i) =>
-    a.charset === undefined
-      ? part(a.partId ?? String(i + 3), a.type, a.size, a.blobId, a.name, "attachment")
-      : part(a.partId ?? String(i + 3), a.type, a.size, a.blobId, a.name, "attachment", a.charset),
-  );
+  const attachments = e.attachments.map((a, i) => {
+    const disposition = a.disposition ?? "attachment";
+    const p =
+      a.charset === undefined
+        ? part(a.partId ?? String(i + 3), a.type, a.size, a.blobId, a.name, disposition)
+        : part(a.partId ?? String(i + 3), a.type, a.size, a.blobId, a.name, disposition, a.charset);
+    return { ...p, cid: a.cid ?? null };
+  });
   // RFC 8621 §4.1.4: each list falls back to the other alternative when its own type is absent.
   const textBody = textPart ? [textPart] : htmlPart ? [htmlPart] : [];
   const htmlBody = htmlPart ? [htmlPart] : textPart ? [textPart] : [];
@@ -328,7 +337,7 @@ function emailObject(e: FakeEmail, args: Args): Args {
     replyTo: null,
     subject: e.subject,
     sentAt: e.receivedAt,
-    hasAttachment: e.attachments.length > 0,
+    hasAttachment: hasAttachment(e),
     preview: e.preview,
     bodyValues,
     textBody: partProps(textBody),

@@ -60,7 +60,7 @@ export interface AddMessageOptions {
    * `content` (bytes, or a string written as UTF-8) is what the download serves, zero bytes of
    * `size` when not given; `size` is what the server reports, by default the content's length.
    */
-  attachments?: { name: string | null; type: string; size?: number; content?: Uint8Array | string; charset?: string | null; partId?: string }[];
+  attachments?: { name: string | null; type: string; size?: number; content?: Uint8Array | string; charset?: string | null; partId?: string; disposition?: "attachment" | "inline"; cid?: string | null }[];
   messageId?: string;
   inReplyTo?: string[];
   references?: string[];
