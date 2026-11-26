@@ -171,6 +171,9 @@ export function htmlToText(html: string): string {
       }
     } else if (tag.closing && BLOCK_TAGS.has(tag.name)) {
       out.push("\n");
+    } else if (!tag.closing && (tag.name === "td" || tag.name === "th")) {
+      // A cell starts apart from the one before it; the tidying below drops the space at a line's start.
+      out.push(" ");
     }
   }
   closeLink();

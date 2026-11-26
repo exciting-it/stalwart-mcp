@@ -596,6 +596,15 @@ production a request under a host other than `PUBLIC_ORIGIN` answers 404.
   checks the base64 shape on the Workers Free plan's 10 ms of CPU per request; the decoding,
   hashing and uploads run in the vault. Uploaded files of a message that then fails are left to
   the server, which expires unused blobs.
+- `has_attachment` in `search_mail` (the filter and the field) is the mail server's own flag. A
+  file the sender's mail program put inline is not counted there, although `read_thread` lists
+  it and `read_attachment` delivers it (seen in a live check with a PDF). To find such a
+  message, search without the filter.
+- `respond_to_event` answers an invitation that is in the calendar. Stalwart puts an incoming
+  invitation there on its own only when the sender is a local account or is in the recipient's
+  address book, unless the server-wide setting `autoAddInvitations` (Settings > Calendar &
+  Contacts > Scheduling, off by default) is on. Otherwise the invitation stays a mail and there
+  is no event to answer.
 - The tool-call limit counts per clock minute, not a sliding minute: up to 120 calls can land
   within a few seconds around a minute boundary.
 - `/token` and `/register` are limited per source address. AI vendors call them from shared

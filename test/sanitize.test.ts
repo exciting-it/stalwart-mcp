@@ -105,3 +105,14 @@ describe("parseTag reads attribute names as HTML does", () => {
     expect(htmlToText('<p title="a > b">x</p><p data-x=\'"\'>y</p>')).toBe("x\ny");
   });
 });
+
+describe("htmlToText: tables", () => {
+  it("keeps the cells of a row apart and puts each row on its own line", () => {
+    const table = "<table><tr><th>Name</th><th>City</th></tr><tr><td>Ada</td><td>London</td></tr></table>";
+    expect(htmlToText(table)).toBe("Name City\nAda London");
+    // Upper case, attributes and missing end tags of cells read the same.
+    expect(htmlToText('<TABLE><TR><TD class="a">A<TD>B</TR></TABLE>')).toBe("A B");
+    // A single cell leaves no space before or after it (the row and the table each end a line).
+    expect(htmlToText("<table><tr><td>only</td></tr></table>x")).toBe("only\n\nx");
+  });
+});
