@@ -2,24 +2,36 @@
  * The HTML this worker shows in the browser: our own approval page ("Connect mailbox X to tool
  * Y?") and the fixed message pages, in the look defined by `theme.ts`. Client name and host are
  * client-supplied, so every interpolated value is escaped. No page ever shows an error detail
- * or upstream text. The pages run no script and load only this origin's own fonts and images.
+ * or upstream text. The pages load only this origin's own fonts and images. The approval page
+ * runs one fixed script (`approval-script.ts`), named by its hash in the page's policy; the
+ * other pages run none.
  */
+import { createHash } from "node:crypto";
 import type { Area } from "../config";
+import { APPROVAL_SCRIPT } from "./approval-script";
 import { KEEP_REST, type ConnectedTools, type ToolEntry } from "./connected-tools";
 import { THEME } from "./theme";
 
 export type PageLanguage = "de" | "en";
 export type MessageKind = "refused" | "failed" | "expired";
 
-/** No `form-action`: browsers apply it to the redirect back to the AI tool after the POST. */
-const HTML_HEADERS = {
-  "Content-Type": "text/html; charset=utf-8",
-  "Content-Security-Policy":
-    "default-src 'none'; style-src 'unsafe-inline'; img-src 'self'; font-src 'self'; frame-ancestors 'none'; base-uri 'none'",
-  "X-Frame-Options": "DENY",
-  "Cache-Control": "no-store",
-  "Referrer-Policy": "no-referrer",
-} as const;
+/**
+ * No `form-action`: browsers apply it to the redirect back to the AI tool after the POST. Without
+ * `scriptSource` no script runs at all (`default-src 'none'`).
+ */
+function htmlHeaders(scriptSource = ""): Record<string, string> {
+  const script = scriptSource === "" ? "" : ` script-src ${scriptSource};`;
+  return {
+    "Content-Type": "text/html; charset=utf-8",
+    "Content-Security-Policy": `default-src 'none';${script} style-src 'unsafe-inline'; img-src 'self'; font-src 'self'; frame-ancestors 'none'; base-uri 'none'`,
+    "X-Frame-Options": "DENY",
+    "Cache-Control": "no-store",
+    "Referrer-Policy": "no-referrer",
+  };
+}
+
+/** The one script the approval page may run: the policy names it by the hash of its text. */
+const APPROVAL_SCRIPT_SOURCE = `'sha256-${createHash("sha256").update(APPROVAL_SCRIPT).digest("base64")}'`;
 
 const ESCAPES: Record<string, string> = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
 
@@ -49,6 +61,12 @@ const APPROVAL_COPY = {
     caution: "Only allow this if you started the connection yourself just now.",
     allow: "Allow",
     deny: "Deny",
+    wait: {
+      allow: "Connecting. You will be sent back to your AI tool in a moment.",
+      deny: "Declining. You will be sent back to your AI tool in a moment.",
+      lateAllow: "This is taking longer than usual. If your AI tool already shows the connection, you can close this window.",
+      lateDeny: "This is taking longer than usual. You can close this window.",
+    },
     tools: {
       heading: "These tools already have access to this mailbox:",
       unnamed: "Unnamed tool",
@@ -77,6 +95,13 @@ const APPROVAL_COPY = {
     caution: "Erlaube das nur, wenn du die Verbindung gerade selbst gestartet hast.",
     allow: "Erlauben",
     deny: "Ablehnen",
+    wait: {
+      allow: "Die Verbindung wird hergestellt. Gleich geht es zurück zu deinem KI-Werkzeug.",
+      deny: "Die Anfrage wird abgelehnt. Gleich geht es zurück zu deinem KI-Werkzeug.",
+      lateAllow:
+        "Das dauert länger als üblich. Zeigt dein KI-Werkzeug die Verbindung schon an, kannst du dieses Fenster schließen.",
+      lateDeny: "Das dauert länger als üblich. Du kannst dieses Fenster schließen.",
+    },
     tools: {
       heading: "Diese Werkzeuge haben schon Zugriff auf dieses Postfach:",
       unnamed: "Unbenanntes Werkzeug",
@@ -182,6 +207,14 @@ const STYLE = [
   `button[value=allow]:hover{background:${C.primaryHover}}`,
   `button[value=deny]:hover{background:${C.soft}}`,
   `button:focus-visible{outline:2px solid ${C.ring};outline-offset:2px}`,
+  // After a decision (classes set by the page's script): the pressed button turns its ring, the
+  // other one fades, neither takes a further click, and a line below says what happens.
+  "form.busy button{pointer-events:none;cursor:default}",
+  "form.busy button:not(.sent){opacity:.45}",
+  'button.sent::before{content:"";display:inline-block;width:.875rem;height:.875rem;margin-right:.5rem;vertical-align:-.125rem;border:2px solid currentColor;border-right-color:transparent;border-radius:50%;animation:spin .7s linear infinite}',
+  `.status{margin:0;font-size:.875rem;color:${C.muted}}`,
+  ".status:not(:empty){margin-top:1rem}",
+  "@keyframes spin{to{transform:rotate(360deg)}}",
   `.note{margin:2.5rem 0 0;font-size:.75rem;color:${C.muted};overflow-wrap:anywhere}`,
   ".art{display:none;position:relative;overflow:hidden}",
   ".art img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;animation:breathe 12s ease-in-out infinite alternate}",
@@ -192,7 +225,7 @@ const STYLE = [
   "@keyframes breathe{from{transform:scale(1.02)}to{transform:scale(1.07)}}",
   "@media (min-width:40rem){.pane{padding:1.5rem 2.5rem}}",
   "@media (min-width:64rem){.pane{width:50%}.art{display:block;width:50%}}",
-  "@media (prefers-reduced-motion:reduce){.art img{animation:none;transform:scale(1.02)}}",
+  "@media (prefers-reduced-motion:reduce){.art img{animation:none;transform:scale(1.02)}button.sent::before{animation:none}}",
 ].join("");
 
 /**
@@ -208,6 +241,7 @@ const TOOLS_STYLE = [
   ".tools .entry{flex:1;min-width:0;overflow-wrap:anywhere}",
   ".tools .name{font-weight:600}",
   `.tools .when{display:block;margin-top:.125rem;font-size:.75rem;color:${THEME.colors.muted}}`,
+  "form.busy .tools{opacity:.6;pointer-events:none}",
   `.tools .same{flex:none;width:1.125rem;height:1.125rem;margin-top:.0625rem;border:1px solid ${THEME.colors.border};border-radius:.3125rem}`,
 ].join("");
 
@@ -226,8 +260,17 @@ function artwork(lang: PageLanguage): string {
 </div>`;
 }
 
-/** `body` and `extraStyle` are trusted markup; every value in them must already be escaped. */
-function htmlResponse(lang: PageLanguage, title: string, body: string, status: number, extraStyle = ""): Response {
+/**
+ * `body`, `extraStyle` and `script` are trusted markup; every value in them must already be
+ * escaped. `script` is a fixed text, and the policy allows exactly that text.
+ */
+function htmlResponse(
+  lang: PageLanguage,
+  title: string,
+  body: string,
+  status: number,
+  extra: { style?: string; script?: { text: string; source: string } } = {},
+): Response {
   const html = `<!doctype html>
 <html lang="${lang}">
 <head>
@@ -235,7 +278,7 @@ function htmlResponse(lang: PageLanguage, title: string, body: string, status: n
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${escapeHtml(title)} — ${escapeHtml(THEME.wordmark)}</title>
 <link rel="icon" href="${escapeHtml(THEME.icon)}">
-<style>${STYLE}${extraStyle}</style>
+<style>${STYLE}${extra.style ?? ""}</style>
 </head>
 <body>
 <div class="page">
@@ -249,11 +292,11 @@ ${body}
 </main>
 </div>
 ${artwork(lang)}
-</div>
+</div>${extra.script ? `\n<script>${extra.script.text}</script>` : ""}
 </body>
 </html>
 `;
-  return new Response(html, { status, headers: HTML_HEADERS });
+  return new Response(html, { status, headers: htmlHeaders(extra.script?.source) });
 }
 
 /** A date as the page's language writes it, in UTC ("3 March 2026", "3. März 2026"). */
@@ -341,8 +384,12 @@ ${permissions}
 ${tools}<button type="submit" name="decision" value="allow">${escapeHtml(t.allow)}</button>
 <button type="submit" name="decision" value="deny">${escapeHtml(t.deny)}</button>
 </form>
+<p class="status" id="status" role="status" data-allow="${escapeHtml(t.wait.allow)}" data-deny="${escapeHtml(t.wait.deny)}" data-late-allow="${escapeHtml(t.wait.lateAllow)}" data-late-deny="${escapeHtml(t.wait.lateDeny)}"></p>
 <p class="note">${t.wrongMailbox(email)}</p>`;
-  return htmlResponse(p.lang, t.title, body, 200, tools === "" ? "" : TOOLS_STYLE);
+  return htmlResponse(p.lang, t.title, body, 200, {
+    style: tools === "" ? "" : TOOLS_STYLE,
+    script: { text: APPROVAL_SCRIPT, source: APPROVAL_SCRIPT_SOURCE },
+  });
 }
 
 /**

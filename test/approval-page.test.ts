@@ -1,7 +1,19 @@
 import { describe, expect, it } from "vitest";
 import { pageLanguage, renderApprovalPage, renderIntroPage, renderMessagePage } from "../src/oauth/approval-page";
+import { APPROVAL_SCRIPT } from "../src/oauth/approval-script";
 
 const base = { clientName: "Claude", redirectHost: "claude.ai", email: "a@test.example", handle: "h-123" };
+
+/** The policy of the pages that run no script. */
+const NO_SCRIPT_POLICY =
+  "default-src 'none'; style-src 'unsafe-inline'; img-src 'self'; font-src 'self'; frame-ancestors 'none'; base-uri 'none'";
+/** The approval page's one script element, as it stands in the page. */
+const SCRIPT_ELEMENT = `<script>${APPROVAL_SCRIPT}</script>`;
+/** The page without that element: what is left must hold no script at all. */
+const withoutItsScript = (html: string): string => {
+  expect(html.split(SCRIPT_ELEMENT)).toHaveLength(2);
+  return html.replace(SCRIPT_ELEMENT, "");
+};
 
 /** The texts of the permission list, in page order. */
 const permissions = (html: string): string[] =>
@@ -21,7 +33,9 @@ describe("approval page", () => {
     expect(html).not.toContain("<img src=x");
     expect(html).not.toContain("onerror=1>");
     expect(html).not.toContain("<b>");
-    expect(html).not.toContain("<script");
+    // The only script is the page's own; the one in the handle stays text.
+    expect(withoutItsScript(html)).not.toContain("<script");
+    expect(html).toContain('value="h&quot;&gt;&lt;script&gt;"');
     expect(html).toContain("&lt;img");
     expect(html).toContain("&lt;b&gt;x.example");
     expect(html).toContain("a&quot;@test.example");
@@ -33,12 +47,13 @@ describe("approval page", () => {
       renderApprovalPage({ lang: "en", ...base }),
       renderMessagePage({ lang: "de", kind: "failed", status: 400 }),
     ];
+    // No script may run on a message page; the approval page's policy is checked with its script below.
+    expect(pages[1]!.headers.get("content-security-policy")).toBe(NO_SCRIPT_POLICY);
+    expect(pages[1]!.headers.get("content-security-policy")).not.toContain("script-src");
     for (const res of pages) {
-      expect(res.headers.get("content-security-policy")).toBe(
-        "default-src 'none'; style-src 'unsafe-inline'; img-src 'self'; font-src 'self'; frame-ancestors 'none'; base-uri 'none'",
-      );
-      // No script may run, and nothing loads from another origin.
-      expect(res.headers.get("content-security-policy")).not.toMatch(/script-src|https?:|\*|data:/);
+      // Nothing loads from another origin, and nothing inline runs without being named.
+      expect(res.headers.get("content-security-policy")).not.toMatch(/https?:|\*|data:|unsafe-eval|nonce-/);
+      expect(res.headers.get("content-security-policy")).toMatch(/^default-src 'none';/);
       expect(res.headers.get("content-security-policy")).toContain("frame-ancestors 'none'");
       expect(res.headers.get("x-frame-options")).toBe("DENY");
       expect(res.headers.get("cache-control")).toBe("no-store");
@@ -153,9 +168,9 @@ describe("page design", () => {
     renderMessagePage({ lang: "en", kind: "expired", status: 410 }),
   ];
 
-  it("runs no script and loads only this origin's own files", async () => {
-    for (const res of pages()) {
-      const html = await res.text();
+  it("runs no script but the approval page's own and loads only this origin's own files", async () => {
+    const [approval, message] = await Promise.all(pages().map((res) => res.text()));
+    for (const html of [withoutItsScript(approval!), message!]) {
       expect(html).not.toMatch(/<script|javascript:|\son[a-z]+=/i);
       // Every address in the page (fonts, image, icon, form) is a path on this origin.
       const addresses = [...html.matchAll(/(?:src|href|action)="([^"]*)"|url\("([^"]*)"\)/g)].map((m) => m[1] ?? m[2]!);
@@ -223,9 +238,7 @@ describe("intro page", () => {
       continueUrl: `https://mail.test.example/login?a=1&b="><script>alert(1)</script>`,
     });
     expect(res.status).toBe(200);
-    expect(res.headers.get("content-security-policy")).toBe(
-      "default-src 'none'; style-src 'unsafe-inline'; img-src 'self'; font-src 'self'; frame-ancestors 'none'; base-uri 'none'",
-    );
+    expect(res.headers.get("content-security-policy")).toBe(NO_SCRIPT_POLICY);
     expect(res.headers.get("cache-control")).toBe("no-store");
     expect(res.headers.get("referrer-policy")).toBe("no-referrer");
     const html = await res.text();
@@ -299,7 +312,9 @@ describe("tools already connected, on the approval page", () => {
     );
 
   it("is byte for byte today's page when no other tool has access", async () => {
-    const today = "b3f66586c18eeafca8efa5547f0c6f0ce0bb65026002f8103f0fbf404b7210c1";
+    // Pinned anew with the feedback after Allow or Deny (status line, styles, script): that change
+    // is on every approval page. The list of tools still adds nothing when there is none.
+    const today = "5b0db17aac5f5bcb58b78f920c9ed31c8f715aa6e0f65d30945fc82cd106c8df";
     const plain = { lang: "en" as const, ...base };
     expect(await sha256(await renderApprovalPage(plain).text())).toBe(today);
     const empty = await renderApprovalPage({ ...plain, tools: { replaced: null, others: [], rest: [] } }).text();
@@ -331,7 +346,7 @@ describe("tools already connected, on the approval page", () => {
 
   it("escapes the names, uses a fixed name for a tool without one and shows the dates in the page's language", async () => {
     const en = await renderApprovalPage({ lang: "en", ...base, tools }).text();
-    expect(en).not.toContain("<script>");
+    expect(withoutItsScript(en)).not.toContain("<script>");
     expect(en).toContain('<span class="name">&lt;script&gt;alert(1)&lt;/script&gt;</span> stays connected');
     expect(en).toContain('<span class="name">Unnamed tool</span> stays connected');
     expect(en).toContain('<span class="when">Connected since 3 March 2026</span>');
@@ -373,9 +388,110 @@ describe("tools already connected, on the approval page", () => {
     expect(html).not.toContain("untick");
   });
 
-  it("keeps the page free of script and of foreign addresses", async () => {
-    const html = await renderApprovalPage({ lang: "de", ...base, tools }).text();
+  it("keeps the page free of any script but its own and of foreign addresses", async () => {
+    const html = withoutItsScript(await renderApprovalPage({ lang: "de", ...base, tools }).text());
     expect(html).not.toMatch(/<script|javascript:|\son[a-z]+=/i);
     expect(html).not.toMatch(/https?:\/\//);
+  });
+});
+
+describe("feedback after Allow or Deny", () => {
+  const sha256Base64 = async (text: string) =>
+    btoa(String.fromCharCode(...new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text)))));
+  const hostile = {
+    lang: "de" as const,
+    clientName: `</script><script>alert(1)</script>`,
+    redirectHost: `"];alert(1);//`,
+    email: `'+alert(1)+'@test.example`,
+    handle: `h"></script><script>alert(1)`,
+  };
+
+  it("allows exactly the script that is on the page, by its hash", async () => {
+    const res = renderApprovalPage({ lang: "en", ...base });
+    const html = await res.text();
+    const scripts = [...html.matchAll(/<script([^>]*)>([\s\S]*?)<\/script>/g)];
+    expect(scripts).toHaveLength(1);
+    // Inline and without any attribute: no address to load from, no nonce.
+    expect(scripts[0]![1]).toBe("");
+    expect(scripts[0]![2]).toBe(APPROVAL_SCRIPT);
+    expect(res.headers.get("content-security-policy")).toBe(
+      `default-src 'none'; script-src 'sha256-${await sha256Base64(scripts[0]![2]!)}'; style-src 'unsafe-inline'; img-src 'self'; font-src 'self'; frame-ancestors 'none'; base-uri 'none'`,
+    );
+    expect(res.headers.get("content-security-policy")).not.toMatch(/script-src[^;]*(unsafe-inline|unsafe-eval|self|nonce-|https?:|\*)/);
+  });
+
+  it("is the same fixed script whatever the request holds", async () => {
+    const plain = renderApprovalPage({ lang: "en", ...base });
+    const policy = plain.headers.get("content-security-policy");
+    const tools = { replaced: null, others: [{ key: "a".repeat(32), name: `</script><script>x`, since: 1_800_000_000 }], rest: [] };
+    for (const res of [renderApprovalPage(hostile), renderApprovalPage({ ...hostile, lang: "en", tools })]) {
+      expect(res.headers.get("content-security-policy")).toBe(policy);
+      // Removing the page's own script leaves none: every hostile value stayed text.
+      expect(withoutItsScript(await res.text())).not.toMatch(/<script|<\/script/i);
+    }
+  });
+
+  it("cannot end its own element and reaches for nothing beyond the page", () => {
+    expect(APPROVAL_SCRIPT).not.toContain("<");
+    expect(APPROVAL_SCRIPT).not.toMatch(/https?:|fetch|XMLHttpRequest|sendBeacon|WebSocket|import|eval|Function\(/);
+    expect(APPROVAL_SCRIPT).not.toMatch(/innerHTML|outerHTML|insertAdjacent|document\.write|cookie|Storage|location/);
+    // Sentences are set as text, read from the status element's own attributes.
+    expect(APPROVAL_SCRIPT.match(/textContent=/g)).toEqual(Array(3).fill("textContent="));
+    expect(APPROVAL_SCRIPT.match(/textContent=(status\.getAttribute\(|"")/g)).toHaveLength(3);
+  });
+
+  it("locks the buttons without disabling them, so the decision is still posted", () => {
+    expect(APPROVAL_SCRIPT).toContain("if(sent){e.preventDefault();return}");
+    expect(APPROVAL_SCRIPT).toContain('setAttribute("aria-disabled","true")');
+    expect(APPROVAL_SCRIPT.replace(/aria-disabled/g, "")).not.toContain("disabled");
+    // A page that comes back from the browser's back/forward cache can be used again.
+    expect(APPROVAL_SCRIPT).toContain('addEventListener("pageshow"');
+    expect(APPROVAL_SCRIPT).toContain("if(!e.persisted)return");
+  });
+
+  it("has an empty status line after the form that carries the sentences in the page's language", async () => {
+    const status = (html: string) => /<\/form>\n<p class="status" id="status" role="status"([^>]*)><\/p>/.exec(html)?.[1];
+    const attributes = (html: string) =>
+      Object.fromEntries([...status(html)!.matchAll(/ (data-[a-z-]+)="([^"]*)"/g)].map((m) => [m[1]!, m[2]!]));
+    expect(attributes(await renderApprovalPage({ lang: "en", ...base }).text())).toEqual({
+      "data-allow": "Connecting. You will be sent back to your AI tool in a moment.",
+      "data-deny": "Declining. You will be sent back to your AI tool in a moment.",
+      "data-late-allow":
+        "This is taking longer than usual. If your AI tool already shows the connection, you can close this window.",
+      "data-late-deny": "This is taking longer than usual. You can close this window.",
+    });
+    const de = attributes(await renderApprovalPage(hostile).text());
+    expect(de).toEqual({
+      "data-allow": "Die Verbindung wird hergestellt. Gleich geht es zurück zu deinem KI-Werkzeug.",
+      "data-deny": "Die Anfrage wird abgelehnt. Gleich geht es zurück zu deinem KI-Werkzeug.",
+      "data-late-allow":
+        "Das dauert länger als üblich. Zeigt dein KI-Werkzeug die Verbindung schon an, kannst du dieses Fenster schließen.",
+      "data-late-deny": "Das dauert länger als üblich. Du kannst dieses Fenster schließen.",
+    });
+    // Every attribute the script reads exists, and it reads no other.
+    for (const kind of ["allow", "deny"]) for (const prefix of ["data-", "data-late-"]) expect(de).toHaveProperty(prefix + kind);
+    expect(APPROVAL_SCRIPT.match(/getAttribute\("[^"]*"/g)).toEqual(['getAttribute("data-"', 'getAttribute("data-late-"']);
+  });
+
+  it("styles the waiting state and stops the turning ring for reduced motion", async () => {
+    const html = await renderApprovalPage({ lang: "en", ...base }).text();
+    for (const className of ["busy", "sent"]) expect(APPROVAL_SCRIPT).toContain(`classList.add("${className}")`);
+    expect(html).toContain("form.busy button{pointer-events:none;cursor:default}");
+    expect(html).toContain("button.sent::before{");
+    expect(html).toMatch(/@media \(prefers-reduced-motion:reduce\)\{[^@]*button\.sent::before\{animation:none\}/);
+  });
+
+  it("is on the approval page only", async () => {
+    const others = [
+      renderMessagePage({ lang: "de", kind: "failed", status: 400 }),
+      renderMessagePage({ lang: "en", kind: "expired", status: 410 }),
+      renderIntroPage({ lang: "de", clientName: "Claude", redirectHost: "claude.ai", mailHost: "mail.test.example", continueUrl: "https://mail.test.example/login" }),
+    ];
+    for (const res of others) {
+      expect(res.headers.get("content-security-policy")).toBe(NO_SCRIPT_POLICY);
+      const html = await res.text();
+      expect(html).not.toMatch(/<script/i);
+      expect(html).not.toContain('id="status"');
+    }
   });
 });

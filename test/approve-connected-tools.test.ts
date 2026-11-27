@@ -6,6 +6,7 @@ import { env } from "cloudflare:workers";
 import type { GrantSummary } from "@cloudflare/workers-oauth-provider";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as oauthOptions from "../src/oauth/options";
+import { APPROVAL_SCRIPT } from "../src/oauth/approval-script";
 import { toolKey } from "../src/oauth/connected-tools";
 import { createFakeStalwart, type FakeStalwart } from "./fake-stalwart";
 import {
@@ -149,7 +150,8 @@ describe("the approval page lists the tools already connected", () => {
     // Three other tools (one of them with two grants), newest first, and the connecting tool's own.
     const names = [...form.matchAll(/<span class="name">([^<]*)<\/span> stays connected/g)].map((m) => m[1]);
     expect(names).toEqual(["Unnamed tool", "x".repeat(100), "&lt;script&gt;alert(1)&lt;/script&gt;"]);
-    expect(en).not.toContain("<script>");
+    // The page's own script aside, there is none: the tool's name stayed text.
+    expect(en.replace(`<script>${APPROVAL_SCRIPT}</script>`, "")).not.toContain("<script>");
     expect(en).not.toContain("x".repeat(101));
     expect(form).toContain("Connected since 3 March 2026");
     expect(form).toContain("Connected since 20 June 2026");

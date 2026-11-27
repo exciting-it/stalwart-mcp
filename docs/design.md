@@ -112,6 +112,24 @@ AI tool ◄──(5) on Allow: the worker's own access/refresh token
     as shown and not as kept, each with `revokeGrant(id, accountId)`. A forged key matches
     nothing, a key of another account or another handle cannot match, and a grant created
     after the page was rendered was not shown and stays.
+- After Allow or Deny the browser stays on the page until the AI tool's own address has
+  answered the redirect, which takes seconds. The page therefore runs one script, the only one
+  on any of the worker's pages (`src/oauth/approval-script.ts`): the pressed button shows a
+  turning ring, a line below says what is happening, and a further click is not sent. After
+  twelve seconds the ring stops and the line says that this takes longer than usual, for a
+  tool the redirect opens without loading a page, which leaves the approval page standing.
+  - Why a second click matters: the handle works once. A second POST is refused, and since the
+    browser shows the answer to its last request, the user would end on the error page although
+    the first click created the grant, and the AI tool would never receive its code.
+  - Why a script: nothing else can tell that a form was sent. Styles alone cannot, and an
+    answer from the worker comes only when the wait is nearly over.
+  - Why this is no opening: the script is a fixed text that no request value reaches. The
+    page's policy names it by the SHA-256 hash of that text (`script-src 'sha256-...'`, computed
+    from the same constant) and allows no other script, inline or loaded, so text that escaped
+    the escaping still could not run. It reads its sentences from attributes of the page and
+    sets them as text. Without script the page works as before.
+  - The buttons are locked by a flag and by style, never by `disabled`: a disabled button's
+    value is not submitted, and the worker needs the decision.
 - The Stalwart tokens from step 3 go to the mailbox vault whether the user then allows or
   denies: the code exchange may supersede the refresh token the vault already holds for other
   connected tools, so dropping the new one would cut those off. Deny only means the new tool

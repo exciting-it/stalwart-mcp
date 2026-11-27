@@ -353,8 +353,11 @@ The pages a user sees in the browser (the approval page and its error pages) tak
 from `src/oauth/theme.ts` and the files in `public/brand/`: wordmark, colours, two fonts, an
 icon and the artwork on the right half of wide screens. Both carry exciting IT's branding as
 shipped; change the values and replace the files for your own deployment. The fonts are under
-the SIL Open Font License (texts next to the files). The pages run no script and load nothing
-from another origin, which their Content-Security-Policy enforces.
+the SIL Open Font License (texts next to the files). The pages load nothing from another
+origin, and only the approval page runs a script: one fixed text
+(`src/oauth/approval-script.ts`) that shows, after Allow or Deny, that the decision was taken
+and keeps a second click from being sent. Their Content-Security-Policy enforces both: it names
+that script by its hash and allows no other.
 
 The same mark is there as a PNG (`public/brand/icon.png`) and as `public/favicon.ico`. The
 server names the PNG as the connector's icon to AI tools, and its address

@@ -96,8 +96,18 @@ const HTML_HEADERS = {
   "cache-control": "no-store",
   "referrer-policy": "no-referrer",
 };
-function expectHtmlHeaders(res: Response): void {
-  for (const [name, value] of Object.entries(HTML_HEADERS)) expect(res.headers.get(name)).toBe(value);
+/**
+ * The approval page alone may run a script, and only its own: its policy names that one text by
+ * its hash (test/approval-page.test.ts checks the hash against the page) and is otherwise the same.
+ */
+function expectHtmlHeaders(res: Response, page: "plain" | "approval" = "plain"): void {
+  for (const [name, value] of Object.entries(HTML_HEADERS)) {
+    const got = res.headers.get(name);
+    if (page === "approval" && name === "content-security-policy") {
+      expect(got).toMatch(/^default-src 'none'; script-src 'sha256-[A-Za-z0-9+/]{43}='; style-src /);
+      expect(got!.replace(/ script-src 'sha256-[^']+';/, "")).toBe(value);
+    } else expect(got).toBe(value);
+  }
 }
 
 describe("sign-in through Stalwart", () => {
@@ -309,7 +319,7 @@ describe("sign-in through Stalwart", () => {
     const { flow, handle } = await atApproval(A, { clientName: "Viewer" });
     const res = await send(`/approve?h=${encodeURIComponent(handle)}&decision=allow`, { jar: flow.jar, ip: flow.ip });
     expect(res.status).toBe(200);
-    expectHtmlHeaders(res);
+    expectHtmlHeaders(res, "approval");
     const html = await res.text();
     expect(html).toContain("Viewer");
     expect(html).toContain(A);
